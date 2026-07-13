@@ -22,6 +22,7 @@ from llmgen.router import (
     query_code_path_metrics,
     query_retrieval_metrics,
     rank_bucket_candidates,
+    render_router_prompt,
     validate_registry_assignments,
 )
 
@@ -245,3 +246,23 @@ def test_target_only_encoding_masks_the_entire_prompt() -> None:
     assert encoded["labels"][-3:] == [10, 20, 2]
     assert set(encoded["labels"][:-3]) == {-100}
     assert len(encoded["attention_mask"]) == len(encoded["input_ids"])
+
+
+def test_qwen3_style_chat_template_disables_thinking() -> None:
+    class ChatTokenizer:
+        chat_template = "{{ messages }}"
+
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.kwargs = kwargs
+            return "rendered"
+
+    tokenizer = ChatTokenizer()
+    assert render_router_prompt(tokenizer, "find a skill", "route") == "rendered"
+    assert tokenizer.kwargs == {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }

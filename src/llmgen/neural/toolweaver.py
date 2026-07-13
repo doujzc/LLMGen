@@ -45,7 +45,7 @@ _VENDORED_FILES = {
 }
 _VENDORED_HASHES = {
     "index/models/layers.py": "51aaec170b61bfa8c4a5952f93e4cb2f86bd51122a6055e8290d0008a75335aa",
-    "index/models/vq.py": "54f3b9c4975ed46d551a715af6ec87177ed8012af17402efa2ee7da23437cfa6",
+    "index/models/vq.py": "731800f93e811105c598928b46a7cd031e62b952670d21706dd94a6407f7dab1",
     "index/models/rq.py": "3b037aa3c785e5e8f9e69ce0618bd65ac9c5d90987a24da2217c112dd08f8d67",
     "index/models/rqvae.py": "127bf96829a6d018e6fdbb86b354d4258fe266050128f34e143b6696219470f3",
 }

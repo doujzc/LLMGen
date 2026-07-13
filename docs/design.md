@@ -268,8 +268,11 @@ manifest 保存每个 prefix 的 `index -> label`，因此可以把模型 code �
 name | description | skill_md
 ```
 
-Sentence Transformer 离线生成归一化向量。协同信号不拼接成另一个 embedding，
-而是由 train qrels 直接构造图。设 `C_uv` 是 skill `u,v` 同为一个 query
+默认由独立部署的 `Qwen/Qwen3-Embedding-8B` 通过 OpenAI-compatible
+`/v1/embeddings` 离线生成向量，客户端校验响应顺序并做 L2 归一化；本地
+Sentence Transformer 后端仅作为兼容与 smoke 路径。embedding 模型不参加
+RQ-VAE 反向传播。协同信号不拼接成另一个 embedding，而是由 train qrels
+直接构造图。设 `C_uv` 是 skill `u,v` 同为一个 query
 正例的次数，`C_uu` 是 `u` 出现的 query 数：
 
 ```text
@@ -412,6 +415,9 @@ test active trie    -> fixed-L constrained beam -> skill candidates
 ```
 
 Stage 1 只拟合 train skill；test skill 模拟新增目录项，由冻结 encoder/codebook 编码。
+Stage 2 默认使用 `Qwen/Qwen3-1.7B`，也接受其它 Hugging Face
+`AutoModelForCausalLM` 兼容的 Qwen3 模型，并支持 LoRA 或全参数训练。Qwen3
+chat template 的 thinking 模式固定关闭，保证 assistant 起始位置直接监督 code。
 Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrieval。prompt
 部分 label 设为 `-100`，只对恰好 `L` 个 code token 与 EOS 计算 loss。多正例 query
 按不同 code path 展开为多条样本，而不是生成一个很长的 code 列表。
@@ -469,10 +475,12 @@ Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrie
 - 可解释 taxonomy tokenizer；
 - NumPy 多级残差 centroid 参考后端；
 - 内置固定版本的 ToolWeaver RQ-VAE，提供完整神经 Stage 1；
-- SkillRet 固定 revision 下载、严格校验、语义 embedding 与 train-only 协同图；
+- SkillRet 固定 revision 下载、严格校验、OpenAI-compatible 语义 embedding 与
+  train-only 协同图；
 - edge-aware 图训练、AMP、scheduler、完整 checkpoint/resume 和量化指标；
 - train/test 固定长度 code、完整 special-token namespace 与 collision buckets；
-- causal LLM 的 memorization/retrieval 两阶段 SFT，支持 full、LoRA 和 DeepSpeed；
+- Qwen3 causal LLM 的 memorization/retrieval 两阶段 SFT，支持 full、LoRA 和
+  DeepSpeed；
 - active-trie constrained beam 推理及 NDCG/Recall/MAP/MRR/Completeness；
 - 不依赖 bucket 内任意 tie-break 的 code recall 与 bucket-expanded recall；
 - skill 动态 add/remove；

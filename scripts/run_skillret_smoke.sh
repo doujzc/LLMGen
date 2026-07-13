@@ -12,6 +12,7 @@ if [[ "${SKIP_DOWNLOAD:-0}" != "1" ]]; then
 fi
 "$PYTHON" scripts/prepare_skillret.py \
   --processed-dir "$OUT/processed" --embedding-dir "$OUT/embeddings" \
+  --embedding-provider sentence-transformers \
   --embedding-model sentence-transformers/all-MiniLM-L6-v2 \
   --device cpu --batch-size 8 --max-train-skills 32 --max-test-skills 16 \
   --max-skill-chars 2048

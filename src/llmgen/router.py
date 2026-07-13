@@ -631,7 +631,16 @@ def render_router_prompt(tokenizer: Any, input_text: str, system_prompt: str = "
     chat_template = getattr(tokenizer, "chat_template", None)
     apply_template = getattr(tokenizer, "apply_chat_template", None)
     if chat_template and callable(apply_template):
-        return apply_template(messages, tokenize=False, add_generation_prompt=True)
+        # Qwen3 enables a thinking prefix by default. The router is supervised
+        # and constrained to emit a code token immediately, so reasoning text is
+        # intentionally disabled. Other Hugging Face templates ignore this
+        # template variable when it is not used.
+        return apply_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
     system = f"System: {system_prompt.strip()}\n" if system_prompt else ""
     return f"{system}User: {input_text.strip()}\nAssistant:"
 

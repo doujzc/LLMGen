@@ -11,24 +11,35 @@ NUM_LEVELS="${NUM_LEVELS:-3}"
 BRANCHING_FACTORS="${BRANCHING_FACTORS:-64 64 64}"
 SK_EPSILONS="${SK_EPSILONS:-0 0 0.01}"
 RQ_LAYERS="${RQ_LAYERS:-512 256 128}"
-EMBEDDING_MODEL="${EMBEDDING_MODEL:-ThakiCloud/SkillRet-Embedding-0.6B}"
-EMBEDDING_REVISION="${EMBEDDING_REVISION:-}"
-if [[ -z "$EMBEDDING_REVISION" && "$EMBEDDING_MODEL" == "ThakiCloud/SkillRet-Embedding-0.6B" ]]; then
-  EMBEDDING_REVISION="0e10886e80a0aacc9efddc28282a258e2ab7eae1"
+EMBEDDING_MODEL="${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}"
+EMBEDDING_BASE_URL="${EMBEDDING_BASE_URL:-${OPENAI_BASE_URL:-http://127.0.0.1:8000/v1}}"
+EMBEDDING_BATCH_SIZE="${EMBEDDING_BATCH_SIZE:-8}"
+EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-}"
+EMBEDDING_DIMENSION_ARGS=()
+if [[ -n "$EMBEDDING_DIMENSIONS" ]]; then
+  EMBEDDING_DIMENSION_ARGS=(--embedding-dimensions "$EMBEDDING_DIMENSIONS")
 fi
-EMBEDDING_REVISION_ARGS=()
-if [[ -n "$EMBEDDING_REVISION" ]]; then
-  EMBEDDING_REVISION_ARGS=(--embedding-revision "$EMBEDDING_REVISION")
-fi
-ROUTER_MODEL="${ROUTER_MODEL:-Qwen/Qwen2.5-0.5B-Instruct}"
-ROUTER_EXTRA_ARGS="${ROUTER_EXTRA_ARGS:---bf16 --gradient-checkpointing --lora}"
+ROUTER_MODEL="${ROUTER_MODEL:-Qwen/Qwen3-1.7B}"
+ROUTER_FINETUNE_MODE="${ROUTER_FINETUNE_MODE:-lora}"
+case "$ROUTER_FINETUNE_MODE" in
+  lora) ROUTER_FINETUNE_ARGS=(--lora) ;;
+  full) ROUTER_FINETUNE_ARGS=() ;;
+  *)
+    echo "ROUTER_FINETUNE_MODE must be 'lora' or 'full'" >&2
+    exit 2
+    ;;
+esac
+ROUTER_EXTRA_ARGS="${ROUTER_EXTRA_ARGS:---bf16 --gradient-checkpointing}"
 
 if [[ "${SKIP_DOWNLOAD:-0}" != "1" ]]; then
   "$PYTHON" scripts/download_skillret.py
 fi
 "$PYTHON" scripts/prepare_skillret.py \
-  --embedding-model "$EMBEDDING_MODEL" "${EMBEDDING_REVISION_ARGS[@]}" \
-  --batch-size 1 --device "$DEVICE"
+  --embedding-provider openai \
+  --embedding-model "$EMBEDDING_MODEL" \
+  --embedding-base-url "$EMBEDDING_BASE_URL" \
+  "${EMBEDDING_DIMENSION_ARGS[@]}" \
+  --batch-size "$EMBEDDING_BATCH_SIZE"
 
 # Word splitting is intentional for the configurable per-level lists.
 # shellcheck disable=SC2086
@@ -52,7 +63,7 @@ fi
   --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
   --output-dir "$RUN_DIR/router_data"
 
-# Set ROUTER_EXTRA_ARGS="--bf16 --gradient-checkpointing" for full-parameter SFT.
+# ROUTER_FINETUNE_MODE selects LoRA or full-parameter SFT.
 # shellcheck disable=SC2086
 "$PYTHON" scripts/train_router.py \
   --model-name-or-path "$ROUTER_MODEL" \
@@ -64,7 +75,8 @@ fi
   --retrieval-validation "$RUN_DIR/router_data/retrieval_validation.jsonl" \
   --max-length 1024 --per-device-train-batch-size 2 \
   --gradient-accumulation-steps 16 \
-  --memorization-epochs 1 --retrieval-epochs 3 $ROUTER_EXTRA_ARGS
+  --memorization-epochs 1 --retrieval-epochs 3 \
+  "${ROUTER_FINETUNE_ARGS[@]}" $ROUTER_EXTRA_ARGS
 
 "$PYTHON" scripts/infer_router.py \
   --model-name-or-path "$RUN_DIR/router/retrieval" \

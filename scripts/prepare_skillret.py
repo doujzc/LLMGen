@@ -6,11 +6,18 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from llmgen.embeddings import (
+    DEFAULT_OPENAI_BASE_URL,
+    DEFAULT_OPENAI_EMBEDDING_MODEL,
+    OpenAIEmbeddingConfig,
+    OpenAIEmbeddingModel,
+)
 from llmgen.skillret import (
     SKILLRET_REPO_ID,
     SKILLRET_REVISION,
@@ -35,7 +42,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", type=Path, default=Path("data/skillret"))
     parser.add_argument("--processed-dir", type=Path, default=Path("data/skillret/processed"))
     parser.add_argument("--embedding-dir", type=Path, default=Path("data/skillret/embeddings"))
-    parser.add_argument("--embedding-model", default=SKILLRET_EMBEDDING_MODEL)
+    parser.add_argument(
+        "--embedding-provider",
+        choices=("openai", "sentence-transformers"),
+        default="openai",
+    )
+    parser.add_argument("--embedding-model", default=DEFAULT_OPENAI_EMBEDDING_MODEL)
+    parser.add_argument(
+        "--embedding-base-url",
+        default=os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL),
+        help="OpenAI-compatible base URL ending in /v1.",
+    )
+    parser.add_argument("--embedding-dimensions", type=int, default=None)
+    parser.add_argument("--embedding-timeout", type=float, default=600.0)
+    parser.add_argument("--embedding-max-retries", type=int, default=5)
     parser.add_argument("--embedding-revision", default=None)
     parser.add_argument("--embedding-max-seq-length", type=int, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -225,6 +245,20 @@ def main() -> None:
     args = parse_args()
     if args.batch_size < 1:
         raise ValueError("--batch-size must be positive")
+    if args.embedding_dimensions is not None and args.embedding_dimensions < 1:
+        raise ValueError("--embedding-dimensions must be positive")
+    if args.embedding_provider == "openai" and any(
+        value is not None
+        for value in (args.embedding_revision, args.embedding_max_seq_length)
+    ):
+        raise ValueError(
+            "--embedding-revision and --embedding-max-seq-length apply only to "
+            "the sentence-transformers provider; configure these on the API server"
+        )
+    if args.embedding_provider == "sentence-transformers" and args.embedding_dimensions:
+        raise ValueError(
+            "--embedding-dimensions applies only to the OpenAI embedding provider"
+        )
     args.dataset_dir = args.dataset_dir.expanduser().resolve()
     args.processed_dir = args.processed_dir.expanduser().resolve()
     args.embedding_dir = args.embedding_dir.expanduser().resolve()
@@ -253,44 +287,67 @@ def main() -> None:
 
     embedding_manifest: dict[str, Any] | None = None
     if not args.skip_embeddings:
-        from sentence_transformers import SentenceTransformer
-
-        requested_revision = args.embedding_revision
-        if args.embedding_model == SKILLRET_EMBEDDING_MODEL and requested_revision is None:
-            requested_revision = SKILLRET_EMBEDDING_REVISION
-        model = SentenceTransformer(
-            args.embedding_model,
-            device=args.device,
-            revision=requested_revision,
-            trust_remote_code=args.trust_remote_code,
-        )
-        if args.embedding_max_seq_length is not None:
-            if args.embedding_max_seq_length < 1:
-                raise ValueError("--embedding-max-seq-length must be positive")
-            model.max_seq_length = args.embedding_max_seq_length
+        requested_revision = None
         resolved_revision = None
-        for module in model.modules():
-            config = getattr(getattr(module, "auto_model", None), "config", None)
-            resolved_revision = getattr(config, "_commit_hash", None)
-            if resolved_revision:
-                break
+        if args.embedding_provider == "openai":
+            model = OpenAIEmbeddingModel(
+                OpenAIEmbeddingConfig(
+                    model=args.embedding_model,
+                    base_url=args.embedding_base_url,
+                    api_key=os.environ.get("OPENAI_API_KEY") or "EMPTY",
+                    dimensions=args.embedding_dimensions,
+                    timeout=args.embedding_timeout,
+                    max_retries=args.embedding_max_retries,
+                )
+            )
+        else:
+            from sentence_transformers import SentenceTransformer
+
+            requested_revision = args.embedding_revision
+            if args.embedding_model == SKILLRET_EMBEDDING_MODEL and requested_revision is None:
+                requested_revision = SKILLRET_EMBEDDING_REVISION
+            model = SentenceTransformer(
+                args.embedding_model,
+                device=args.device,
+                revision=requested_revision,
+                trust_remote_code=args.trust_remote_code,
+            )
+            if args.embedding_max_seq_length is not None:
+                if args.embedding_max_seq_length < 1:
+                    raise ValueError("--embedding-max-seq-length must be positive")
+                model.max_seq_length = args.embedding_max_seq_length
+            for module in model.modules():
+                config = getattr(getattr(module, "auto_model", None), "config", None)
+                resolved_revision = getattr(config, "_commit_hash", None)
+                if resolved_revision:
+                    break
         shapes: dict[str, list[int]] = {}
         hashes: dict[str, str] = {}
         truncation: dict[str, Any] = {}
-        for split, details in (("train", train), ("test", test)):
-            ids, shape, token_statistics = _embed_catalog(
-                Path(details["files"]["catalog"]),
-                args.embedding_dir / f"{split}.npy",
-                model=model,
-                batch_size=args.batch_size,
-            )
-            if ids != details["skill_ids"]:
-                raise RuntimeError(f"{split} embedding order changed")
-            shapes[split] = list(shape)
-            hashes[split] = sha256_file(args.embedding_dir / f"{split}.npy")
-            truncation[split] = token_statistics
+        try:
+            for split, details in (("train", train), ("test", test)):
+                ids, shape, token_statistics = _embed_catalog(
+                    Path(details["files"]["catalog"]),
+                    args.embedding_dir / f"{split}.npy",
+                    model=model,
+                    batch_size=args.batch_size,
+                )
+                if ids != details["skill_ids"]:
+                    raise RuntimeError(f"{split} embedding order changed")
+                shapes[split] = list(shape)
+                hashes[split] = sha256_file(args.embedding_dir / f"{split}.npy")
+                truncation[split] = token_statistics
+        finally:
+            close = getattr(model, "close", None)
+            if callable(close):
+                close()
         embedding_manifest = {
+            "provider": args.embedding_provider,
             "model": args.embedding_model,
+            "base_url": (
+                args.embedding_base_url if args.embedding_provider == "openai" else None
+            ),
+            "requested_dimensions": args.embedding_dimensions,
             "requested_revision": requested_revision,
             "resolved_revision": resolved_revision,
             "normalized": True,

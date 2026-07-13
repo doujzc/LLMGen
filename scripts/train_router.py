@@ -193,15 +193,24 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
                 "LoRA must checkpoint the resized input/output embeddings; "
                 "set --lora-modules-to-save explicitly for this architecture"
             )
-        config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
-            r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            lora_dropout=args.lora_dropout,
-            target_modules=_csv(args.lora_target_modules),
-            modules_to_save=modules_to_save,
-            bias="none",
-        )
+        lora_kwargs: dict[str, Any] = {
+            "task_type": TaskType.CAUSAL_LM,
+            "r": args.lora_r,
+            "lora_alpha": args.lora_alpha,
+            "lora_dropout": args.lora_dropout,
+            "target_modules": _csv(args.lora_target_modules),
+            "modules_to_save": modules_to_save,
+            "bias": "none",
+        }
+        # Some Qwen3 models tie input and output embeddings. Newer PEFT
+        # versions can preserve that contract explicitly when both resized
+        # modules are stored in the adapter; retain compatibility with older
+        # supported PEFT releases that do not expose this argument.
+        if "ensure_weight_tying" in inspect.signature(LoraConfig).parameters:
+            lora_kwargs["ensure_weight_tying"] = bool(
+                getattr(model.config, "tie_word_embeddings", False)
+            )
+        config = LoraConfig(**lora_kwargs)
         model = get_peft_model(model, config)
         model.print_trainable_parameters()
 
@@ -395,6 +404,13 @@ def _run_phase(
         "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
         "base_model": args.model_name_or_path,
         "base_model_revision": getattr(model.config, "_commit_hash", None),
+        "finetune_mode": (
+            "continued_adapter"
+            if args.adapter_name_or_path
+            else "lora"
+            if args.lora
+            else "full"
+        ),
         "system_prompt": system_prompt,
         "max_length": args.max_length,
         "examples": {
