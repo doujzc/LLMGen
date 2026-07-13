@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Train a causal-LM skill router in memorization and/or retrieval phases.
+
+Heavy dependencies are imported only inside ``main`` so the repository's core
+data and metric tests remain runnable without a GPU training environment.
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import json
+from pathlib import Path
+from typing import Any
+
+from llmgen.router import (
+    RouterDataError,
+    code_token_id_map,
+    encode_target_only_example,
+    load_virtual_tokens,
+    read_jsonl,
+)
+from llmgen.skillret import sha256_file
+
+
+MEMORIZATION_SYSTEM_PROMPT = (
+    "Map the Agent Skill document to its fixed-length hierarchical skill code. "
+    "Answer with code tokens only."
+)
+RETRIEVAL_SYSTEM_PROMPT = (
+    "Select the Agent Skill code that best matches the user request. "
+    "Answer with code tokens only."
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the generative skill router.")
+    parser.add_argument("--model-name-or-path", required=True)
+    parser.add_argument("--virtual-tokens", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--stage",
+        choices=("memorization", "retrieval", "both"),
+        default="both",
+    )
+    parser.add_argument("--memorization-train")
+    parser.add_argument("--memorization-validation")
+    parser.add_argument("--retrieval-train")
+    parser.add_argument("--retrieval-validation")
+    parser.add_argument("--num-levels", type=int, required=True)
+    parser.add_argument("--max-length", type=int, default=1024)
+    parser.add_argument("--memorization-system-prompt", default=MEMORIZATION_SYSTEM_PROMPT)
+    parser.add_argument("--retrieval-system-prompt", default=RETRIEVAL_SYSTEM_PROMPT)
+
+    parser.add_argument("--per-device-train-batch-size", type=int, default=2)
+    parser.add_argument("--per-device-eval-batch-size", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
+    parser.add_argument("--memorization-epochs", type=float, default=1.0)
+    parser.add_argument("--retrieval-epochs", type=float, default=3.0)
+    parser.add_argument("--memorization-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--retrieval-learning-rate", type=float, default=2e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
+    parser.add_argument("--warmup-ratio", type=float, default=0.03)
+    parser.add_argument("--logging-steps", type=int, default=10)
+    parser.add_argument("--save-steps", type=int, default=500)
+    parser.add_argument("--eval-steps", type=int, default=500)
+    parser.add_argument("--save-total-limit", type=int, default=2)
+    parser.add_argument("--dataloader-num-workers", type=int, default=0)
+    parser.add_argument("--deepspeed", help="Optional DeepSpeed JSON config.")
+    parser.add_argument("--local-rank", "--local_rank", type=int, default=-1)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--resume-memorization-from-checkpoint")
+    parser.add_argument("--resume-retrieval-from-checkpoint")
+
+    parser.add_argument("--lora", action="store_true")
+    parser.add_argument("--adapter-name-or-path")
+    parser.add_argument("--lora-r", type=int, default=16)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--lora-target-modules",
+        default="q_proj,k_proj,v_proj,o_proj",
+        help="Comma-separated module suffixes.",
+    )
+    parser.add_argument(
+        "--lora-modules-to-save",
+        default="auto",
+        help=(
+            "Comma-separated full modules saved with the adapter. 'auto' keeps "
+            "the resized input/output embeddings trainable and checkpointed."
+        ),
+    )
+    return parser.parse_args()
+
+
+def _csv(value: str) -> list[str]:
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _resume_value(value: str | None) -> str | bool | None:
+    if value is None:
+        return None
+    return True if value.lower() in {"latest", "true"} else value
+
+
+def _module_name_for(model: Any, target: Any) -> str | None:
+    for name, module in model.named_modules():
+        if module is target:
+            return name.rsplit(".", 1)[-1]
+    return None
+
+
+def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ...]):
+    try:
+        import torch
+        import transformers
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as exc:  # pragma: no cover - exercised in real training env
+        raise SystemExit(
+            "Training requires torch and transformers. Install the project's "
+            "training dependencies first."
+        ) from exc
+
+    tokenizer_source = args.adapter_name_or_path or args.model_name_or_path
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            trust_remote_code=args.trust_remote_code,
+        )
+    except (OSError, ValueError):
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path,
+            trust_remote_code=args.trust_remote_code,
+        )
+    if tokenizer.eos_token_id is None:
+        raise RouterDataError("base tokenizer must define an EOS token")
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    existing_special = list(getattr(tokenizer, "additional_special_tokens", ()))
+    tokenizer.add_special_tokens(
+        {
+            "additional_special_tokens": existing_special
+            + [token for token in virtual_tokens if token not in existing_special]
+        }
+    )
+    token_ids = code_token_id_map(tokenizer, virtual_tokens)
+
+    model_kwargs: dict[str, Any] = {
+        "trust_remote_code": args.trust_remote_code,
+    }
+    if args.bf16:
+        model_kwargs["torch_dtype"] = torch.bfloat16
+    elif args.fp16:
+        model_kwargs["torch_dtype"] = torch.float16
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model_name_or_path,
+        **model_kwargs,
+    )
+    model.resize_token_embeddings(len(tokenizer))
+    if args.gradient_checkpointing:
+        model.config.use_cache = False
+
+    if args.adapter_name_or_path:
+        try:
+            from peft import PeftModel
+        except ImportError as exc:  # pragma: no cover
+            raise SystemExit("Loading an adapter requires the peft package.") from exc
+        model = PeftModel.from_pretrained(
+            model,
+            args.adapter_name_or_path,
+            is_trainable=True,
+        )
+    elif args.lora:
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model
+        except ImportError as exc:  # pragma: no cover
+            raise SystemExit("--lora requires the peft package.") from exc
+
+        if args.lora_modules_to_save == "auto":
+            modules_to_save = []
+            for target in (model.get_input_embeddings(), model.get_output_embeddings()):
+                name = _module_name_for(model, target)
+                if name and name not in modules_to_save:
+                    modules_to_save.append(name)
+        else:
+            modules_to_save = _csv(args.lora_modules_to_save)
+        if not modules_to_save:
+            raise RouterDataError(
+                "LoRA must checkpoint the resized input/output embeddings; "
+                "set --lora-modules-to-save explicitly for this architecture"
+            )
+        config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            target_modules=_csv(args.lora_target_modules),
+            modules_to_save=modules_to_save,
+            bias="none",
+        )
+        model = get_peft_model(model, config)
+        model.print_trainable_parameters()
+
+    return torch, transformers, tokenizer, model, token_ids
+
+
+def _dataset_class(torch: Any):
+    class RouterDataset(torch.utils.data.Dataset):
+        def __init__(
+            self,
+            rows: list[dict[str, Any]],
+            tokenizer: Any,
+            token_ids: dict[str, int],
+            *,
+            num_levels: int,
+            max_length: int,
+            system_prompt: str,
+        ) -> None:
+            self.rows = rows
+            self.tokenizer = tokenizer
+            self.token_ids = token_ids
+            self.num_levels = num_levels
+            self.max_length = max_length
+            self.system_prompt = system_prompt
+
+        def __len__(self) -> int:
+            return len(self.rows)
+
+        def __getitem__(self, index: int) -> dict[str, list[int]]:
+            return encode_target_only_example(
+                self.tokenizer,
+                self.rows[index],
+                code_token_ids=self.token_ids,
+                num_levels=self.num_levels,
+                max_length=self.max_length,
+                system_prompt=self.system_prompt,
+            )
+
+    return RouterDataset
+
+
+def _collator(torch: Any, pad_token_id: int):
+    def collate(features: list[dict[str, list[int]]]) -> dict[str, Any]:
+        max_length = max(len(row["input_ids"]) for row in features)
+        input_ids = []
+        attention_mask = []
+        labels = []
+        for row in features:
+            padding = max_length - len(row["input_ids"])
+            input_ids.append(row["input_ids"] + [pad_token_id] * padding)
+            attention_mask.append(row["attention_mask"] + [0] * padding)
+            labels.append(row["labels"] + [-100] * padding)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+
+    return collate
+
+
+def _require_phase_path(path: str | None, phase: str) -> str:
+    if not path:
+        raise RouterDataError(f"--{phase}-train is required for stage {phase!r}")
+    return path
+
+
+def _run_phase(
+    *,
+    phase: str,
+    train_path: str,
+    validation_path: str | None,
+    system_prompt: str,
+    epochs: float,
+    learning_rate: float,
+    resume_from_checkpoint: str | bool | None,
+    args: argparse.Namespace,
+    torch: Any,
+    transformers: Any,
+    tokenizer: Any,
+    model: Any,
+    token_ids: dict[str, int],
+) -> None:
+    train_rows = read_jsonl(train_path)
+    if not train_rows:
+        raise RouterDataError(f"{phase} training data is empty")
+    validation_rows = read_jsonl(validation_path) if validation_path else []
+    Dataset = _dataset_class(torch)
+    train_dataset = Dataset(
+        train_rows,
+        tokenizer,
+        token_ids,
+        num_levels=args.num_levels,
+        max_length=args.max_length,
+        system_prompt=system_prompt,
+    )
+    validation_dataset = (
+        Dataset(
+            validation_rows,
+            tokenizer,
+            token_ids,
+            num_levels=args.num_levels,
+            max_length=args.max_length,
+            system_prompt=system_prompt,
+        )
+        if validation_rows
+        else None
+    )
+
+    phase_dir = Path(args.output_dir) / phase
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    training_kwargs = {
+        "output_dir": str(phase_dir),
+        "overwrite_output_dir": resume_from_checkpoint is None,
+        "num_train_epochs": epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": learning_rate,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_strategy": "steps",
+        "load_best_model_at_end": validation_dataset is not None,
+        "metric_for_best_model": "eval_loss" if validation_dataset is not None else None,
+        "greater_is_better": False if validation_dataset is not None else None,
+        "save_total_limit": args.save_total_limit,
+        "bf16": args.bf16,
+        "fp16": args.fp16,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "dataloader_num_workers": args.dataloader_num_workers,
+        "deepspeed": args.deepspeed,
+        "local_rank": args.local_rank,
+        "remove_unused_columns": False,
+        "report_to": [],
+        "seed": args.seed,
+        "data_seed": args.seed,
+    }
+    # Transformers 4.x and 5.x differ on two TrainingArguments names. Keep the
+    # complete training path runnable across both supported major versions.
+    parameters = inspect.signature(transformers.TrainingArguments.__init__).parameters
+    evaluation_key = "eval_strategy" if "eval_strategy" in parameters else "evaluation_strategy"
+    training_kwargs[evaluation_key] = "steps" if validation_dataset is not None else "no"
+    training_kwargs = {
+        key: value for key, value in training_kwargs.items() if key in parameters
+    }
+    training_args = transformers.TrainingArguments(**training_kwargs)
+    trainer = transformers.Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=validation_dataset,
+        data_collator=_collator(torch, int(tokenizer.pad_token_id)),
+    )
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    trainer.save_model(str(phase_dir))
+    tokenizer.save_pretrained(str(phase_dir))
+    router_data_manifest_path = Path(train_path).resolve().parent / "manifest.json"
+    router_data_manifest_sha256 = None
+    stage1_checkpoint_sha256 = None
+    index_manifest_sha256 = None
+    if router_data_manifest_path.is_file():
+        router_data_manifest_sha256 = sha256_file(router_data_manifest_path)
+        router_data_manifest = json.loads(
+            router_data_manifest_path.read_text(encoding="utf-8")
+        )
+        index_source = router_data_manifest.get("sources", {}).get(
+            "index_manifest"
+        )
+        if isinstance(index_source, dict):
+            stage1_checkpoint_sha256 = index_source.get("checkpoint_sha256")
+            index_manifest_sha256 = index_source.get("sha256")
+    state = {
+        "schema_version": 1,
+        "phase": phase,
+        "num_levels": args.num_levels,
+        "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
+        "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
+        "train_data": str(Path(train_path).resolve()),
+        "train_data_sha256": sha256_file(train_path),
+        "validation_data": (
+            str(Path(validation_path).resolve()) if validation_path else None
+        ),
+        "validation_data_sha256": (
+            sha256_file(validation_path) if validation_path else None
+        ),
+        "router_data_manifest_sha256": router_data_manifest_sha256,
+        "index_manifest_sha256": index_manifest_sha256,
+        "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
+        "base_model": args.model_name_or_path,
+        "base_model_revision": getattr(model.config, "_commit_hash", None),
+        "system_prompt": system_prompt,
+        "max_length": args.max_length,
+        "examples": {
+            "train": len(train_rows),
+            "validation": len(validation_rows),
+        },
+    }
+    with (phase_dir / "router_manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def main() -> None:
+    args = parse_args()
+    if args.bf16 and args.fp16:
+        raise RouterDataError("--bf16 and --fp16 are mutually exclusive")
+    if args.num_levels < 1 or args.max_length <= args.num_levels + 1:
+        raise RouterDataError("invalid num_levels/max_length combination")
+    if args.eval_steps < 1 or args.save_steps < 1:
+        raise RouterDataError("save_steps and eval_steps must be positive")
+    if args.save_steps % args.eval_steps:
+        raise RouterDataError(
+            "save_steps must be a multiple of eval_steps when validation is enabled"
+        )
+    if args.adapter_name_or_path and args.lora:
+        raise RouterDataError("use either --adapter-name-or-path or --lora, not both")
+
+    virtual_tokens = load_virtual_tokens(args.virtual_tokens)
+    torch, transformers, tokenizer, model, token_ids = _load_training_stack(
+        args, virtual_tokens
+    )
+
+    if args.stage in {"memorization", "both"}:
+        _run_phase(
+            phase="memorization",
+            train_path=_require_phase_path(
+                args.memorization_train, "memorization"
+            ),
+            validation_path=args.memorization_validation,
+            system_prompt=args.memorization_system_prompt,
+            epochs=args.memorization_epochs,
+            learning_rate=args.memorization_learning_rate,
+            resume_from_checkpoint=_resume_value(
+                args.resume_memorization_from_checkpoint
+            ),
+            args=args,
+            torch=torch,
+            transformers=transformers,
+            tokenizer=tokenizer,
+            model=model,
+            token_ids=token_ids,
+        )
+
+    if args.stage in {"retrieval", "both"}:
+        _run_phase(
+            phase="retrieval",
+            train_path=_require_phase_path(args.retrieval_train, "retrieval"),
+            validation_path=args.retrieval_validation,
+            system_prompt=args.retrieval_system_prompt,
+            epochs=args.retrieval_epochs,
+            learning_rate=args.retrieval_learning_rate,
+            resume_from_checkpoint=_resume_value(args.resume_retrieval_from_checkpoint),
+            args=args,
+            torch=torch,
+            transformers=transformers,
+            tokenizer=tokenizer,
+            model=model,
+            token_ids=token_ids,
+        )
+
+
+if __name__ == "__main__":
+    main()

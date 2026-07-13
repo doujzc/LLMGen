@@ -1,0 +1,10 @@
+{
+  "strategy": "interpretable",
+  "num_levels": 3,
+  "branching_factors": [32, 64, 64],
+  "codebook_version": "skills-taxonomy-v1",
+  "token_format": "<SK_L{level}_{index}>",
+  "random_seed": 7,
+  "bucket_capacity": null,
+  "overflow_policy": "error"
+}

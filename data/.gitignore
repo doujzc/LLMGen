@@ -1,0 +1,7 @@
+# Keep the downloaded snapshot in the workspace, but do not commit 725 MB of
+# upstream data.  The pinned source metadata and checksums remain tracked.
+skillret/.cache/
+skillret/.gitattributes
+skillret/README.md
+skillret/croissant-rai.json
+skillret/data/

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+build/
+dist/
+*.egg-info/
+data/skillret/*
+!data/skillret/LOCAL_README.md
+!data/skillret/SHA256SUMS
+!data/skillret/download_manifest.json
+outputs/
+runs/

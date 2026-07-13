@@ -1,0 +1,4 @@
+{"skill_id":"skill-a","indices":[0,0],"tokens":["<SK_L1_0>","<SK_L2_0>"]}
+{"skill_id":"skill-b","indices":[0,1],"tokens":["<SK_L1_0>","<SK_L2_1>"]}
+{"skill_id":"skill-c","indices":[0,1],"tokens":["<SK_L1_0>","<SK_L2_1>"]}
+{"skill_id":"skill-d","indices":[1,0],"tokens":["<SK_L1_1>","<SK_L2_0>"]}

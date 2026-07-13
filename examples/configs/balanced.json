@@ -1,0 +1,16 @@
+{
+  "strategy": "balanced",
+  "num_levels": 3,
+  "branching_factors": [64, 64, 64],
+  "codebook_version": "skills-rq-v1",
+  "token_format": "<SK_L{level}_{index}>",
+  "random_seed": 7,
+  "bucket_capacity": null,
+  "overflow_policy": "allow",
+  "balance_scope": "all",
+  "sinkhorn_temperature": 0.05,
+  "sinkhorn_iterations": 50,
+  "clustering_iterations": 20,
+  "collaborative_weight": 0.25,
+  "dynamic_balance_weight": 0.1
+}
