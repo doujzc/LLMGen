@@ -653,6 +653,11 @@ class ToolWeaverStage1Trainer:
         quantized_sum = torch.zeros_like(encoded)
         quant_losses, raw_levels = [], []
         for quantizer in self.model.rq.vq_layers:
+            # The vendored KMeans initializer crosses the PyTorch/NumPy boundary.
+            # Autocast produces bfloat16 latents, which NumPy cannot represent, so
+            # initialize each codebook once from an explicitly detached fp32 view.
+            if not quantizer.initted and quantizer.training:
+                quantizer.init_emb(residual.detach().float())
             quantized, quant_loss, indices = quantizer(residual, use_sk=True)
             raw_levels.append(quantizer.embedding(indices).view_as(residual))
             residual = residual - quantized

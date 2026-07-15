@@ -181,6 +181,33 @@ def test_full_training_checkpoint_loader_and_resume(tmp_path):
     assert resumed_result["last_metrics"]["num_skills"] == 16
 
 
+def test_bfloat16_amp_initializes_kmeans_codebooks_in_float32(tmp_path):
+    embeddings = np.random.default_rng(11).normal(size=(8, 6)).astype(np.float32)
+    trainer = ToolWeaverStage1Trainer(
+        model_config(
+            kmeans_init=True,
+            kmeans_iters=2,
+            num_emb_list=(2, 2),
+            sk_epsilons=(0.0, 0.0),
+        ),
+        Stage1TrainingConfig(
+            epochs=1,
+            batch_size=8,
+            amp_dtype="bf16",
+            scheduler="constant",
+        ),
+        embeddings,
+        None,
+        tmp_path,
+        device="cpu",
+    )
+
+    result = trainer.fit()
+
+    assert Path(result["last_checkpoint"]).is_file()
+    assert all(quantizer.initted for quantizer in trainer.model.rq.vq_layers)
+
+
 def test_resume_rejects_changed_data_fingerprint(tmp_path):
     embeddings = np.random.default_rng(9).normal(size=(8, 6)).astype(np.float32)
     config = model_config(num_emb_list=(2, 2))
