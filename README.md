@@ -17,13 +17,15 @@ CUDA 12.4 wheel，避免安装需要更新 NVIDIA 驱动的 CUDA 12.8/13.x 版�
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements/cuda124.txt
+.venv/bin/pip install --no-build-isolation deepspeed==0.19.1
 .venv/bin/pip install -e '.[train,test]'
 .venv/bin/python -c 'import torch; print(torch.__version__, torch.version.cuda)'
 .venv/bin/python scripts/download_skillret.py
 ```
 
-版本检查应输出 `2.6.0+cu124 12.4`。已有环境若曾安装其它 CUDA wheel，建议删除
-`.venv` 后按上述命令重建，不要只覆盖安装 `torch`。
+版本检查应输出 `2.6.0+cu124 12.4`。DeepSpeed 在已有 PyTorch 的环境中构建，避免
+隔离构建重新解析 PyTorch。已有环境若曾安装其它 CUDA wheel，建议删除 `.venv` 后
+按上述命令重建，不要只覆盖安装 `torch`。
 
 SkillRet 固定为 `ThakiCloud/SKILLRET@7cae7cf`；当前快照已下载到
 `data/skillret/`，11 个文件的校验值见 `data/skillret/SHA256SUMS`。
@@ -43,8 +45,8 @@ VLLM=.venv-vllm/bin/vllm bash scripts/serve_qwen3_embedding.sh
 `TENSOR_PARALLEL_SIZE` 调整卡数。
 
 完整流程默认使用 `Qwen/Qwen3-Embedding-8B`、`L=3, K=64`、末层 Sinkhorn、
-`Qwen/Qwen3-1.7B` LoRA。Stage 2 默认用单机 4 卡 DDP（每卡 batch 2、梯度
-累积 4，global batch 32）：
+`Qwen/Qwen3-1.7B` LoRA。Stage 2 默认用单机 4 卡 DeepSpeed ZeRO-3，分片
+参数、梯度和优化器状态；每卡 batch 1、梯度累积 8，global batch 32：
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
@@ -55,8 +57,18 @@ bash scripts/run_skillret_full.sh
 单卡 Stage 2：
 
 ```bash
-ROUTER_NUM_GPUS=1 ROUTER_GRADIENT_ACCUMULATION_STEPS=16 \
+ROUTER_NUM_GPUS=1 ROUTER_DEEPSPEED_CONFIG=none \
+  ROUTER_GRADIENT_ACCUMULATION_STEPS=32 \
   bash scripts/run_skillret_full.sh
+```
+
+显存仍不足时将参数 offload 到 CPU；如需恢复普通 DDP，设置配置为 `none`：
+
+```bash
+ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3_offload.json \
+  bash scripts/run_skillret_full.sh
+
+ROUTER_DEEPSPEED_CONFIG=none bash scripts/run_skillret_full.sh
 ```
 
 全参数 SFT：
@@ -102,9 +114,10 @@ Qwen3 官方小尺寸型号是 `1.7B`，没有 `1.5B`；如需严格的 1.5B 模
   --output-dir runs/skillret/router_data
 ```
 
-Stage-2 的 `train_router.py` 与 `infer_router.py` 完整参数已封装在 full script；前者支持
-Qwen3 系列的 full/LoRA、DeepSpeed 和 checkpoint resume，后者执行固定 `L` 的 trie-constrained
-beam search，并输出 NDCG、Recall、MAP、MRR 与 Completeness。
+Stage-2 的 `train_router.py` 与 `infer_router.py` 完整参数已封装在 full script；前者将
+memorization/retrieval 作为两个独立的 ZeRO-3 launch，支持 Qwen3 系列的 full/LoRA 和
+checkpoint resume；后者执行固定 `L` 的 trie-constrained beam search，并输出 NDCG、
+Recall、MAP、MRR 与 Completeness。
 同时报告不受 bucket 内部同分顺序影响的 code recall 与 bucket-expanded recall。
 
 CPU 端到端验收与测试：

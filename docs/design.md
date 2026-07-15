@@ -415,12 +415,13 @@ test active trie    -> fixed-L constrained beam -> skill candidates
 ```
 
 Stage 1 只拟合 train skill；test skill 模拟新增目录项，由冻结 encoder/codebook 编码。
-Stage 2 默认使用 `Qwen/Qwen3-1.7B` 和单机 4 卡 DDP，也接受其它 Hugging Face
-`AutoModelForCausalLM` 兼容的 Qwen3 模型，并支持 LoRA、全参数训练和可选
-DeepSpeed。默认 `per_device_batch=2, gradient_accumulation=4`，因此 global batch
-为 32。Qwen3 chat template 的 thinking 模式固定关闭，保证 assistant 起始位置直接
-监督 code。只有 world-process-zero 写 tokenizer 和 manifest，各 rank 在进入下一阶段
-前同步。
+Stage 2 默认使用 `Qwen/Qwen3-1.7B` 和单机 4 卡 DeepSpeed ZeRO-3，参数、梯度与
+优化器状态跨卡分片；也接受其它 Hugging Face `AutoModelForCausalLM` 兼容的 Qwen3
+模型，并支持 LoRA、全参数训练、CPU parameter offload 或关闭 DeepSpeed 后回退 DDP。
+默认 `per_device_batch=1, gradient_accumulation=8`，因此 global batch 为 32。
+Qwen3 chat template 的 thinking 模式固定关闭，保证 assistant 起始位置直接监督 code。
+只有 world-process-zero 写 tokenizer 和 manifest；ZeRO-3 保存时先聚合 16-bit 权重。
+memorization 与 retrieval 使用两个独立 launch，后者从前者的聚合产物继续训练。
 Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrieval。prompt
 部分 label 设为 `-100`，只对恰好 `L` 个 code token 与 EOS 计算 loss。多正例 query
 按不同 code path 展开为多条样本，而不是生成一个很长的 code 列表。

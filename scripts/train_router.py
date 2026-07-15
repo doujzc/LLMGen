@@ -12,6 +12,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from llmgen.router import (
@@ -106,6 +107,25 @@ def _resume_value(value: str | None) -> str | bool | None:
     if value is None:
         return None
     return True if value.lower() in {"latest", "true"} else value
+
+
+def _read_deepspeed_config(value: str | Path) -> tuple[Path, dict[str, Any], int]:
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise RouterDataError(f"DeepSpeed config does not exist: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RouterDataError(f"invalid DeepSpeed JSON config: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RouterDataError("DeepSpeed config must be a JSON object")
+    zero = payload.get("zero_optimization")
+    stage = zero.get("stage") if isinstance(zero, dict) else None
+    if isinstance(stage, bool) or not isinstance(stage, int) or not 0 <= stage <= 3:
+        raise RouterDataError(
+            "DeepSpeed config must define zero_optimization.stage from 0 to 3"
+        )
+    return path, payload, stage
 
 
 def _module_name_for(model: Any, target: Any) -> str | None:
@@ -279,6 +299,59 @@ def _require_phase_path(path: str | None, phase: str) -> str:
     return path
 
 
+def _build_training_arguments(
+    *,
+    phase: str,
+    has_validation: bool,
+    epochs: float,
+    learning_rate: float,
+    resume_from_checkpoint: str | bool | None,
+    args: argparse.Namespace,
+    transformers: Any,
+) -> Any:
+    phase_dir = Path(args.output_dir) / phase
+    training_kwargs = {
+        "output_dir": str(phase_dir),
+        "overwrite_output_dir": resume_from_checkpoint is None,
+        "num_train_epochs": epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": learning_rate,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "eval_steps": args.eval_steps,
+        "save_strategy": "steps",
+        "load_best_model_at_end": has_validation,
+        "metric_for_best_model": "eval_loss" if has_validation else None,
+        "greater_is_better": False if has_validation else None,
+        "save_total_limit": args.save_total_limit,
+        "bf16": args.bf16,
+        "fp16": args.fp16,
+        "gradient_checkpointing": args.gradient_checkpointing,
+        "dataloader_num_workers": args.dataloader_num_workers,
+        "deepspeed": args.deepspeed,
+        "local_rank": args.local_rank,
+        "remove_unused_columns": False,
+        "report_to": [],
+        "seed": args.seed,
+        "data_seed": args.seed,
+    }
+    # Transformers 4.x and 5.x differ on two TrainingArguments names. Keep the
+    # complete training path runnable across both supported major versions.
+    parameters = inspect.signature(transformers.TrainingArguments.__init__).parameters
+    evaluation_key = (
+        "eval_strategy" if "eval_strategy" in parameters else "evaluation_strategy"
+    )
+    training_kwargs[evaluation_key] = "steps" if has_validation else "no"
+    training_kwargs = {
+        key: value for key, value in training_kwargs.items() if key in parameters
+    }
+    return transformers.TrainingArguments(**training_kwargs)
+
+
 def _run_phase(
     *,
     phase: str,
@@ -294,6 +367,7 @@ def _run_phase(
     tokenizer: Any,
     model: Any,
     token_ids: dict[str, int],
+    training_args: Any | None = None,
 ) -> None:
     train_rows = read_jsonl(train_path)
     if not train_rows:
@@ -323,44 +397,16 @@ def _run_phase(
 
     phase_dir = Path(args.output_dir) / phase
     phase_dir.mkdir(parents=True, exist_ok=True)
-    training_kwargs = {
-        "output_dir": str(phase_dir),
-        "overwrite_output_dir": resume_from_checkpoint is None,
-        "num_train_epochs": epochs,
-        "per_device_train_batch_size": args.per_device_train_batch_size,
-        "per_device_eval_batch_size": args.per_device_eval_batch_size,
-        "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "learning_rate": learning_rate,
-        "weight_decay": args.weight_decay,
-        "warmup_ratio": args.warmup_ratio,
-        "logging_steps": args.logging_steps,
-        "save_steps": args.save_steps,
-        "eval_steps": args.eval_steps,
-        "save_strategy": "steps",
-        "load_best_model_at_end": validation_dataset is not None,
-        "metric_for_best_model": "eval_loss" if validation_dataset is not None else None,
-        "greater_is_better": False if validation_dataset is not None else None,
-        "save_total_limit": args.save_total_limit,
-        "bf16": args.bf16,
-        "fp16": args.fp16,
-        "gradient_checkpointing": args.gradient_checkpointing,
-        "dataloader_num_workers": args.dataloader_num_workers,
-        "deepspeed": args.deepspeed,
-        "local_rank": args.local_rank,
-        "remove_unused_columns": False,
-        "report_to": [],
-        "seed": args.seed,
-        "data_seed": args.seed,
-    }
-    # Transformers 4.x and 5.x differ on two TrainingArguments names. Keep the
-    # complete training path runnable across both supported major versions.
-    parameters = inspect.signature(transformers.TrainingArguments.__init__).parameters
-    evaluation_key = "eval_strategy" if "eval_strategy" in parameters else "evaluation_strategy"
-    training_kwargs[evaluation_key] = "steps" if validation_dataset is not None else "no"
-    training_kwargs = {
-        key: value for key, value in training_kwargs.items() if key in parameters
-    }
-    training_args = transformers.TrainingArguments(**training_kwargs)
+    if training_args is None:
+        training_args = _build_training_arguments(
+            phase=phase,
+            has_validation=validation_dataset is not None,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            resume_from_checkpoint=resume_from_checkpoint,
+            args=args,
+            transformers=transformers,
+        )
     trainer = transformers.Trainer(
         model=model,
         args=training_args,
@@ -382,6 +428,14 @@ def _run_phase(
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(str(phase_dir))
     if trainer.is_world_process_zero():
+        deepspeed_metadata = None
+        if args.deepspeed:
+            deepspeed_path, _, zero_stage = _read_deepspeed_config(args.deepspeed)
+            deepspeed_metadata = {
+                "config": str(deepspeed_path),
+                "config_sha256": sha256_file(deepspeed_path),
+                "zero_stage": zero_stage,
+            }
         tokenizer.save_pretrained(str(phase_dir))
         router_data_manifest_path = Path(train_path).resolve().parent / "manifest.json"
         router_data_manifest_sha256 = None
@@ -425,6 +479,13 @@ def _run_phase(
                 else "full"
             ),
             "distributed": {
+                "backend": (
+                    "deepspeed"
+                    if args.deepspeed
+                    else "ddp"
+                    if actual_world_size > 1
+                    else "single"
+                ),
                 "world_size": actual_world_size,
                 "per_device_train_batch_size": args.per_device_train_batch_size,
                 "gradient_accumulation_steps": args.gradient_accumulation_steps,
@@ -433,6 +494,7 @@ def _run_phase(
                     * args.per_device_train_batch_size
                     * args.gradient_accumulation_steps
                 ),
+                "deepspeed": deepspeed_metadata,
             },
             "system_prompt": system_prompt,
             "max_length": args.max_length,
@@ -454,6 +516,13 @@ def _run_phase(
 
 
 def main() -> None:
+    # Do not resolve the venv/Conda Python symlink: its sibling `ninja`
+    # executable lives in the environment's bin directory, not /usr/bin.
+    python_bin = str(Path(sys.executable).absolute().parent)
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    if python_bin not in path_entries:
+        os.environ["PATH"] = os.pathsep.join((python_bin, *path_entries))
+
     args = parse_args()
     environment_local_rank = os.environ.get("LOCAL_RANK")
     if args.local_rank < 0 and environment_local_rank is not None:
@@ -473,6 +542,58 @@ def main() -> None:
         )
     if args.adapter_name_or_path and args.lora:
         raise RouterDataError("use either --adapter-name-or-path or --lora, not both")
+    if args.deepspeed and args.stage == "both":
+        raise RouterDataError(
+            "DeepSpeed runs memorization and retrieval as separate launches; "
+            "use --stage memorization and then --stage retrieval"
+        )
+
+    deepspeed_training_args = None
+    if args.deepspeed:
+        deepspeed_path, _, _ = _read_deepspeed_config(args.deepspeed)
+        args.deepspeed = str(deepspeed_path)
+        try:
+            import transformers as transformers_for_args
+        except ImportError as exc:  # pragma: no cover - real training environment
+            raise SystemExit(
+                "DeepSpeed training requires transformers and deepspeed; reinstall "
+                "the project's training dependencies."
+            ) from exc
+        if args.stage == "memorization":
+            phase = "memorization"
+            validation_path = args.memorization_validation
+            epochs = args.memorization_epochs
+            learning_rate = args.memorization_learning_rate
+            resume_from_checkpoint = _resume_value(
+                args.resume_memorization_from_checkpoint
+            )
+        else:
+            phase = "retrieval"
+            validation_path = args.retrieval_validation
+            epochs = args.retrieval_epochs
+            learning_rate = args.retrieval_learning_rate
+            resume_from_checkpoint = _resume_value(
+                args.resume_retrieval_from_checkpoint
+            )
+        try:
+            # Trainer's DeepSpeed config must exist before from_pretrained so
+            # ZeRO-3 partitions parameters during model construction as well.
+            deepspeed_training_args = _build_training_arguments(
+                phase=phase,
+                has_validation=(
+                    bool(read_jsonl(validation_path)) if validation_path else False
+                ),
+                epochs=epochs,
+                learning_rate=learning_rate,
+                resume_from_checkpoint=resume_from_checkpoint,
+                args=args,
+                transformers=transformers_for_args,
+            )
+        except (ImportError, RuntimeError) as exc:  # pragma: no cover
+            raise RouterDataError(
+                "failed to initialize DeepSpeed TrainingArguments; verify the "
+                "deepspeed installation and JSON config"
+            ) from exc
 
     virtual_tokens = load_virtual_tokens(args.virtual_tokens)
     torch, transformers, tokenizer, model, token_ids = _load_training_stack(
@@ -498,6 +619,7 @@ def main() -> None:
             tokenizer=tokenizer,
             model=model,
             token_ids=token_ids,
+            training_args=deepspeed_training_args,
         )
 
     if args.stage in {"retrieval", "both"}:
@@ -515,6 +637,7 @@ def main() -> None:
             tokenizer=tokenizer,
             model=model,
             token_ids=token_ids,
+            training_args=deepspeed_training_args,
         )
 
 

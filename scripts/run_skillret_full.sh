@@ -22,8 +22,9 @@ fi
 ROUTER_MODEL="${ROUTER_MODEL:-Qwen/Qwen3-1.7B}"
 ROUTER_FINETUNE_MODE="${ROUTER_FINETUNE_MODE:-lora}"
 ROUTER_NUM_GPUS="${ROUTER_NUM_GPUS:-4}"
-ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE="${ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE:-2}"
-ROUTER_GRADIENT_ACCUMULATION_STEPS="${ROUTER_GRADIENT_ACCUMULATION_STEPS:-4}"
+ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE="${ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
+ROUTER_GRADIENT_ACCUMULATION_STEPS="${ROUTER_GRADIENT_ACCUMULATION_STEPS:-8}"
+ROUTER_DEEPSPEED_CONFIG="${ROUTER_DEEPSPEED_CONFIG-configs/deepspeed_zero3.json}"
 for value in \
   "$ROUTER_NUM_GPUS" \
   "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
@@ -42,6 +43,14 @@ case "$ROUTER_FINETUNE_MODE" in
     ;;
 esac
 ROUTER_EXTRA_ARGS="${ROUTER_EXTRA_ARGS:---bf16 --gradient-checkpointing}"
+ROUTER_DEEPSPEED_ARGS=()
+if [[ -n "$ROUTER_DEEPSPEED_CONFIG" && "$ROUTER_DEEPSPEED_CONFIG" != "none" ]]; then
+  if [[ ! -f "$ROUTER_DEEPSPEED_CONFIG" ]]; then
+    echo "DeepSpeed config does not exist: $ROUTER_DEEPSPEED_CONFIG" >&2
+    exit 2
+  fi
+  ROUTER_DEEPSPEED_ARGS=(--deepspeed "$ROUTER_DEEPSPEED_CONFIG")
+fi
 ROUTER_LAUNCH=("$PYTHON")
 if (( ROUTER_NUM_GPUS > 1 )); then
   ROUTER_LAUNCH=(
@@ -93,21 +102,50 @@ fi
   --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
   --output-dir "$RUN_DIR/router_data"
 
-# ROUTER_FINETUNE_MODE selects LoRA or full-parameter SFT.
+# DeepSpeed phases run in separate processes so the retrieval engine starts
+# from the consolidated memorization artifact rather than a live ZeRO engine.
+ROUTER_COMMON_ARGS=(
+  --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt"
+  --output-dir "$RUN_DIR/router"
+  --num-levels "$NUM_LEVELS"
+  --max-length 1024
+  --per-device-train-batch-size "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE"
+  --gradient-accumulation-steps "$ROUTER_GRADIENT_ACCUMULATION_STEPS"
+)
+
+# ROUTER_FINETUNE_MODE selects LoRA or full-parameter SFT. Word splitting of
+# ROUTER_EXTRA_ARGS is intentional so callers can append Trainer CLI flags.
 # shellcheck disable=SC2086
 "${ROUTER_LAUNCH[@]}" scripts/train_router.py \
   --model-name-or-path "$ROUTER_MODEL" \
-  --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
-  --output-dir "$RUN_DIR/router" --stage both --num-levels "$NUM_LEVELS" \
+  "${ROUTER_COMMON_ARGS[@]}" \
+  --stage memorization \
   --memorization-train "$RUN_DIR/router_data/memorization_train.jsonl" \
   --memorization-validation "$RUN_DIR/router_data/memorization_validation.jsonl" \
+  --memorization-epochs 1 \
+  "${ROUTER_FINETUNE_ARGS[@]}" \
+  "${ROUTER_DEEPSPEED_ARGS[@]}" $ROUTER_EXTRA_ARGS
+
+if [[ "$ROUTER_FINETUNE_MODE" == "lora" ]]; then
+  ROUTER_RETRIEVAL_MODEL_ARGS=(
+    --model-name-or-path "$ROUTER_MODEL"
+    --adapter-name-or-path "$RUN_DIR/router/memorization"
+  )
+else
+  ROUTER_RETRIEVAL_MODEL_ARGS=(
+    --model-name-or-path "$RUN_DIR/router/memorization"
+  )
+fi
+
+# shellcheck disable=SC2086
+"${ROUTER_LAUNCH[@]}" scripts/train_router.py \
+  "${ROUTER_RETRIEVAL_MODEL_ARGS[@]}" \
+  "${ROUTER_COMMON_ARGS[@]}" \
+  --stage retrieval \
   --retrieval-train "$RUN_DIR/router_data/retrieval_train.jsonl" \
   --retrieval-validation "$RUN_DIR/router_data/retrieval_validation.jsonl" \
-  --max-length 1024 \
-  --per-device-train-batch-size "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
-  --gradient-accumulation-steps "$ROUTER_GRADIENT_ACCUMULATION_STEPS" \
-  --memorization-epochs 1 --retrieval-epochs 3 \
-  "${ROUTER_FINETUNE_ARGS[@]}" $ROUTER_EXTRA_ARGS
+  --retrieval-epochs 3 \
+  "${ROUTER_DEEPSPEED_ARGS[@]}" $ROUTER_EXTRA_ARGS
 
 "$PYTHON" scripts/infer_router.py \
   --model-name-or-path "$RUN_DIR/router/retrieval" \
