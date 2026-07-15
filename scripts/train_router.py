@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -367,64 +368,99 @@ def _run_phase(
         eval_dataset=validation_dataset,
         data_collator=_collator(torch, int(tokenizer.pad_token_id)),
     )
+    try:
+        launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise RouterDataError("WORLD_SIZE must be an integer") from exc
+    actual_world_size = int(trainer.args.world_size)
+    if launcher_world_size > 1 and actual_world_size != launcher_world_size:
+        raise RouterDataError(
+            "distributed launcher requested "
+            f"{launcher_world_size} processes, but Trainer initialized "
+            f"world_size={actual_world_size}; check CUDA visibility and Accelerate setup"
+        )
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     trainer.save_model(str(phase_dir))
-    tokenizer.save_pretrained(str(phase_dir))
-    router_data_manifest_path = Path(train_path).resolve().parent / "manifest.json"
-    router_data_manifest_sha256 = None
-    stage1_checkpoint_sha256 = None
-    index_manifest_sha256 = None
-    if router_data_manifest_path.is_file():
-        router_data_manifest_sha256 = sha256_file(router_data_manifest_path)
-        router_data_manifest = json.loads(
-            router_data_manifest_path.read_text(encoding="utf-8")
-        )
-        index_source = router_data_manifest.get("sources", {}).get(
-            "index_manifest"
-        )
-        if isinstance(index_source, dict):
-            stage1_checkpoint_sha256 = index_source.get("checkpoint_sha256")
-            index_manifest_sha256 = index_source.get("sha256")
-    state = {
-        "schema_version": 1,
-        "phase": phase,
-        "num_levels": args.num_levels,
-        "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
-        "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
-        "train_data": str(Path(train_path).resolve()),
-        "train_data_sha256": sha256_file(train_path),
-        "validation_data": (
-            str(Path(validation_path).resolve()) if validation_path else None
-        ),
-        "validation_data_sha256": (
-            sha256_file(validation_path) if validation_path else None
-        ),
-        "router_data_manifest_sha256": router_data_manifest_sha256,
-        "index_manifest_sha256": index_manifest_sha256,
-        "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
-        "base_model": args.model_name_or_path,
-        "base_model_revision": getattr(model.config, "_commit_hash", None),
-        "finetune_mode": (
-            "continued_adapter"
-            if args.adapter_name_or_path
-            else "lora"
-            if args.lora
-            else "full"
-        ),
-        "system_prompt": system_prompt,
-        "max_length": args.max_length,
-        "examples": {
-            "train": len(train_rows),
-            "validation": len(validation_rows),
-        },
-    }
-    with (phase_dir / "router_manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, ensure_ascii=False, indent=2)
-        handle.write("\n")
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(str(phase_dir))
+        router_data_manifest_path = Path(train_path).resolve().parent / "manifest.json"
+        router_data_manifest_sha256 = None
+        stage1_checkpoint_sha256 = None
+        index_manifest_sha256 = None
+        if router_data_manifest_path.is_file():
+            router_data_manifest_sha256 = sha256_file(router_data_manifest_path)
+            router_data_manifest = json.loads(
+                router_data_manifest_path.read_text(encoding="utf-8")
+            )
+            index_source = router_data_manifest.get("sources", {}).get(
+                "index_manifest"
+            )
+            if isinstance(index_source, dict):
+                stage1_checkpoint_sha256 = index_source.get("checkpoint_sha256")
+                index_manifest_sha256 = index_source.get("sha256")
+        state = {
+            "schema_version": 1,
+            "phase": phase,
+            "num_levels": args.num_levels,
+            "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
+            "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
+            "train_data": str(Path(train_path).resolve()),
+            "train_data_sha256": sha256_file(train_path),
+            "validation_data": (
+                str(Path(validation_path).resolve()) if validation_path else None
+            ),
+            "validation_data_sha256": (
+                sha256_file(validation_path) if validation_path else None
+            ),
+            "router_data_manifest_sha256": router_data_manifest_sha256,
+            "index_manifest_sha256": index_manifest_sha256,
+            "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
+            "base_model": args.model_name_or_path,
+            "base_model_revision": getattr(model.config, "_commit_hash", None),
+            "finetune_mode": (
+                "continued_adapter"
+                if args.adapter_name_or_path
+                else "lora"
+                if args.lora
+                else "full"
+            ),
+            "distributed": {
+                "world_size": actual_world_size,
+                "per_device_train_batch_size": args.per_device_train_batch_size,
+                "gradient_accumulation_steps": args.gradient_accumulation_steps,
+                "effective_global_batch_size": (
+                    actual_world_size
+                    * args.per_device_train_batch_size
+                    * args.gradient_accumulation_steps
+                ),
+            },
+            "system_prompt": system_prompt,
+            "max_length": args.max_length,
+            "examples": {
+                "train": len(train_rows),
+                "validation": len(validation_rows),
+            },
+        }
+        with (phase_dir / "router_manifest.json").open(
+            "w", encoding="utf-8"
+        ) as handle:
+            json.dump(state, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+    wait_for_everyone = getattr(
+        getattr(trainer, "accelerator", None), "wait_for_everyone", None
+    )
+    if callable(wait_for_everyone):
+        wait_for_everyone()
 
 
 def main() -> None:
     args = parse_args()
+    environment_local_rank = os.environ.get("LOCAL_RANK")
+    if args.local_rank < 0 and environment_local_rank is not None:
+        try:
+            args.local_rank = int(environment_local_rank)
+        except ValueError as exc:
+            raise RouterDataError("LOCAL_RANK must be an integer") from exc
     if args.bf16 and args.fp16:
         raise RouterDataError("--bf16 and --fp16 are mutually exclusive")
     if args.num_levels < 1 or args.max_length <= args.num_levels + 1:

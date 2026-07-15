@@ -21,6 +21,18 @@ if [[ -n "$EMBEDDING_DIMENSIONS" ]]; then
 fi
 ROUTER_MODEL="${ROUTER_MODEL:-Qwen/Qwen3-1.7B}"
 ROUTER_FINETUNE_MODE="${ROUTER_FINETUNE_MODE:-lora}"
+ROUTER_NUM_GPUS="${ROUTER_NUM_GPUS:-4}"
+ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE="${ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE:-2}"
+ROUTER_GRADIENT_ACCUMULATION_STEPS="${ROUTER_GRADIENT_ACCUMULATION_STEPS:-4}"
+for value in \
+  "$ROUTER_NUM_GPUS" \
+  "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
+  "$ROUTER_GRADIENT_ACCUMULATION_STEPS"; do
+  if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Router GPU, batch-size, and accumulation values must be positive integers" >&2
+    exit 2
+  fi
+done
 case "$ROUTER_FINETUNE_MODE" in
   lora) ROUTER_FINETUNE_ARGS=(--lora) ;;
   full) ROUTER_FINETUNE_ARGS=() ;;
@@ -30,16 +42,34 @@ case "$ROUTER_FINETUNE_MODE" in
     ;;
 esac
 ROUTER_EXTRA_ARGS="${ROUTER_EXTRA_ARGS:---bf16 --gradient-checkpointing}"
+ROUTER_LAUNCH=("$PYTHON")
+if (( ROUTER_NUM_GPUS > 1 )); then
+  ROUTER_LAUNCH=(
+    "$PYTHON" -m torch.distributed.run
+    --standalone
+    --nproc-per-node "$ROUTER_NUM_GPUS"
+  )
+fi
+if [[ "$DEVICE" == cuda* ]]; then
+  AVAILABLE_GPUS=$("$PYTHON" -c 'import torch; print(torch.cuda.device_count())')
+  if (( AVAILABLE_GPUS < ROUTER_NUM_GPUS )); then
+    echo "Stage 2 requested $ROUTER_NUM_GPUS GPUs, but only $AVAILABLE_GPUS are visible" >&2
+    echo "Set CUDA_VISIBLE_DEVICES or override ROUTER_NUM_GPUS" >&2
+    exit 2
+  fi
+fi
 
 if [[ "${SKIP_DOWNLOAD:-0}" != "1" ]]; then
   "$PYTHON" scripts/download_skillret.py
 fi
-"$PYTHON" scripts/prepare_skillret.py \
-  --embedding-provider openai \
-  --embedding-model "$EMBEDDING_MODEL" \
-  --embedding-base-url "$EMBEDDING_BASE_URL" \
-  "${EMBEDDING_DIMENSION_ARGS[@]}" \
-  --batch-size "$EMBEDDING_BATCH_SIZE"
+if [[ "${SKIP_PREPARE:-0}" != "1" ]]; then
+  "$PYTHON" scripts/prepare_skillret.py \
+    --embedding-provider openai \
+    --embedding-model "$EMBEDDING_MODEL" \
+    --embedding-base-url "$EMBEDDING_BASE_URL" \
+    "${EMBEDDING_DIMENSION_ARGS[@]}" \
+    --batch-size "$EMBEDDING_BATCH_SIZE"
+fi
 
 # Word splitting is intentional for the configurable per-level lists.
 # shellcheck disable=SC2086
@@ -65,7 +95,7 @@ fi
 
 # ROUTER_FINETUNE_MODE selects LoRA or full-parameter SFT.
 # shellcheck disable=SC2086
-"$PYTHON" scripts/train_router.py \
+"${ROUTER_LAUNCH[@]}" scripts/train_router.py \
   --model-name-or-path "$ROUTER_MODEL" \
   --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
   --output-dir "$RUN_DIR/router" --stage both --num-levels "$NUM_LEVELS" \
@@ -73,8 +103,9 @@ fi
   --memorization-validation "$RUN_DIR/router_data/memorization_validation.jsonl" \
   --retrieval-train "$RUN_DIR/router_data/retrieval_train.jsonl" \
   --retrieval-validation "$RUN_DIR/router_data/retrieval_validation.jsonl" \
-  --max-length 1024 --per-device-train-batch-size 2 \
-  --gradient-accumulation-steps 16 \
+  --max-length 1024 \
+  --per-device-train-batch-size "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
+  --gradient-accumulation-steps "$ROUTER_GRADIENT_ACCUMULATION_STEPS" \
   --memorization-epochs 1 --retrieval-epochs 3 \
   "${ROUTER_FINETUNE_ARGS[@]}" $ROUTER_EXTRA_ARGS
 

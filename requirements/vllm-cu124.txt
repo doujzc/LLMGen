@@ -1,0 +1,5 @@
+-r cuda124.txt
+
+# vLLM 0.8.5.post1 is built for the PyTorch 2.6/CUDA 12.4 stack and supports
+# Qwen3 embedding models through the OpenAI-compatible embeddings endpoint.
+vllm==0.8.5.post1

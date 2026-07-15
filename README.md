@@ -11,13 +11,19 @@ special tokens，再由 collision bucket 展开为多个 skills。
 
 ## 安装与数据
 
-要求 Python 3.10+。
+要求 Python 3.10--3.12。若 `nvidia-smi` 显示最高 CUDA 12.5/12.6，使用
+CUDA 12.4 wheel，避免安装需要更新 NVIDIA 驱动的 CUDA 12.8/13.x 版本：
 
 ```bash
 python3 -m venv .venv
+.venv/bin/pip install -r requirements/cuda124.txt
 .venv/bin/pip install -e '.[train,test]'
+.venv/bin/python -c 'import torch; print(torch.__version__, torch.version.cuda)'
 .venv/bin/python scripts/download_skillret.py
 ```
+
+版本检查应输出 `2.6.0+cu124 12.4`。已有环境若曾安装其它 CUDA wheel，建议删除
+`.venv` 后按上述命令重建，不要只覆盖安装 `torch`。
 
 SkillRet 固定为 `ThakiCloud/SKILLRET@7cae7cf`；当前快照已下载到
 `data/skillret/`，11 个文件的校验值见 `data/skillret/SHA256SUMS`。
@@ -27,18 +33,30 @@ SkillRet 固定为 `ThakiCloud/SKILLRET@7cae7cf`；当前快照已下载到
 先启动提供 `/v1/embeddings` 的服务；仓库给出了 vLLM 启动脚本：
 
 ```bash
-# 在独立服务环境安装 vLLM；8B 可用 TENSOR_PARALLEL_SIZE 调整卡数
-python -m pip install vllm
-bash scripts/serve_qwen3_embedding.sh
+# vLLM 使用独立环境，避免它改写训练环境中的 PyTorch/CUDA 依赖
+python3 -m venv .venv-vllm
+.venv-vllm/bin/pip install -r requirements/vllm-cu124.txt
+VLLM=.venv-vllm/bin/vllm bash scripts/serve_qwen3_embedding.sh
 ```
 
+这里固定 `vLLM==0.8.5.post1`、`torch==2.6.0+cu124`；8B 模型可用
+`TENSOR_PARALLEL_SIZE` 调整卡数。
+
 完整流程默认使用 `Qwen/Qwen3-Embedding-8B`、`L=3, K=64`、末层 Sinkhorn、
-`Qwen/Qwen3-1.7B` LoRA：
+`Qwen/Qwen3-1.7B` LoRA。Stage 2 默认用单机 4 卡 DDP（每卡 batch 2、梯度
+累积 4，global batch 32）：
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=EMPTY
 bash scripts/run_skillret_full.sh
+```
+
+单卡 Stage 2：
+
+```bash
+ROUTER_NUM_GPUS=1 ROUTER_GRADIENT_ACCUMULATION_STEPS=16 \
+  bash scripts/run_skillret_full.sh
 ```
 
 全参数 SFT：
@@ -54,6 +72,9 @@ ROUTER_FINETUNE_MODE=full \
 ROUTER_MODEL=Qwen/Qwen3-4B EMBEDDING_DIMENSIONS=1024 \
   bash scripts/run_skillret_full.sh
 ```
+
+若 embedding 服务和训练共享 GPU，先单独执行 `prepare_skillret.py`，停止服务释放
+显存，再用 `SKIP_PREPARE=1` 运行 full script。
 
 Qwen3 官方小尺寸型号是 `1.7B`，没有 `1.5B`；如需严格的 1.5B 模型，可通过
 `ROUTER_MODEL` 指向其它 `AutoModelForCausalLM` 兼容模型。
