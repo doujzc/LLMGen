@@ -76,6 +76,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--gradient-checkpointing", action="store_true")
+    parser.add_argument(
+        "--gradient-checkpointing-mode",
+        choices=("auto", "reentrant", "non-reentrant"),
+        default="auto",
+        help=(
+            "Activation-checkpoint implementation. 'auto' uses reentrant with "
+            "DeepSpeed ZeRO-3 and the Transformers default otherwise."
+        ),
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--resume-memorization-from-checkpoint")
     parser.add_argument("--resume-retrieval-from-checkpoint")
@@ -145,6 +154,18 @@ def _require_supported_deepspeed_version() -> str:
             f"--no-deps deepspeed=={SUPPORTED_DEEPSPEED_VERSION}"
         )
     return installed
+
+
+def _gradient_checkpointing_kwargs(args: argparse.Namespace) -> dict[str, bool] | None:
+    if not args.gradient_checkpointing:
+        return None
+    mode = args.gradient_checkpointing_mode
+    if mode == "auto":
+        # Non-reentrant checkpointing can stop recomputation early. With ZeRO-3
+        # that may bypass the module hooks which gather a partitioned parameter,
+        # so recomputation observes its zero-sized placeholder instead.
+        return {"use_reentrant": bool(args.deepspeed)}
+    return {"use_reentrant": mode == "reentrant"}
 
 
 def _module_name_for(model: Any, target: Any) -> str | None:
@@ -350,6 +371,7 @@ def _build_training_arguments(
         "bf16": args.bf16,
         "fp16": args.fp16,
         "gradient_checkpointing": args.gradient_checkpointing,
+        "gradient_checkpointing_kwargs": _gradient_checkpointing_kwargs(args),
         "dataloader_num_workers": args.dataloader_num_workers,
         "deepspeed": args.deepspeed,
         "local_rank": args.local_rank,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import json
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from llmgen.router import RouterDataError
 from scripts import train_router
 from scripts.train_router import (
     SUPPORTED_DEEPSPEED_VERSION,
+    _gradient_checkpointing_kwargs,
     _read_deepspeed_config,
     _require_supported_deepspeed_version,
 )
@@ -68,3 +70,23 @@ def test_deepspeed_version_guard_explains_modules_to_save_regression(monkeypatch
         _require_supported_deepspeed_version()
 
     assert f"deepspeed=={SUPPORTED_DEEPSPEED_VERSION}" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "deepspeed", "mode", "expected"),
+    (
+        (False, "config.json", "auto", None),
+        (True, "config.json", "auto", {"use_reentrant": True}),
+        (True, None, "auto", {"use_reentrant": False}),
+        (True, "config.json", "non-reentrant", {"use_reentrant": False}),
+        (True, None, "reentrant", {"use_reentrant": True}),
+    ),
+)
+def test_gradient_checkpointing_mode(enabled, deepspeed, mode, expected):
+    args = Namespace(
+        gradient_checkpointing=enabled,
+        gradient_checkpointing_mode=mode,
+        deepspeed=deepspeed,
+    )
+
+    assert _gradient_checkpointing_kwargs(args) == expected

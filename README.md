@@ -117,8 +117,9 @@ Qwen3 官方小尺寸型号是 `1.7B`，没有 `1.5B`；如需严格的 1.5B 模
 
 Stage-2 的 `train_router.py` 与 `infer_router.py` 完整参数已封装在 full script；前者将
 memorization/retrieval 作为两个独立的 ZeRO-3 launch，支持 Qwen3 系列的 full/LoRA 和
-checkpoint resume；后者执行固定 `L` 的 trie-constrained beam search，并输出 NDCG、
-Recall、MAP、MRR 与 Completeness。
+checkpoint resume；DeepSpeed 下的 activation checkpoint 默认使用完整重计算的
+reentrant 实现，避免重计算时读取到 ZeRO-3 的零尺寸参数占位。后者执行固定 `L` 的
+trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR 与 Completeness。
 同时报告不受 bucket 内部同分顺序影响的 code recall 与 bucket-expanded recall。
 
 CPU 端到端验收与测试：

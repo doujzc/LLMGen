@@ -422,6 +422,8 @@ Stage 2 默认使用 `Qwen/Qwen3-1.7B` 和单机 4 卡 DeepSpeed ZeRO-3，参数
 Qwen3 chat template 的 thinking 模式固定关闭，保证 assistant 起始位置直接监督 code。
 只有 world-process-zero 写 tokenizer 和 manifest；ZeRO-3 保存时先聚合 16-bit 权重。
 memorization 与 retrieval 使用两个独立 launch，后者从前者的聚合产物继续训练。
+ZeRO-3 与 gradient checkpointing 联用时选择 reentrant 完整重计算，确保参数 gather/release
+hook 在重计算阶段成对执行，避免分区后的零尺寸占位参数参与计算。
 Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrieval。prompt
 部分 label 设为 `-100`，只对恰好 `L` 个 code token 与 EOS 计算 loss。多正例 query
 按不同 code path 展开为多条样本，而不是生成一个很长的 code 列表。
