@@ -8,6 +8,7 @@ data and metric tests remain runnable without a GPU training environment.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import inspect
 import json
 import os
@@ -33,6 +34,7 @@ RETRIEVAL_SYSTEM_PROMPT = (
     "Select the Agent Skill code that best matches the user request. "
     "Answer with code tokens only."
 )
+SUPPORTED_DEEPSPEED_VERSION = "0.16.4"
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,6 +128,23 @@ def _read_deepspeed_config(value: str | Path) -> tuple[Path, dict[str, Any], int
             "DeepSpeed config must define zero_optimization.stage from 0 to 3"
         )
     return path, payload, stage
+
+
+def _require_supported_deepspeed_version() -> str:
+    try:
+        installed = importlib.metadata.version("deepspeed")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise RouterDataError(
+            "DeepSpeed is not installed; install the project's training dependencies"
+        ) from exc
+    if installed != SUPPORTED_DEEPSPEED_VERSION:
+        raise RouterDataError(
+            f"DeepSpeed {installed} is incompatible with the router's ZeRO-3 + "
+            "PEFT modules_to_save path; install the pinned version with: "
+            f"python -m pip install --no-build-isolation --force-reinstall "
+            f"--no-deps deepspeed=={SUPPORTED_DEEPSPEED_VERSION}"
+        )
+    return installed
 
 
 def _module_name_for(model: Any, target: Any) -> str | None:
@@ -551,6 +570,7 @@ def main() -> None:
     deepspeed_training_args = None
     if args.deepspeed:
         deepspeed_path, _, _ = _read_deepspeed_config(args.deepspeed)
+        _require_supported_deepspeed_version()
         args.deepspeed = str(deepspeed_path)
         try:
             import transformers as transformers_for_args

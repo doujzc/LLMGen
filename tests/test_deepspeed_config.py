@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from llmgen.router import RouterDataError
-from scripts.train_router import _read_deepspeed_config
+from scripts import train_router
+from scripts.train_router import (
+    SUPPORTED_DEEPSPEED_VERSION,
+    _read_deepspeed_config,
+    _require_supported_deepspeed_version,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -42,3 +47,24 @@ def test_deepspeed_config_requires_a_valid_zero_stage(tmp_path):
 
     with pytest.raises(RouterDataError, match="zero_optimization.stage"):
         _read_deepspeed_config(path)
+
+
+def test_deepspeed_version_guard_accepts_pinned_version(monkeypatch):
+    monkeypatch.setattr(
+        train_router.importlib.metadata,
+        "version",
+        lambda package: SUPPORTED_DEEPSPEED_VERSION,
+    )
+
+    assert _require_supported_deepspeed_version() == SUPPORTED_DEEPSPEED_VERSION
+
+
+def test_deepspeed_version_guard_explains_modules_to_save_regression(monkeypatch):
+    monkeypatch.setattr(
+        train_router.importlib.metadata, "version", lambda package: "0.19.1"
+    )
+
+    with pytest.raises(RouterDataError, match="PEFT modules_to_save") as exc_info:
+        _require_supported_deepspeed_version()
+
+    assert f"deepspeed=={SUPPORTED_DEEPSPEED_VERSION}" in str(exc_info.value)

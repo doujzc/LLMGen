@@ -17,15 +17,16 @@ CUDA 12.4 wheel，避免安装需要更新 NVIDIA 驱动的 CUDA 12.8/13.x 版�
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements/cuda124.txt
-.venv/bin/pip install --no-build-isolation deepspeed==0.19.1
+.venv/bin/pip install --no-build-isolation deepspeed==0.16.4
 .venv/bin/pip install -e '.[train,test]'
 .venv/bin/python -c 'import torch; print(torch.__version__, torch.version.cuda)'
 .venv/bin/python scripts/download_skillret.py
 ```
 
-版本检查应输出 `2.6.0+cu124 12.4`。DeepSpeed 在已有 PyTorch 的环境中构建，避免
-隔离构建重新解析 PyTorch。已有环境若曾安装其它 CUDA wheel，建议删除 `.venv` 后
-按上述命令重建，不要只覆盖安装 `torch`。
+版本检查应输出 `2.6.0+cu124 12.4`。DeepSpeed 固定为 `0.16.4`，以兼容 ZeRO-3、
+PEFT `modules_to_save` 和新增 code-token embeddings；在已有 PyTorch 的环境中构建，
+避免隔离构建重新解析 PyTorch。已有环境若曾安装其它 CUDA wheel，建议删除 `.venv`
+后按上述命令重建，不要只覆盖安装 `torch`。
 
 SkillRet 固定为 `ThakiCloud/SKILLRET@7cae7cf`；当前快照已下载到
 `data/skillret/`，11 个文件的校验值见 `data/skillret/SHA256SUMS`。

@@ -16,7 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 train = [
   "accelerate>=1.2,<2",
-  "deepspeed==0.19.1",
+  # DeepSpeed 0.17.6 and 0.19.1 regress ZeRO-3 with PEFT modules_to_save (the
+  # resized code-token embeddings/lm_head); 0.16.4 retains the safe hook path.
+  "deepspeed==0.16.4",
   "huggingface-hub>=0.27,<2",
   "openai>=1.58,<3",
   "peft>=0.19.1,<1",
