@@ -32,21 +32,18 @@ fi
   --qrels "$OUT/processed/qrels_train.jsonl" \
   --codes "$OUT/index/train_codes.jsonl" \
   --virtual-tokens "$OUT/index/virtual_tokens.txt" \
-  --output-dir "$OUT/router_data" --validation-fraction 0
+  --output-dir "$OUT/router_data" \
+  --memorization-validation-fraction 0 \
+  --retrieval-validation-fraction 0.25
 "$PYTHON" scripts/train_router.py \
   --model-name-or-path hf-internal-testing/tiny-random-gpt2 \
   --virtual-tokens "$OUT/index/virtual_tokens.txt" \
   --output-dir "$OUT/router" --stage both --num-levels 2 --max-length 64 \
   --memorization-train "$OUT/router_data/memorization_train.jsonl" \
   --retrieval-train "$OUT/router_data/retrieval_train.jsonl" \
+  --retrieval-validation "$OUT/router_data/retrieval_validation.jsonl" \
   --per-device-train-batch-size 8 --gradient-accumulation-steps 1 \
   --memorization-epochs 1 --retrieval-epochs 1 --save-steps 1000 --eval-steps 1000
-"$PYTHON" scripts/infer_router.py \
-  --model-name-or-path "$OUT/router/retrieval" \
-  --virtual-tokens "$OUT/index/virtual_tokens.txt" \
-  --codes "$OUT/index/test_codes.jsonl" --registry "$OUT/index/test_registry.json" \
-  --queries "$OUT/processed/queries_test.jsonl" \
-  --qrels "$OUT/processed/qrels_test.jsonl" \
-  --output-jsonl "$OUT/predictions.jsonl" --metrics-output "$OUT/metrics.json" \
-  --batch-size 4 --beam-size 8 --num-code-paths 8 --top-k 20 \
-  --device cpu --dtype float32
+PYTHON="$PYTHON" RUN_DIR="$OUT" ROUTER_MODEL=hf-internal-testing/tiny-random-gpt2 \
+  DEVICE=cpu DTYPE=float32 BATCH_SIZE=4 BEAM_SIZE=8 NUM_CODE_PATHS=8 \
+  EVAL_DIR="$OUT/evaluation" bash scripts/eval_skillret_closedset.sh

@@ -46,8 +46,10 @@ VLLM=.venv-vllm/bin/vllm bash scripts/serve_qwen3_embedding.sh
 `TENSOR_PARALLEL_SIZE` 调整卡数。
 
 完整流程默认使用 `Qwen/Qwen3-Embedding-8B`、`L=3, K=64`、末层 Sinkhorn、
-`Qwen/Qwen3-1.7B` LoRA。Stage 2 默认用单机 4 卡 DeepSpeed ZeRO-3，分片
-参数、梯度和优化器状态；每卡 batch 1、梯度累积 8，global batch 32：
+`Qwen/Qwen3-1.7B` LoRA。Memorization 使用全部 train skills，Retrieval 从 train
+queries 留出 2% 验证；训练和验证共用 train-skills 候选库。Stage 2 默认用单机 4 卡
+DeepSpeed ZeRO-3，分片参数、梯度和优化器状态；每卡 batch 1、梯度累积 8，global
+batch 32：
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
@@ -115,6 +117,9 @@ Qwen3 官方小尺寸型号是 `1.7B`，没有 `1.5B`；如需严格的 1.5B 模
   --output-dir runs/skillret/router_data
 ```
 
+`build_router_data.py` 的默认划分同样是 Memorization 不留出 skills、Retrieval 留出
+2% query groups；可用 `--retrieval-validation-fraction` 调整比例。
+
 Stage-2 的 `train_router.py` 与 `infer_router.py` 完整参数已封装在 full script；前者将
 memorization/retrieval 作为两个独立的 ZeRO-3 launch，支持 Qwen3 系列的 full/LoRA 和
 checkpoint resume；DeepSpeed 下的 activation checkpoint 默认使用完整重计算的
@@ -123,7 +128,7 @@ trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR 与 Completen
 同时报告不受 bucket 内部同分顺序影响的 code recall 与 bucket-expanded recall。
 
 使用 train skills 作为共享候选库，并在训练时留出的 2% train-query groups 上做
-closed-set 验证：
+closed-set 验证。完整流程默认已执行该评估，也可单独重跑：
 
 ```bash
 bash scripts/eval_skillret_closedset.sh
@@ -135,9 +140,14 @@ bash scripts/eval_skillret_closedset.sh
 QUERY_SET=train bash scripts/eval_skillret_closedset.sh
 ```
 
-验证结果分别写入
-`runs/skillret/evaluation/closedset-validation/` 和 `closedset-train/`；官方 disjoint
-test-skills 评估仍由 full script 保留。
+full script 的默认结果写入 `runs/skillret/evaluation/`；单独评估时，validation/train
+结果分别写入 `closedset-validation/` 和 `closedset-train/`。官方 disjoint test-skills
+协议需显式运行：
+
+```bash
+EVAL_PROTOCOL=unseen bash scripts/run_skillret_full.sh
+EVAL_PROTOCOL=both bash scripts/run_skillret_full.sh
+```
 
 CPU 端到端验收与测试：
 

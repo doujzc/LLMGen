@@ -38,7 +38,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional virtual_tokens.txt; verifies every target belongs to the namespace.",
     )
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--validation-fraction", type=float, default=0.02)
+    parser.add_argument(
+        "--validation-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Legacy override applied to both phases. By default memorization uses "
+            "all skills and retrieval holds out 2%% of query groups."
+        ),
+    )
+    parser.add_argument("--memorization-validation-fraction", type=float, default=None)
+    parser.add_argument("--retrieval-validation-fraction", type=float, default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-memorization", action="store_true")
     parser.add_argument("--skip-retrieval", action="store_true")
@@ -93,6 +103,16 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     counts: dict[str, dict[str, int]] = {}
+    memorization_validation_fraction = (
+        args.memorization_validation_fraction
+        if args.memorization_validation_fraction is not None
+        else (args.validation_fraction if args.validation_fraction is not None else 0.0)
+    )
+    retrieval_validation_fraction = (
+        args.retrieval_validation_fraction
+        if args.retrieval_validation_fraction is not None
+        else (args.validation_fraction if args.validation_fraction is not None else 0.02)
+    )
 
     if not args.skip_memorization:
         memorization = build_memorization_examples(catalog, skill_to_code)
@@ -100,7 +120,7 @@ def main() -> None:
             output_dir,
             "memorization",
             memorization,
-            validation_fraction=args.validation_fraction,
+            validation_fraction=memorization_validation_fraction,
             seed=args.seed,
         )
 
@@ -126,7 +146,7 @@ def main() -> None:
             output_dir,
             "retrieval",
             retrieval,
-            validation_fraction=args.validation_fraction,
+            validation_fraction=retrieval_validation_fraction,
             # Use a separate deterministic shuffle from memorization.
             seed=args.seed + 1,
         )
@@ -149,6 +169,10 @@ def main() -> None:
         "schema_version": 1,
         "num_levels": num_levels,
         "validation_fraction": args.validation_fraction,
+        "validation_fractions": {
+            "memorization": memorization_validation_fraction,
+            "retrieval": retrieval_validation_fraction,
+        },
         "seed": args.seed,
         "sources": {
             "catalog": source_artifact(args.catalog),

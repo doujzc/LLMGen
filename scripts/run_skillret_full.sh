@@ -25,6 +25,8 @@ ROUTER_NUM_GPUS="${ROUTER_NUM_GPUS:-4}"
 ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE="${ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE:-1}"
 ROUTER_GRADIENT_ACCUMULATION_STEPS="${ROUTER_GRADIENT_ACCUMULATION_STEPS:-8}"
 ROUTER_DEEPSPEED_CONFIG="${ROUTER_DEEPSPEED_CONFIG-configs/deepspeed_zero3.json}"
+ROUTER_VALIDATION_FRACTION="${ROUTER_VALIDATION_FRACTION:-0.02}"
+EVAL_PROTOCOL="${EVAL_PROTOCOL:-closedset}"
 for value in \
   "$ROUTER_NUM_GPUS" \
   "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
@@ -39,6 +41,13 @@ case "$ROUTER_FINETUNE_MODE" in
   full) ROUTER_FINETUNE_ARGS=() ;;
   *)
     echo "ROUTER_FINETUNE_MODE must be 'lora' or 'full'" >&2
+    exit 2
+    ;;
+esac
+case "$EVAL_PROTOCOL" in
+  closedset|unseen|both) ;;
+  *)
+    echo "EVAL_PROTOCOL must be 'closedset', 'unseen', or 'both'" >&2
     exit 2
     ;;
 esac
@@ -100,7 +109,9 @@ fi
   --qrels data/skillret/processed/qrels_train.jsonl \
   --codes "$RUN_DIR/index/train_codes.jsonl" \
   --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
-  --output-dir "$RUN_DIR/router_data"
+  --output-dir "$RUN_DIR/router_data" \
+  --memorization-validation-fraction 0 \
+  --retrieval-validation-fraction "$ROUTER_VALIDATION_FRACTION"
 
 # DeepSpeed phases run in separate processes so the retrieval engine starts
 # from the consolidated memorization artifact rather than a live ZeRO engine.
@@ -147,16 +158,40 @@ fi
   --retrieval-epochs 3 \
   "${ROUTER_DEEPSPEED_ARGS[@]}" $ROUTER_EXTRA_ARGS
 
-"$PYTHON" scripts/infer_router.py \
-  --model-name-or-path "$RUN_DIR/router/retrieval" \
-  --base-model-name-or-path "$ROUTER_MODEL" \
-  --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
-  --codes "$RUN_DIR/index/test_codes.jsonl" \
-  --registry "$RUN_DIR/index/test_registry.json" \
-  --queries data/skillret/processed/queries_test.jsonl \
-  --qrels data/skillret/processed/qrels_test.jsonl \
-  --output-jsonl "$RUN_DIR/evaluation/predictions.jsonl" \
-  --metrics-output "$RUN_DIR/evaluation/metrics.json" \
-  --batch-size 1 \
-  --beam-size 20 --num-code-paths 20 --top-k 20 \
-  --device "$DEVICE" --dtype bfloat16
+run_closedset_eval() {
+  local output_dir="$1"
+  PYTHON="$PYTHON" RUN_DIR="$RUN_DIR" ROUTER_MODEL="$ROUTER_MODEL" \
+    DEVICE="$DEVICE" DTYPE=bfloat16 EVAL_DIR="$output_dir" QUERY_SET=validation \
+    bash scripts/eval_skillret_closedset.sh
+}
+
+run_unseen_eval() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  "$PYTHON" scripts/infer_router.py \
+    --model-name-or-path "$RUN_DIR/router/retrieval" \
+    --base-model-name-or-path "$ROUTER_MODEL" \
+    --virtual-tokens "$RUN_DIR/index/virtual_tokens.txt" \
+    --codes "$RUN_DIR/index/test_codes.jsonl" \
+    --registry "$RUN_DIR/index/test_registry.json" \
+    --queries data/skillret/processed/queries_test.jsonl \
+    --qrels data/skillret/processed/qrels_test.jsonl \
+    --output-jsonl "$output_dir/predictions.jsonl" \
+    --metrics-output "$output_dir/metrics.json" \
+    --batch-size 1 \
+    --beam-size 20 --num-code-paths 20 --top-k 20 \
+    --device "$DEVICE" --dtype bfloat16
+}
+
+case "$EVAL_PROTOCOL" in
+  closedset)
+    run_closedset_eval "$RUN_DIR/evaluation"
+    ;;
+  unseen)
+    run_unseen_eval "$RUN_DIR/evaluation"
+    ;;
+  both)
+    run_closedset_eval "$RUN_DIR/evaluation/closedset-validation"
+    run_unseen_eval "$RUN_DIR/evaluation/unseen"
+    ;;
+esac
