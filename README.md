@@ -33,7 +33,12 @@ SkillRet 固定为 `ThakiCloud/SKILLRET@7cae7cf`；当前快照已下载到
 
 ## 训练与推理
 
-先启动提供 `/v1/embeddings` 的服务；仓库给出了 vLLM 启动脚本：
+所有阶段共享 [configs/skillret.env](configs/skillret.env)。在新机器上通常只需修改文件
+开头的 `EMBEDDING_MODEL` 和 `ROUTER_MODEL` 两个模型路径；数据路径、训练超参数、
+DeepSpeed 和评估参数均已有默认值，也可通过同名环境变量临时覆盖。
+脚本会优先使用仓库的 `.venv`，未找到时使用当前激活的 Conda 环境中的 `python`。
+
+先启动提供 `/v1/embeddings` 的服务：
 
 ```bash
 # vLLM 使用独立环境，避免它改写训练环境中的 PyTorch/CUDA 依赖
@@ -45,16 +50,45 @@ VLLM=.venv-vllm/bin/vllm bash scripts/serve_qwen3_embedding.sh
 这里固定 `vLLM==0.8.5.post1`、`torch==2.6.0+cu124`；8B 模型可用
 `TENSOR_PARALLEL_SIZE` 调整卡数。
 
-完整流程默认使用 `Qwen/Qwen3-Embedding-8B`、`L=3, K=64`、末层 Sinkhorn、
-`Qwen/Qwen3-1.7B` LoRA。Memorization 使用全部 train skills，Retrieval 从 train
-queries 留出 2% 验证；训练和验证共用 train-skills 候选库。Stage 2 默认用单机 4 卡
-DeepSpeed ZeRO-3，分片参数、梯度和优化器状态；每卡 batch 1、梯度累积 8，global
-batch 32：
+完整流程默认使用 `L=3, K=64`、末层 Sinkhorn、LoRA 和单机 4 卡 DeepSpeed
+ZeRO-3。Memorization 使用全部 train skills，Retrieval 留出 2% train queries；训练和
+验证共用 train-skills 候选库。总入口只负责依次调用下方的阶段脚本：
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=EMPTY
 bash scripts/run_skillret_full.sh
+```
+
+每个步骤均可独立重复执行；所有脚本从仓库根目录或其它目录调用均可：
+
+| 步骤 | 脚本 | 主要输出 |
+|---:|---|---|
+| 00 | `scripts/skillret/00_download.sh` | `data/skillret/` |
+| 01 | `scripts/skillret/01_prepare.sh` | `processed/`、`embeddings/` |
+| 02 | `scripts/skillret/02_train_tokenizer.sh` | `runs/skillret/stage1/best.pt` |
+| 03 | `scripts/skillret/03_export_codes.sh` | `runs/skillret/index/` |
+| 04 | `scripts/skillret/04_build_router_data.sh` | `runs/skillret/router_data/` |
+| 05 | `scripts/skillret/05_train_memorization.sh` | `router/memorization/` |
+| 06 | `scripts/skillret/06_train_retrieval.sh` | `router/retrieval/` |
+| 07 | `scripts/skillret/07_evaluate.sh` | `evaluation/metrics.json` |
+
+例如从 tokenizer 训练开始重跑：
+
+```bash
+bash scripts/skillret/02_train_tokenizer.sh
+bash scripts/skillret/03_export_codes.sh
+bash scripts/skillret/04_build_router_data.sh
+bash scripts/skillret/05_train_memorization.sh
+bash scripts/skillret/06_train_retrieval.sh
+bash scripts/skillret/07_evaluate.sh
+```
+
+单次调试参数可直接附在对应脚本末尾，优先于默认值：
+
+```bash
+bash scripts/skillret/02_train_tokenizer.sh --epochs 2
+bash scripts/skillret/06_train_retrieval.sh --retrieval-epochs 1
 ```
 
 单卡 Stage 2：
@@ -88,61 +122,46 @@ ROUTER_MODEL=Qwen/Qwen3-4B EMBEDDING_DIMENSIONS=1024 \
   bash scripts/run_skillret_full.sh
 ```
 
-若 embedding 服务和训练共享 GPU，先单独执行 `prepare_skillret.py`，停止服务释放
-显存，再用 `SKIP_PREPARE=1` 运行 full script。
+若 embedding 服务和训练共享 GPU，先单独执行步骤 01，停止服务释放显存，再用
+`SKIP_PREPARE=1` 运行 full script；也可以直接从步骤 02 开始运行。
 
 Qwen3 官方小尺寸型号是 `1.7B`，没有 `1.5B`；如需严格的 1.5B 模型，可通过
 `ROUTER_MODEL` 指向其它 `AutoModelForCausalLM` 兼容模型。
 
-各阶段可独立执行和恢复：
+阶段 02、05、06 支持从 checkpoint 恢复：
 
 ```bash
-.venv/bin/python scripts/prepare_skillret.py \
-  --embedding-provider openai \
-  --embedding-model Qwen/Qwen3-Embedding-8B \
-  --embedding-base-url http://127.0.0.1:8000/v1 --batch-size 8
-.venv/bin/python scripts/train_tokenizer.py --data-root data/skillret \
-  --output-dir runs/skillret/stage1 \
-  --num-levels 3 --branching-factors 64 64 64 --sk-epsilons 0 0 0.01 \
-  --epochs 100 --batch-size 512 --device cuda --amp-dtype bf16
-.venv/bin/python scripts/export_skill_codes.py \
-  --checkpoint runs/skillret/stage1/best.pt --output-dir runs/skillret/index \
-  --device cuda
-.venv/bin/python scripts/build_router_data.py \
-  --catalog data/skillret/processed/catalog_train.jsonl \
-  --queries data/skillret/processed/queries_train.jsonl \
-  --qrels data/skillret/processed/qrels_train.jsonl \
-  --codes runs/skillret/index/train_codes.jsonl \
-  --virtual-tokens runs/skillret/index/virtual_tokens.txt \
-  --output-dir runs/skillret/router_data
+TOKENIZER_RESUME=runs/skillret/stage1/last.pt \
+  bash scripts/skillret/02_train_tokenizer.sh
+ROUTER_RESUME_MEMORIZATION=latest \
+  bash scripts/skillret/05_train_memorization.sh
+ROUTER_RESUME_RETRIEVAL=latest \
+  bash scripts/skillret/06_train_retrieval.sh
 ```
 
 `build_router_data.py` 的默认划分同样是 Memorization 不留出 skills、Retrieval 留出
 2% query groups；可用 `--retrieval-validation-fraction` 调整比例。
 
-Stage-2 的 `train_router.py` 与 `infer_router.py` 完整参数已封装在 full script；前者将
-memorization/retrieval 作为两个独立的 ZeRO-3 launch，支持 Qwen3 系列的 full/LoRA 和
-checkpoint resume；DeepSpeed 下的 activation checkpoint 默认使用完整重计算的
-reentrant 实现，避免重计算时读取到 ZeRO-3 的零尺寸参数占位。后者执行固定 `L` 的
-trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR 与 Completeness。
-同时报告不受 bucket 内部同分顺序影响的 code recall 与 bucket-expanded recall。
+Stage-2 参数集中在公共配置中，步骤 05/06 分别执行独立的 ZeRO-3 launch，支持 Qwen3
+系列的 full/LoRA 和 checkpoint resume。DeepSpeed 下的 activation checkpoint 默认
+使用完整重计算的 reentrant 实现，避免重计算时读取到 ZeRO-3 的零尺寸参数占位。步骤
+07 执行固定 `L` 的 trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR、
+Completeness、code recall 与 bucket-expanded recall。
 
-使用 train skills 作为共享候选库，并在训练时留出的 2% train-query groups 上做
-closed-set 验证。完整流程默认已执行该评估，也可单独重跑：
+步骤 07 默认使用 train skills 作为共享候选库，在留出的 2% train-query groups 上做
+closed-set 验证：
 
 ```bash
-bash scripts/eval_skillret_closedset.sh
+bash scripts/skillret/07_evaluate.sh
 ```
 
 仅用于检查训练集拟合程度时运行：
 
 ```bash
-QUERY_SET=train bash scripts/eval_skillret_closedset.sh
+QUERY_SET=train bash scripts/skillret/07_evaluate.sh
 ```
 
-full script 的默认结果写入 `runs/skillret/evaluation/`；单独评估时，validation/train
-结果分别写入 `closedset-validation/` 和 `closedset-train/`。官方 disjoint test-skills
-协议需显式运行：
+结果默认写入 `runs/skillret/evaluation/`。官方 disjoint test-skills 协议需显式运行：
 
 ```bash
 EVAL_PROTOCOL=unseen bash scripts/run_skillret_full.sh

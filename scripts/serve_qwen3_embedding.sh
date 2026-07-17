@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${MODEL:-Qwen/Qwen3-Embedding-8B}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/skillret/common.sh
+source "$ROOT/scripts/skillret/common.sh"
+
+MODEL="${MODEL:-$EMBEDDING_MODEL}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$MODEL}"
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
+HOST="${HOST:-$VLLM_HOST}"
+PORT="${PORT:-$VLLM_PORT}"
 API_KEY="${API_KEY:-${OPENAI_API_KEY:-EMPTY}}"
-DTYPE="${DTYPE:-auto}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
+DTYPE="${DTYPE:-$VLLM_DTYPE}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-$VLLM_MAX_MODEL_LEN}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-$VLLM_TENSOR_PARALLEL_SIZE}"
 VLLM="${VLLM:-vllm}"
 
 if ! command -v "$VLLM" >/dev/null 2>&1; then

@@ -4,46 +4,56 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON="${PYTHON:-.venv/bin/python}"
-OUT="${OUT:-outputs/skillret-smoke}"
+export PYTHON="${PYTHON:-.venv/bin/python}"
+export DATASET_DIR="${DATASET_DIR:-data/skillret}"
+export RUN_DIR="${OUT:-outputs/skillret-smoke}"
+export PROCESSED_DIR="$RUN_DIR/processed"
+export EMBEDDING_DIR="$RUN_DIR/embeddings"
+export STAGE1_DIR="$RUN_DIR/stage1"
+export INDEX_DIR="$RUN_DIR/index"
+export ROUTER_DATA_DIR="$RUN_DIR/router_data"
+export ROUTER_OUTPUT_DIR="$RUN_DIR/router"
+export DEVICE=cpu
+
+export EMBEDDING_PROVIDER=sentence-transformers
+export EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+export EMBEDDING_BATCH_SIZE=8
+export NUM_LEVELS=2
+export BRANCHING_FACTORS="4 4"
+export SK_EPSILONS="0 0.05"
+export RQ_LAYERS="32 16"
+export TOKENIZER_E_DIM=8
+export TOKENIZER_EPOCHS=1
+export TOKENIZER_BATCH_SIZE=16
+export TOKENIZER_AMP_DTYPE=none
+export ROUTER_MODEL=hf-internal-testing/tiny-random-gpt2
+export ROUTER_FINETUNE_MODE=full
+export ROUTER_NUM_GPUS=1
+export ROUTER_DEEPSPEED_CONFIG=none
+export ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE=8
+export ROUTER_GRADIENT_ACCUMULATION_STEPS=1
+export ROUTER_MAX_LENGTH=64
+export ROUTER_MEMORIZATION_EPOCHS=1
+export ROUTER_RETRIEVAL_EPOCHS=1
+export ROUTER_SAVE_STEPS=1000
+export ROUTER_EVAL_STEPS=1000
+export ROUTER_PRECISION=fp32
+export ROUTER_GRADIENT_CHECKPOINTING=0
+export ROUTER_VALIDATION_FRACTION=0.25
+export EVAL_DTYPE=float32
+export EVAL_BATCH_SIZE=4
+export EVAL_BEAM_SIZE=8
+export EVAL_NUM_CODE_PATHS=8
 
 if [[ "${SKIP_DOWNLOAD:-0}" != "1" ]]; then
-  "$PYTHON" scripts/download_skillret.py
+  bash scripts/skillret/00_download.sh
 fi
-"$PYTHON" scripts/prepare_skillret.py \
-  --processed-dir "$OUT/processed" --embedding-dir "$OUT/embeddings" \
-  --embedding-provider sentence-transformers \
-  --embedding-model sentence-transformers/all-MiniLM-L6-v2 \
-  --device cpu --batch-size 8 --max-train-skills 32 --max-test-skills 16 \
-  --max-skill-chars 2048
-"$PYTHON" scripts/train_tokenizer.py \
-  --data-root "$OUT" --output-dir "$OUT/stage1" \
-  --device cpu \
-  --num-levels 2 --branching-factors 4 4 --sk-epsilons 0 0.05 \
-  --layers 32 16 --e-dim 8 --epochs 1 --batch-size 16 \
+bash scripts/skillret/01_prepare.sh \
+  --max-train-skills 32 --max-test-skills 16 --max-skill-chars 2048
+bash scripts/skillret/02_train_tokenizer.sh \
   --kmeans-iters 3 --sk-iters 5 --scheduler constant
-"$PYTHON" scripts/export_skill_codes.py \
-  --checkpoint "$OUT/stage1/best.pt" --processed-dir "$OUT/processed" \
-  --embedding-dir "$OUT/embeddings" --output-dir "$OUT/index" \
-  --device cpu
-"$PYTHON" scripts/build_router_data.py \
-  --catalog "$OUT/processed/catalog_train.jsonl" \
-  --queries "$OUT/processed/queries_train.jsonl" \
-  --qrels "$OUT/processed/qrels_train.jsonl" \
-  --codes "$OUT/index/train_codes.jsonl" \
-  --virtual-tokens "$OUT/index/virtual_tokens.txt" \
-  --output-dir "$OUT/router_data" \
-  --memorization-validation-fraction 0 \
-  --retrieval-validation-fraction 0.25
-"$PYTHON" scripts/train_router.py \
-  --model-name-or-path hf-internal-testing/tiny-random-gpt2 \
-  --virtual-tokens "$OUT/index/virtual_tokens.txt" \
-  --output-dir "$OUT/router" --stage both --num-levels 2 --max-length 64 \
-  --memorization-train "$OUT/router_data/memorization_train.jsonl" \
-  --retrieval-train "$OUT/router_data/retrieval_train.jsonl" \
-  --retrieval-validation "$OUT/router_data/retrieval_validation.jsonl" \
-  --per-device-train-batch-size 8 --gradient-accumulation-steps 1 \
-  --memorization-epochs 1 --retrieval-epochs 1 --save-steps 1000 --eval-steps 1000
-PYTHON="$PYTHON" RUN_DIR="$OUT" ROUTER_MODEL=hf-internal-testing/tiny-random-gpt2 \
-  DEVICE=cpu DTYPE=float32 BATCH_SIZE=4 BEAM_SIZE=8 NUM_CODE_PATHS=8 \
-  EVAL_DIR="$OUT/evaluation" bash scripts/eval_skillret_closedset.sh
+bash scripts/skillret/03_export_codes.sh
+bash scripts/skillret/04_build_router_data.sh
+bash scripts/skillret/05_train_memorization.sh
+bash scripts/skillret/06_train_retrieval.sh
+EVAL_DIR="$RUN_DIR/evaluation" bash scripts/skillret/07_evaluate.sh
