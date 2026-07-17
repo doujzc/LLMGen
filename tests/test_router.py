@@ -11,6 +11,7 @@ from llmgen.router import (
     active_skill_ids_from_registry,
     aggregate_retrieval_metrics,
     buckets_from_codes,
+    build_closed_set_evaluation_rows,
     build_memorization_examples,
     build_retrieval_examples,
     canonical_query_group,
@@ -86,6 +87,48 @@ def test_multi_positive_queries_expand_by_distinct_code_path() -> None:
     collided = next(row for row in examples if row["target_skill_ids"] == ["s1", "s2"])
     assert collided["positive_skill_ids"] == ["s1", "s2", "s3"]
     assert all(row["group_id"] == canonical_query_group("do both") for row in examples)
+
+
+def test_closed_set_export_collapses_multi_target_sft_rows() -> None:
+    rows = [
+        {
+            "query_id": "q1",
+            "input_text": "do both",
+            "positive_skill_ids": ["s1", "s2", "s3"],
+            "target_skill_ids": ["s1", "s2"],
+        },
+        {
+            "query_id": "q1",
+            "input_text": "do both",
+            "positive_skill_ids": ["s1", "s2", "s3"],
+            "target_skill_ids": ["s3"],
+        },
+    ]
+    queries, qrels = build_closed_set_evaluation_rows(
+        rows, allowed_skill_ids={"s1", "s2", "s3"}
+    )
+    assert queries == [
+        {
+            "id": "q1",
+            "query": "do both",
+            "skill_ids": ["s1", "s2", "s3"],
+        }
+    ]
+    assert [row["skill_id"] for row in qrels] == ["s1", "s2", "s3"]
+
+
+def test_closed_set_export_rejects_unknown_candidate_skill() -> None:
+    with pytest.raises(RouterDataError, match="outside the candidate corpus"):
+        build_closed_set_evaluation_rows(
+            [
+                {
+                    "query_id": "q1",
+                    "input_text": "unknown",
+                    "positive_skill_ids": ["missing"],
+                }
+            ],
+            allowed_skill_ids={"s1"},
+        )
 
 
 def test_duplicate_query_texts_share_a_split_group() -> None:

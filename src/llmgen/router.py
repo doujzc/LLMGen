@@ -325,6 +325,85 @@ def build_retrieval_examples(
     return examples
 
 
+def build_closed_set_evaluation_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    allowed_skill_ids: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Materialize unique queries/qrels from held-out retrieval SFT rows.
+
+    A multi-positive query produces one SFT row per distinct target code, so the
+    router validation artifact cannot be passed to inference directly.  This
+    function collapses those rows back to one query and one binary qrel per
+    positive skill while preserving the exact query-group split used in
+    training.
+    """
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for row_number, row in enumerate(rows, start=1):
+        query_id = _nonempty_text(row, "query_id", "id")
+        query = _nonempty_text(row, "input_text", "query")
+        if not query_id or not query:
+            raise RouterDataError(
+                f"closed-set validation row {row_number} lacks query_id or input_text"
+            )
+        raw_positives = row.get("positive_skill_ids")
+        if not isinstance(raw_positives, (list, tuple)) or not raw_positives:
+            raise RouterDataError(
+                f"closed-set validation query {query_id!r} has no positive_skill_ids"
+            )
+        positives = {str(value).strip() for value in raw_positives if str(value).strip()}
+        if not positives:
+            raise RouterDataError(
+                f"closed-set validation query {query_id!r} has no valid positive skills"
+            )
+        if allowed_skill_ids is not None:
+            unknown = positives.difference(allowed_skill_ids)
+            if unknown:
+                raise RouterDataError(
+                    f"closed-set validation query {query_id!r} references a skill "
+                    f"outside the candidate corpus: {next(iter(sorted(unknown)))}"
+                )
+
+        previous = grouped.get(query_id)
+        if previous is None:
+            grouped[query_id] = {"query": query, "positive_skill_ids": positives}
+            continue
+        if previous["query"] != query:
+            raise RouterDataError(
+                f"closed-set validation query {query_id!r} has inconsistent text"
+            )
+        if previous["positive_skill_ids"] != positives:
+            raise RouterDataError(
+                f"closed-set validation query {query_id!r} has inconsistent positives"
+            )
+
+    if not grouped:
+        raise RouterDataError("closed-set validation artifact is empty")
+
+    queries: list[dict[str, Any]] = []
+    qrels: list[dict[str, Any]] = []
+    for query_id in sorted(grouped):
+        details = grouped[query_id]
+        positives = sorted(details["positive_skill_ids"])
+        queries.append(
+            {
+                "id": query_id,
+                "query": details["query"],
+                "skill_ids": positives,
+            }
+        )
+        qrels.extend(
+            {
+                "query_id": query_id,
+                "skill_id": skill_id,
+                "relevance": 1,
+            }
+            for skill_id in positives
+        )
+    return queries, qrels
+
+
 def skill_document_text(skill: Mapping[str, Any]) -> str:
     """Render the SkillRet document text used for memorization alignment."""
 

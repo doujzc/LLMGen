@@ -122,6 +122,23 @@ reentrant 实现，避免重计算时读取到 ZeRO-3 的零尺寸参数占位�
 trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR 与 Completeness。
 同时报告不受 bucket 内部同分顺序影响的 code recall 与 bucket-expanded recall。
 
+使用 train skills 作为共享候选库，并在训练时留出的 2% train-query groups 上做
+closed-set 验证：
+
+```bash
+bash scripts/eval_skillret_closedset.sh
+```
+
+仅用于检查训练集拟合程度时运行：
+
+```bash
+QUERY_SET=train bash scripts/eval_skillret_closedset.sh
+```
+
+验证结果分别写入
+`runs/skillret/evaluation/closedset-validation/` 和 `closedset-train/`；官方 disjoint
+test-skills 评估仍由 full script 保留。
+
 CPU 端到端验收与测试：
 
 ```bash
