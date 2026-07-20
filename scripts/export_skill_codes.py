@@ -33,6 +33,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument(
+        "--splits",
+        nargs="+",
+        choices=("train", "test"),
+        default=("train", "test"),
+        help="Export train only for a shared closed candidate set.",
+    )
+    parser.add_argument(
         "--token-format",
         default=None,
         help="Must match the checkpoint; defaults to its model_config token_format.",
@@ -159,7 +166,7 @@ def main() -> None:
     embedding_manifest_path = args.embedding_dir / "manifest.json"
     processed_manifest = json.loads(processed_manifest_path.read_text(encoding="utf-8"))
     embedding_manifest = json.loads(embedding_manifest_path.read_text(encoding="utf-8"))
-    for split in ("train", "test"):
+    for split in args.splits:
         processed_order = processed_manifest["splits"][split]["hashes"][
             "ordered_skill_ids_sha256"
         ]
@@ -192,7 +199,7 @@ def main() -> None:
             raise ValueError("checkpoint was trained with a different processed manifest")
 
     split_artifacts = {}
-    for split in ("train", "test"):
+    for split in args.splits:
         split_artifacts[split] = _export_split(
             split=split,
             model=model,
@@ -227,8 +234,13 @@ def main() -> None:
         "normalize_embeddings": normalize_embeddings,
         "num_virtual_tokens": len(tokens),
         "virtual_tokens": str(virtual_tokens_path),
+        "exported_splits": list(args.splits),
         "splits": split_artifacts,
-        "incremental_contract": "test skills encoded by frozen encoder and codebooks",
+        "incremental_contract": (
+            "test skills encoded by frozen encoder and codebooks"
+            if "test" in args.splits
+            else "shared closed candidate set; no unseen-skill code export"
+        ),
     }
     (args.output_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

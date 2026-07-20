@@ -59,12 +59,24 @@ run_closedset() {
       queries="$data_dir/queries.jsonl"
       qrels="$data_dir/qrels.jsonl"
       ;;
+    dataset-validation)
+      skillret_require_file "$PROCESSED_DIR/queries_validation.jsonl"
+      skillret_require_file "$PROCESSED_DIR/qrels_validation.jsonl"
+      queries="$PROCESSED_DIR/queries_validation.jsonl"
+      qrels="$PROCESSED_DIR/qrels_validation.jsonl"
+      ;;
+    test)
+      skillret_require_file "$PROCESSED_DIR/queries_test.jsonl"
+      skillret_require_file "$PROCESSED_DIR/qrels_test.jsonl"
+      queries="$PROCESSED_DIR/queries_test.jsonl"
+      qrels="$PROCESSED_DIR/qrels_test.jsonl"
+      ;;
     train)
       queries="$PROCESSED_DIR/queries_train.jsonl"
       qrels="$PROCESSED_DIR/qrels_train.jsonl"
       ;;
     *)
-      echo "QUERY_SET must be 'validation' or 'train'" >&2
+      echo "QUERY_SET must be 'validation', 'dataset-validation', 'test', or 'train'" >&2
       exit 2
       ;;
   esac

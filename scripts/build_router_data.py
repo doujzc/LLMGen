@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build ToolWeaver-style memorization and retrieval SFT data for SkillRet."""
+"""Build ToolWeaver-style memorization and retrieval SFT data."""
 
 from __future__ import annotations
 

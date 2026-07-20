@@ -21,5 +21,8 @@ fi
 if [[ -n "$EMBEDDING_DIMENSIONS" ]]; then
   ARGS+=(--embedding-dimensions "$EMBEDDING_DIMENSIONS")
 fi
+if [[ -n "${EMBEDDING_MAX_BATCH_CHARS:-}" ]]; then
+  ARGS+=(--embedding-max-batch-chars "$EMBEDDING_MAX_BATCH_CHARS")
+fi
 
-"$PYTHON" scripts/prepare_skillret.py "${ARGS[@]}" "$@"
+"$PYTHON" "${PREPARE_SCRIPT:-scripts/prepare_skillret.py}" "${ARGS[@]}" "$@"

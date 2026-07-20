@@ -28,6 +28,7 @@ ARGS=(
   --lr "$TOKENIZER_LR"
   --graph-lambda "$TOKENIZER_GRAPH_LAMBDA"
   --amp-dtype "$TOKENIZER_AMP_DTYPE"
+  --codebook-version "$CODEBOOK_VERSION"
 )
 if [[ -n "$TOKENIZER_RESUME" ]]; then
   ARGS+=(--resume "$TOKENIZER_RESUME")

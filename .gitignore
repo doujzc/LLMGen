@@ -11,5 +11,13 @@ data/skillret/*
 !data/skillret/LOCAL_README.md
 !data/skillret/SHA256SUMS
 !data/skillret/download_manifest.json
+data/clawhub/*
+!data/clawhub/README.md
+data/clawhub_training/*
+!data/clawhub_training/README.md
+!data/clawhub_training/final/
+data/clawhub_training/final/*
+!data/clawhub_training/final/*.jsonl
+!data/clawhub_training/final/manifest.json
 outputs/
 runs/

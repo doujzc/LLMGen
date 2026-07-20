@@ -1,0 +1,157 @@
+{
+  "accepted_before_dedup": 4200,
+  "artifacts": {
+    "qrels_test.jsonl": {
+      "bytes": 115057,
+      "path": "data/clawhub_training/final/qrels_test.jsonl",
+      "sha256": "178d94ffaab9ee87c14b6dfbef8678c0b10e5718610a053789a32018309b8bb8"
+    },
+    "qrels_train.jsonl": {
+      "bytes": 935202,
+      "path": "data/clawhub_training/final/qrels_train.jsonl",
+      "sha256": "6d3c61312a9fa776b40a60df15131140cbdb085801cf38c9b6fbd401368d7210"
+    },
+    "qrels_validation.jsonl": {
+      "bytes": 129041,
+      "path": "data/clawhub_training/final/qrels_validation.jsonl",
+      "sha256": "aad176095f304608eeab90a2bbf5edc53748b5c07636c7ffa6bbeea493a3a3ea"
+    },
+    "queries.jsonl": {
+      "bytes": 5207000,
+      "path": "data/clawhub_training/final/queries.jsonl",
+      "sha256": "64d23de84bed1c87e6f96961e881ad1b7762eb97f57445e27748755461a3fb04"
+    },
+    "queries_test.jsonl": {
+      "bytes": 372926,
+      "path": "data/clawhub_training/final/queries_test.jsonl",
+      "sha256": "bac28598c8593782db94289260ef7e2d6ab33b9ca56be98b77cac84e1cc0d5b6"
+    },
+    "queries_train.jsonl": {
+      "bytes": 3037864,
+      "path": "data/clawhub_training/final/queries_train.jsonl",
+      "sha256": "7de6081d8961c651bc5766adbd6682d146d14045016331e14c308b39b6b9dbbc"
+    },
+    "queries_validation.jsonl": {
+      "bytes": 416693,
+      "path": "data/clawhub_training/final/queries_validation.jsonl",
+      "sha256": "50d891c44d6c5906fc88cc51671cdaf62b51dd5661b2362845642c2e9ce61923"
+    },
+    "rejected_near_duplicates.jsonl": {
+      "bytes": 0,
+      "path": "data/clawhub_training/final/rejected_near_duplicates.jsonl",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "skills.jsonl": {
+      "bytes": 563999,
+      "path": "data/clawhub_training/final/skills.jsonl",
+      "sha256": "54069f15aa2ec4c2adb35e216131ffaa8882b24a42f537d18977b0c9ef6c958f"
+    }
+  },
+  "candidate_count": 1000,
+  "candidate_only_skill_count": 6,
+  "candidate_only_skill_ids": [
+    "@doonot/zero-trust",
+    "@enzoricciulli/adaptive-reasoning",
+    "@fangkelvin/proactive-agent-skill",
+    "@ivangdavila/proactivity",
+    "@mike5230odense/self-improvement",
+    "@zlc000190/using-superpowers"
+  ],
+  "candidate_source": "data/clawhub/catalog.jsonl",
+  "coverage_repair_skill_count": 0,
+  "coverage_repair_workflow_count": 0,
+  "coverage_repair_workflow_ids": [],
+  "created_at": "2026-07-20T12:00:32.505521Z",
+  "cross_domain_query_count": 3877,
+  "final_query_count": 4200,
+  "format_version": 1,
+  "generated_query_count": 5786,
+  "mean_train_positives_per_covered_skill": 17.089788732394368,
+  "min_train_positives_per_covered_skill": 1,
+  "missing_train_target_count": 0,
+  "missing_train_target_ids": [],
+  "near_duplicate_rejection_count": 0,
+  "profile_targetable_skill_count": 574,
+  "reviewed_query_count": 5786,
+  "seed": 20260720,
+  "split_domain_counts": {
+    "test": {
+      "agent_system_automation": 18,
+      "business_operations": 26,
+      "communication": 117,
+      "data_analysis": 27,
+      "documents_office": 163,
+      "education_knowledge": 57,
+      "files_knowledge_memory": 77,
+      "finance_investment": 58,
+      "health_fitness": 6,
+      "media_audio_video": 68,
+      "media_image_design": 43,
+      "news_research": 111,
+      "productivity_planning": 132,
+      "smart_home_iot": 4,
+      "social_content": 91,
+      "software_development": 2,
+      "travel_local": 6
+    },
+    "train": {
+      "agent_system_automation": 149,
+      "business_operations": 303,
+      "communication": 938,
+      "data_analysis": 198,
+      "documents_office": 1194,
+      "education_knowledge": 342,
+      "files_knowledge_memory": 590,
+      "finance_investment": 412,
+      "health_fitness": 62,
+      "media_audio_video": 688,
+      "media_image_design": 298,
+      "news_research": 777,
+      "productivity_planning": 905,
+      "security_privacy": 16,
+      "shopping_food": 55,
+      "smart_home_iot": 38,
+      "social_content": 689,
+      "software_development": 8,
+      "travel_local": 46,
+      "weather_environment": 17
+    },
+    "validation": {
+      "agent_system_automation": 13,
+      "business_operations": 28,
+      "communication": 161,
+      "data_analysis": 18,
+      "documents_office": 163,
+      "education_knowledge": 29,
+      "files_knowledge_memory": 95,
+      "finance_investment": 81,
+      "health_fitness": 7,
+      "media_audio_video": 116,
+      "media_image_design": 35,
+      "news_research": 121,
+      "productivity_planning": 142,
+      "shopping_food": 10,
+      "smart_home_iot": 6,
+      "social_content": 91,
+      "travel_local": 6,
+      "weather_environment": 2
+    }
+  },
+  "split_qrel_counts": {
+    "test": 1197,
+    "train": 9707,
+    "validation": 1344
+  },
+  "split_query_counts": {
+    "test": 399,
+    "train": 3353,
+    "validation": 448
+  },
+  "target_count_distribution": {
+    "2": 944,
+    "3": 2664,
+    "4": 592
+  },
+  "targetable_skill_count": 568,
+  "train_target_coverage_count": 568
+}

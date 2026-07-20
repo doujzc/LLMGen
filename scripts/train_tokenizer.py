@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train ToolWeaver Stage 1 on the SkillRet train split."""
+"""Train ToolWeaver Stage 1 on a normalized skill catalog."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from llmgen.neural.toolweaver import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train the neural ToolWeaver tokenizer on SkillRet train skills."
+        description="Train the neural ToolWeaver tokenizer on normalized skill embeddings."
     )
     parser.add_argument("--data-root", type=Path, default=Path("data/skillret"))
     parser.add_argument("--embedding-path", type=Path, default=None)
