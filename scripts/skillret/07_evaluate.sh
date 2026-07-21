@@ -34,8 +34,7 @@ run_inference() {
     --output-jsonl "$output_dir/predictions.jsonl" \
     --metrics-output "$output_dir/metrics.json" \
     --batch-size "$EVAL_BATCH_SIZE" \
-    --beam-size "$EVAL_BEAM_SIZE" \
-    --num-code-paths "$EVAL_NUM_CODE_PATHS" \
+    --max-code-paths "$EVAL_MAX_CODE_PATHS" \
     --top-k "$EVAL_TOP_K" \
     --cutoffs "${CUTOFF_ARGS[@]}" \
     --device "$DEVICE" \

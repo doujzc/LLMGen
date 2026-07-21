@@ -4,6 +4,13 @@ from llmgen import TokenizerConfig, create_tokenizer
 from llmgen.tokenization import BalancedSkillTokenizer, InterpretableSkillTokenizer
 
 
+def test_default_code_is_two_level_with_4096_paths() -> None:
+    config = TokenizerConfig()
+
+    assert config.num_levels == 2
+    assert config.branching_factors == (64, 64)
+
+
 def test_num_levels_must_match_branching_factors() -> None:
     with pytest.raises(ValueError, match="branching_factors"):
         TokenizerConfig(

@@ -31,8 +31,8 @@ class TokenizerConfig:
     """
 
     strategy: TokenizerStrategy = "balanced"
-    num_levels: int = 3
-    branching_factors: tuple[int, ...] = (16, 16, 16)
+    num_levels: int = 2
+    branching_factors: tuple[int, ...] = (64, 64)
     codebook_version: str = "skills-v1"
     token_format: str = "<SK_L{level}_{index}>"
     random_seed: int = 7

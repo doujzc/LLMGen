@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
 
     parser.add_argument("--num-levels", type=int, default=None)
-    parser.add_argument("--branching-factors", type=int, nargs="+", default=[64, 64, 64])
+    parser.add_argument("--branching-factors", type=int, nargs="+", default=[64, 64])
     parser.add_argument("--sk-epsilons", type=float, nargs="+", default=None)
     parser.add_argument("--layers", type=int, nargs="*", default=[512, 256, 128])
     parser.add_argument("--e-dim", type=int, default=64)

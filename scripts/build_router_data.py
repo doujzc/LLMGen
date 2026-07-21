@@ -63,6 +63,8 @@ def _write_split(
     validation_fraction: float,
     seed: int,
 ) -> dict[str, int]:
+    if not rows:
+        raise RouterDataError(f"{phase} router data is empty")
     train, validation = grouped_train_validation_split(
         rows,
         validation_fraction=validation_fraction,
@@ -77,6 +79,14 @@ def _write_split(
         "all_groups": len({row["group_id"] for row in rows}),
         "train_groups": len({row["group_id"] for row in train}),
         "validation_groups": len({row["group_id"] for row in validation}),
+        "max_target_paths": max(
+            (
+                len(row["target_paths"])
+                if isinstance(row.get("target_paths"), list)
+                else 1
+            )
+            for row in rows
+        ),
     }
 
 
@@ -166,8 +176,9 @@ def main() -> None:
         index_manifest["num_levels"] = payload.get("num_levels")
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "num_levels": num_levels,
+        "retrieval_target_format": "newline_delimited_code_paths",
         "validation_fraction": args.validation_fraction,
         "validation_fractions": {
             "memorization": memorization_validation_fraction,

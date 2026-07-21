@@ -31,8 +31,8 @@ MEMORIZATION_SYSTEM_PROMPT = (
     "Answer with code tokens only."
 )
 RETRIEVAL_SYSTEM_PROMPT = (
-    "Select the Agent Skill code that best matches the user request. "
-    "Answer with code tokens only."
+    "Select every Agent Skill needed for the user request in execution order. "
+    "Output one hierarchical skill code per line, with no other text."
 )
 SUPPORTED_DEEPSPEED_VERSION = "0.16.4"
 
@@ -493,8 +493,17 @@ def _run_phase(
             if isinstance(index_source, dict):
                 stage1_checkpoint_sha256 = index_source.get("checkpoint_sha256")
                 index_manifest_sha256 = index_source.get("sha256")
+        all_rows = [*train_rows, *validation_rows]
+        max_target_paths = max(
+            (
+                len(row["target_paths"])
+                if isinstance(row.get("target_paths"), list)
+                else 1
+            )
+            for row in all_rows
+        )
         state = {
-            "schema_version": 1,
+            "schema_version": 2,
             "phase": phase,
             "num_levels": args.num_levels,
             "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
@@ -539,6 +548,15 @@ def _run_phase(
             },
             "system_prompt": system_prompt,
             "max_length": args.max_length,
+            "generation_contract": {
+                "mode": (
+                    "autoregressive_multi_path"
+                    if phase == "retrieval"
+                    else "single_path"
+                ),
+                "path_separator": "\n" if phase == "retrieval" else None,
+                "max_target_paths": max_target_paths,
+            },
             "examples": {
                 "train": len(train_rows),
                 "validation": len(validation_rows),

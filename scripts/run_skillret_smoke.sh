@@ -42,8 +42,7 @@ export ROUTER_GRADIENT_CHECKPOINTING=0
 export ROUTER_VALIDATION_FRACTION=0.25
 export EVAL_DTYPE=float32
 export EVAL_BATCH_SIZE=4
-export EVAL_BEAM_SIZE=8
-export EVAL_NUM_CODE_PATHS=8
+export EVAL_MAX_CODE_PATHS=8
 
 if [[ "${SKIP_DOWNLOAD:-0}" != "1" ]]; then
   bash scripts/skillret/00_download.sh

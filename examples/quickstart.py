@@ -11,8 +11,8 @@ def interpretable_example() -> None:
     tokenizer = InterpretableSkillTokenizer(
         TokenizerConfig(
             strategy="interpretable",
-            num_levels=3,
-            branching_factors=(8, 8, 8),
+            num_levels=2,
+            branching_factors=(8, 8),
             overflow_policy="error",
         )
     )
@@ -20,11 +20,11 @@ def interpretable_example() -> None:
         [
             SkillRecord(
                 skill_id="calendar.read",
-                hierarchy=("productivity", "calendar", "read"),
+                hierarchy=("productivity", "calendar-read"),
             ),
             SkillRecord(
                 skill_id="calendar.create",
-                hierarchy=("productivity", "calendar", "mutate"),
+                hierarchy=("productivity", "calendar-mutate"),
             ),
         ]
     )

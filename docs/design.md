@@ -5,13 +5,15 @@
 
 ## 1. 设计结论
 
-在线模型不生成 skill 名称、描述或 JSON，而只生成固定长度的层次码：
+在线模型不生成 skill 名称、描述或 JSON，而生成按执行顺序排列的层次码；每条 code
+独占一行：
 
 ```text
-query -> <SK_L1_...> <SK_L2_...> ... <SK_LL_...>
-                                      |
-                                      v
-                         code -> [skill_id, ...]
+query -> <SK_L1_...><SK_L2_...>
+         <SK_L1_...><SK_L2_...>
+                    |
+                    v
+       ordered codes -> ordered skills
 ```
 
 其中：
@@ -19,7 +21,7 @@ query -> <SK_L1_...> <SK_L2_...> ... <SK_LL_...>
 - 层数 `L = num_levels` 可配置；一条候选路径始终只生成 `L` 个 token。
 - 每层 token 都注册为一个不可再切分的 special token。
 - 一个完整 code 对应一个小 bucket，而不是强制对应唯一 skill。
-- 多候选优先通过 constrained beam search 得到多条长度为 `L` 的路径，再由 bucket 展开；不让模型在线生成长候选列表。
+- 多 skill 通过单序列完整自回归生成：`path ("\n" path)* EOS`，不使用 beam search。
 - tokenizer 支持两种可替换策略：
   - `interpretable`：由人工 taxonomy / Skill Card 字段构成可解释层次；
   - `balanced`：学习 ToolWeaver 风格的多级残差 codebook，并用 Sinkhorn 平衡分配抑制 code collapse。
@@ -39,7 +41,7 @@ query -> <SK_L1_...> <SK_L2_...> ... <SK_LL_...>
 若要求“一条 code 唯一对应一个 skill”，新增 skill 常常需要拆桶、重聚类或追加唯一后缀，最终导致 code drift 或生成长度增长。这里允许多个 skill 落入同一叶 bucket，并在外部做小规模精排：
 
 ```text
-<SK_L1_3><SK_L2_7><SK_L3_1>
+<SK_L1_3><SK_L2_7>
   -> [calendar.create, calendar.reschedule, calendar.cancel]
   -> reranker(query, Skill Cards)
   -> selected skills
@@ -102,25 +104,24 @@ ToolWeaver 本身不是动态目录协议。这里的“冻结 codebook + regist
 - 新增 special token 数：`sum(K_l)`；
 - 理论 code 容量：`product(K_l)`；
 - 单条路径的生成长度：严格为 `L`；
-- beam size 为 `B` 时，得到至多 `B` 个 code hypotheses，但每个 hypothesis 仍只有 `L` 步。
+- 输出 `M` 条路径时，总长度为 `M*L + (M-1)*S + 1`，其中 `S` 是换行的 tokenizer 长度，末尾 `1` 为 EOS。
 
-例如 `L=3, K=(64, 64, 64)`：
+默认 `L=2, K=(64, 64)`：
 
-- 词表仅增加 192 个 special tokens；
-- 理论上有 262,144 条 code 路径；
-- 单路径只生成 3 个 token。
+- 词表增加 128 个 special tokens；
+- 理论上有 4,096 条 code 路径；
+- 单路径只生成 2 个 token。
 
 约束解码规则：
 
-1. 第 `l` 步只开放第 `l` 层 namespace 中、且能通向非空 bucket 的 token；
-2. 生成满 `L` 层后只允许 EOS；
-3. 删除最后一个 bucket member 后，该完整路径立即从 active trie 隐藏；
-4. 已预留但当前为空的路径不会出现在 `valid_next_tokens` 中。
+1. 路径内部第 `l` 步只开放第 `l` 层 namespace 中、且能通向非空 bucket 的 token；
+2. 生成满 `L` 层后，只允许 EOS 或换行；换行后必须生成另一条完整有效路径；
+3. 同一输出序列中禁止重复路径，并用 `max_code_paths` 设置安全上限；
+4. 删除最后一个 bucket member 后，该完整路径立即从 active trie 隐藏；
+5. 已预留但当前为空的路径不会出现在 `valid_next_tokens` 中。
 
-多 skill 有两种语义，必须区分：
-
-- **候选召回**：使用 beam 的多条 code 或同一 bucket 的多个 skill，不增加单条序列长度；
-- **必须同时执行的 skill chain**：属于后续 planner 阶段，不在 tokenizer 输出中串联任意数量的 code。
+多 skill target 被解释为有序 skill chain。模型先输出最先执行的 skill code，然后以
+换行继续后续 code；若一条 code 对应 collision bucket，bucket 内成员仍整体展开。
 
 ## 5. 配置模型
 
@@ -129,8 +130,8 @@ ToolWeaver 本身不是动态目录协议。这里的“冻结 codebook + regist
 ```json
 {
   "strategy": "balanced",
-  "num_levels": 3,
-  "branching_factors": [16, 16, 16],
+  "num_levels": 2,
+  "branching_factors": [64, 64],
   "codebook_version": "skills-v1",
   "token_format": "<SK_L{level}_{index}>",
   "random_seed": 7,
@@ -217,12 +218,12 @@ snapshot() -> dict
 
 ### 7.1 输入
 
-每个 Skill Card 提供一条 taxonomy path，例如三层：
+每个 Skill Card 提供一条 taxonomy path，例如默认两层：
 
 ```text
-productivity / calendar / mutate-event
-productivity / calendar / read-event
-engineering  / source-control / pull-request
+productivity / calendar-mutate
+productivity / calendar-read
+engineering  / source-control
 ```
 
 当 `num_levels=2` 时只读取前两层；当 path 短于 `L` 时拒绝入库，不用隐式 `unknown` 掩盖数据质量问题。
@@ -233,8 +234,7 @@ engineering  / source-control / pull-request
 
 ```text
 ()                         productivity -> 0, engineering -> 1
-(0,)                       calendar -> 0
-(0, 0)                     mutate-event -> 0, read-event -> 1
+(0,)                       calendar-mutate -> 0, calendar-read -> 1
 (1,)                       source-control -> 0
 ```
 
@@ -252,8 +252,8 @@ engineering  / source-control / pull-request
 manifest 保存每个 prefix 的 `index -> label`，因此可以把模型 code 还原为：
 
 ```text
-<SK_L1_0><SK_L2_0><SK_L3_1>
-  == productivity / calendar / read-event
+<SK_L1_0><SK_L2_1>
+  == productivity / calendar-read
 ```
 
 这份映射用于审计、数据构造和 UI，不让 LLM 额外生成 label 文本。
@@ -410,8 +410,8 @@ SkillRet skill text -> semantic embeddings
 train qrels         -> sparse collaborative graph
                      -> Stage 1 ToolWeaver RQ-VAE
 frozen RQ-VAE       -> train/test fixed-L codes + collision buckets
-train queries/qrels -> Stage 2 causal-LM SFT
-test active trie    -> fixed-L constrained beam -> skill candidates
+train queries/qrels -> ordered multi-code Stage 2 causal-LM SFT
+test active trie    -> constrained autoregressive sequence -> ordered skills
 ```
 
 Stage 1 只拟合 train skill；test skill 模拟新增目录项，由冻结 encoder/codebook 编码。
@@ -424,29 +424,42 @@ Qwen3 chat template 的 thinking 模式固定关闭，保证 assistant 起始位
 memorization 与 retrieval 使用两个独立 launch，后者从前者的聚合产物继续训练。
 ZeRO-3 与 gradient checkpointing 联用时选择 reentrant 完整重计算，确保参数 gather/release
 hook 在重计算阶段成对执行，避免分区后的零尺寸占位参数参与计算。
-Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrieval。prompt
-部分 label 设为 `-100`，只对恰好 `L` 个 code token 与 EOS 计算 loss。多正例 query
-按不同 code path 展开为多条样本，而不是生成一个很长的 code 列表。
+Stage 2 先做 `skill text -> code` memorization，再做 `query -> ordered codes` retrieval。
+prompt 部分 label 设为 `-100`。Retrieval 对全部 code token、路径间换行和 EOS 计算 loss；
+一个多正例 query 只产生一条 SFT 样本。
 
 单正例样本：
 
 ```json
 {
   "query": "把明天下午的周会改到三点",
-  "target_tokens": ["<SK_L1_0>", "<SK_L2_0>", "<SK_L3_0>"]
+  "target_paths": [["<SK_L1_0>", "<SK_L2_0>"]],
+  "target_text": "<SK_L1_0><SK_L2_0>"
 }
 ```
 
-多个等价 skill/code 时，每个 distinct 正例 code 各构造一条训练样本；同 bucket
-内的多个 skill 不重复构造相同 target。
+多正例样本：
+
+```json
+{
+  "query": "先查天气，再安排日程",
+  "target_paths": [
+    ["<SK_L1_1>", "<SK_L2_7>"],
+    ["<SK_L1_3>", "<SK_L2_4>"]
+  ],
+  "target_text": "<SK_L1_1><SK_L2_7>\n<SK_L1_3><SK_L2_4>"
+}
+```
+
+顺序来自 query/qrels 中的 workflow 顺序；同 bucket 内的多个 skill 不重复输出相同 code。
 
 推理：
 
-1. 对 `L` 步做 trie-constrained beam search；
-2. 将 beam code 展开为 skill buckets；
-3. 去重并限制候选数量；
-4. 用轻量 cross-encoder / LLM scorer 读取 query 与短 Skill Cards 精排；
-5. 返回 top-k skills 给 planner 或执行器。
+1. 用 greedy 单序列解码生成第一条 `L` 层 code；
+2. 在完整路径边界由模型选择 EOS，或选择换行继续下一条 code；
+3. 状态机屏蔽无效、已删除和本序列中已经生成过的路径；
+4. 按生成顺序将 code 展开为 skill buckets，去重并限制候选数量；
+5. 返回有序 skills 给 planner 或执行器。
 
 ## 12. 监控指标
 
@@ -462,10 +475,11 @@ Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrie
 在线 router：
 
 - valid-path rate；
+- ordered code sequence exact match、路径数量准确率与绝对误差；
 - code Recall@B；
 - bucket-expanded Skill Recall@K；
 - 精排后的 Skill Recall / MRR；
-- 平均生成步数（应等于 `L`）；
+- 平均生成路径数与总生成步数；
 - 首 token / 完整 code 延迟；
 - 删除 skill 被召回率（应为 0）；
 - 新增 skill 冷启动召回率。
@@ -487,7 +501,7 @@ Stage 2 先做 `skill text -> code` memorization，再做 `query -> code` retrie
 - train/test 固定长度 code、完整 special-token namespace 与 collision buckets；
 - Qwen3 causal LLM 的 memorization/retrieval 两阶段 SFT，支持 full、LoRA 和
   DeepSpeed；
-- active-trie constrained beam 推理及 NDCG/Recall/MAP/MRR/Completeness；
+- active-trie constrained 自回归多-code 推理及 NDCG/Recall/MAP/MRR/Completeness；
 - 不依赖 bucket 内任意 tie-break 的 code recall 与 bucket-expanded recall；
 - skill 动态 add/remove；
 - prefix decode 与 valid-next-token 查询；

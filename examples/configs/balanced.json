@@ -1,7 +1,7 @@
 {
   "strategy": "balanced",
-  "num_levels": 3,
-  "branching_factors": [64, 64, 64],
+  "num_levels": 2,
+  "branching_factors": [64, 64],
   "codebook_version": "skills-rq-v1",
   "token_format": "<SK_L{level}_{index}>",
   "random_seed": 7,

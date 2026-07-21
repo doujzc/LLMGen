@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any
 
 
+CODE_PATH_SEPARATOR = "\n"
+
+
 class RouterDataError(ValueError):
     """Raised when router artifacts violate their shared schema."""
 
@@ -242,9 +245,10 @@ def validate_registry_assignments(
 def qrels_by_query(
     rows: Iterable[Mapping[str, Any]],
 ) -> dict[str, tuple[str, ...]]:
-    """Group positive qrels, ignoring explicit non-relevant rows if present."""
+    """Group positive qrels in source order, ignoring non-relevant rows."""
 
-    grouped: dict[str, set[str]] = defaultdict(set)
+    grouped: dict[str, list[str]] = defaultdict(list)
+    seen: dict[str, set[str]] = defaultdict(set)
     for row_number, row in enumerate(rows, start=1):
         query_id = _nonempty_text(row, "query_id", "qid")
         skill_id = _nonempty_text(row, "skill_id", "doc_id")
@@ -257,10 +261,11 @@ def qrels_by_query(
             raise RouterDataError(
                 f"qrel row {row_number} has invalid relevance {relevance!r}"
             ) from exc
-        if is_positive:
-            grouped[query_id].add(skill_id)
+        if is_positive and skill_id not in seen[query_id]:
+            grouped[query_id].append(skill_id)
+            seen[query_id].add(skill_id)
     return {
-        query_id: tuple(sorted(skill_ids))
+        query_id: tuple(skill_ids)
         for query_id, skill_ids in grouped.items()
     }
 
@@ -270,11 +275,11 @@ def build_retrieval_examples(
     skill_to_code: Mapping[str, Sequence[str]],
     qrels: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Expand multi-positive queries by *distinct* positive code path.
+    """Build one ordered, newline-delimited target per multi-positive query.
 
-    Skills colliding in one bucket produce one target rather than duplicate
-    rows.  Multiple positive buckets produce multiple SFT rows with the same
-    query; the grouped splitter below keeps all such rows on the same side.
+    Each distinct positive code path occupies one output line. Skills colliding
+    in one bucket share that line. Positive order is preserved because the
+    sequence represents a skill chain rather than an unordered label set.
     """
 
     examples: list[dict[str, Any]] = []
@@ -308,20 +313,26 @@ def build_retrieval_examples(
                 )
             code_to_skills[tuple(skill_to_code[skill_id])].append(skill_id)
 
-        all_positive_ids = sorted(set(positive_ids))
-        for code in sorted(code_to_skills):
-            examples.append(
-                {
-                    "phase": "retrieval",
-                    "group_id": canonical_query_group(query),
-                    "query_id": query_id,
-                    "input_text": query,
-                    "target_tokens": list(code),
-                    "target_text": "".join(code),
-                    "target_skill_ids": sorted(set(code_to_skills[code])),
-                    "positive_skill_ids": all_positive_ids,
-                }
-            )
+        all_positive_ids = list(dict.fromkeys(positive_ids))
+        target_paths = [list(code) for code in code_to_skills]
+        examples.append(
+            {
+                "phase": "retrieval",
+                "group_id": canonical_query_group(query),
+                "query_id": query_id,
+                "input_text": query,
+                "target_paths": target_paths,
+                "target_text": CODE_PATH_SEPARATOR.join(
+                    "".join(path) for path in target_paths
+                ),
+                "target_skill_ids": all_positive_ids,
+                "path_skill_ids": [
+                    list(dict.fromkeys(code_to_skills[code]))
+                    for code in code_to_skills
+                ],
+                "positive_skill_ids": all_positive_ids,
+            }
+        )
     return examples
 
 
@@ -332,11 +343,8 @@ def build_closed_set_evaluation_rows(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Materialize unique queries/qrels from held-out retrieval SFT rows.
 
-    A multi-positive query produces one SFT row per distinct target code, so the
-    router validation artifact cannot be passed to inference directly.  This
-    function collapses those rows back to one query and one binary qrel per
-    positive skill while preserving the exact query-group split used in
-    training.
+    New router data already has one SFT row per query. Older expanded artifacts
+    are also accepted and collapsed, preserving the exact query-group split.
     """
 
     grouped: dict[str, dict[str, Any]] = {}
@@ -443,6 +451,7 @@ def build_memorization_examples(
                 "group_id": skill_id,
                 "skill_id": skill_id,
                 "input_text": text,
+                "target_paths": [list(code)],
                 "target_tokens": list(code),
                 "target_text": "".join(code),
                 "target_skill_ids": [skill_id],
@@ -540,9 +549,127 @@ class TokenTrie:
         return tuple(path) in self._paths
 
 
+class MultiPathTokenTrie:
+    """Grammar for ``path (separator path)* EOS`` constrained decoding.
+
+    Completed paths cannot be repeated. At a path boundary the model decides
+    autoregressively between EOS and the configured textual separator.
+    """
+
+    def __init__(
+        self,
+        paths: Iterable[Sequence[int]],
+        *,
+        eos_token_id: int,
+        separator_token_ids: Sequence[int],
+        max_paths: int,
+    ) -> None:
+        if (
+            not isinstance(max_paths, int)
+            or isinstance(max_paths, bool)
+            or max_paths < 1
+        ):
+            raise RouterDataError("max_paths must be a positive integer")
+        separator = tuple(int(value) for value in separator_token_ids)
+        if not separator or any(value < 0 for value in separator):
+            raise RouterDataError(
+                "separator_token_ids must be non-empty and non-negative"
+            )
+        if eos_token_id in separator:
+            raise RouterDataError("path separator cannot contain EOS")
+        self.path_trie = TokenTrie(paths, eos_token_id=eos_token_id)
+        self.eos_token_id = eos_token_id
+        self.separator_token_ids = separator
+        self.max_paths = min(max_paths, len(self.path_trie.paths))
+
+    @property
+    def num_levels(self) -> int:
+        return self.path_trie.num_levels
+
+    @property
+    def paths(self) -> frozenset[tuple[int, ...]]:
+        return self.path_trie.paths
+
+    def _state(
+        self, generated: Sequence[int]
+    ) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...], str, int] | None:
+        completed: list[tuple[int, ...]] = []
+        prefix: list[int] = []
+        mode = "path"
+        separator_offset = 0
+        for raw_token_id in generated:
+            token_id = int(raw_token_id)
+            if token_id == self.eos_token_id:
+                return None
+            if mode == "path":
+                prefix.append(token_id)
+                prefix_tuple = tuple(prefix)
+                if not any(
+                    path not in completed and path[: len(prefix_tuple)] == prefix_tuple
+                    for path in self.paths
+                ):
+                    return None
+                if len(prefix) == self.num_levels:
+                    completed.append(prefix_tuple)
+                    prefix = []
+                    mode = "boundary"
+            elif mode == "boundary":
+                if token_id != self.separator_token_ids[0]:
+                    return None
+                if len(self.separator_token_ids) == 1:
+                    mode = "path"
+                else:
+                    mode = "separator"
+                    separator_offset = 1
+            else:
+                if token_id != self.separator_token_ids[separator_offset]:
+                    return None
+                separator_offset += 1
+                if separator_offset == len(self.separator_token_ids):
+                    mode = "path"
+        return tuple(completed), tuple(prefix), mode, separator_offset
+
+    def allowed_next(self, generated: Sequence[int]) -> tuple[int, ...]:
+        state = self._state(generated)
+        if state is None:
+            return ()
+        completed, prefix, mode, separator_offset = state
+        if mode == "separator":
+            return (self.separator_token_ids[separator_offset],)
+        if mode == "boundary":
+            if len(completed) >= self.max_paths or len(completed) >= len(self.paths):
+                return (self.eos_token_id,)
+            return tuple(sorted({self.eos_token_id, self.separator_token_ids[0]}))
+
+        candidates = [
+            path
+            for path in self.paths
+            if path not in completed and path[: len(prefix)] == prefix
+        ]
+        if not candidates or len(prefix) >= self.num_levels:
+            return ()
+        return tuple(sorted({path[len(prefix)] for path in candidates}))
+
+    def parse_complete(self, generated: Sequence[int]) -> tuple[tuple[int, ...], ...]:
+        """Parse tokens before EOS and require a complete final path."""
+
+        state = self._state(generated)
+        if state is None:
+            raise RouterDataError("generated multi-path sequence is invalid")
+        completed, prefix, mode, _ = state
+        if (
+            not completed
+            or len(completed) > self.max_paths
+            or prefix
+            or mode != "boundary"
+        ):
+            raise RouterDataError("generated sequence does not end at a path boundary")
+        return completed
+
+
 @dataclass(frozen=True, slots=True)
 class GeneratedPath:
-    """One constrained beam result before bucket expansion."""
+    """One path from an ordered autoregressive result before bucket expansion."""
 
     tokens: tuple[str, ...]
     score: float
@@ -554,7 +681,7 @@ def rank_bucket_candidates(
     *,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Expand beam paths without losing skills that share a collision bucket."""
+    """Expand ordered paths without losing skills in a collision bucket."""
 
     best: dict[str, tuple[float, int, tuple[str, ...]]] = {}
     for path_rank, generated in enumerate(paths):
@@ -564,10 +691,7 @@ def rank_bucket_candidates(
             candidate = (float(generated.score), path_rank, generated.tokens)
             if previous is None or candidate[0] > previous[0]:
                 best[skill_id] = candidate
-    ordered = sorted(
-        best.items(),
-        key=lambda item: (-item[1][0], item[1][1], item[0]),
-    )
+    ordered = sorted(best.items(), key=lambda item: (item[1][1], item[0]))
     if limit is not None:
         if limit < 1:
             raise RouterDataError("candidate limit must be positive")
@@ -647,7 +771,11 @@ def query_code_path_metrics(
     IDs, so it remains invariant to the tie-break used for skills sharing a code.
     """
 
-    relevant = set(relevant_skill_ids)
+    raw_relevant = list(relevant_skill_ids)
+    if isinstance(relevant_skill_ids, (set, frozenset)):
+        raw_relevant = sorted(raw_relevant)
+    ordered_relevant = list(dict.fromkeys(raw_relevant))
+    relevant = set(ordered_relevant)
     if not relevant:
         raise RouterDataError("code-path metrics require at least one relevant skill")
     unknown = relevant.difference(skill_to_code)
@@ -663,7 +791,16 @@ def query_code_path_metrics(
         raise RouterDataError("metric cutoffs must be positive integers")
 
     relevant_paths = {tuple(skill_to_code[skill_id]) for skill_id in relevant}
-    metrics: dict[str, float] = {}
+    ordered_relevant_paths = list(
+        dict.fromkeys(tuple(skill_to_code[skill_id]) for skill_id in ordered_relevant)
+    )
+    metrics: dict[str, float] = {
+        "ordered_code_exact_match": float(ranked == ordered_relevant_paths),
+        "code_count_exact_match": float(len(ranked) == len(ordered_relevant_paths)),
+        "code_count_absolute_error": float(
+            abs(len(ranked) - len(ordered_relevant_paths))
+        ),
+    }
     for cutoff in normalized_cutoffs:
         top_paths = ranked[:cutoff]
         retrieved_relevant_paths = relevant_paths.intersection(top_paths)
@@ -754,26 +891,58 @@ def encode_target_only_example(
     max_length: int,
     system_prompt: str = "",
 ) -> dict[str, list[int]]:
-    """Encode one causal-LM example with loss only on code tokens and EOS."""
+    """Encode a newline-delimited code sequence with target-only causal loss."""
 
     input_text = row.get("input_text")
-    target_tokens = row.get("target_tokens")
     if not isinstance(input_text, str) or not input_text.strip():
         raise RouterDataError("training row has no input_text")
-    if not isinstance(target_tokens, list) or len(target_tokens) != num_levels:
-        raise RouterDataError(
-            f"training target must contain exactly {num_levels} hierarchical tokens"
-        )
+    raw_paths = row.get("target_paths")
+    if raw_paths is None:
+        # Backward compatibility for already-built single-path router data.
+        raw_paths = [row.get("target_tokens")]
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise RouterDataError("training target must contain at least one code path")
+    paths: list[list[str]] = []
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, list) or len(raw_path) != num_levels:
+            raise RouterDataError(
+                f"each training target path must contain exactly {num_levels} "
+                "hierarchical tokens"
+            )
+        if any(not isinstance(token, str) for token in raw_path):
+            raise RouterDataError("training target contains a non-string code token")
+        paths.append(raw_path)
+    if len({tuple(path) for path in paths}) != len(paths):
+        raise RouterDataError("training target contains a duplicate code path")
     try:
-        target_ids = [code_token_ids[token] for token in target_tokens]
+        encoded_paths = [
+            [code_token_ids[token] for token in path]
+            for path in paths
+        ]
     except (KeyError, TypeError) as exc:
         raise RouterDataError("training target contains an unknown code token") from exc
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     if eos_token_id is None:
         raise RouterDataError("causal tokenizer must define eos_token_id")
+    separator_ids = list(
+        tokenizer.encode(
+            CODE_PATH_SEPARATOR,
+            add_special_tokens=False,
+            verbose=False,
+        )
+    )
+    if not separator_ids:
+        raise RouterDataError("tokenizer encodes the code-path separator as empty")
+    if int(eos_token_id) in separator_ids:
+        raise RouterDataError("code-path separator contains the tokenizer EOS token")
+    target_ids: list[int] = []
+    for path_index, path_ids in enumerate(encoded_paths):
+        if path_index:
+            target_ids.extend(int(value) for value in separator_ids)
+        target_ids.extend(int(value) for value in path_ids)
     target_ids.append(int(eos_token_id))
     if max_length < len(target_ids) + 1:
-        raise RouterDataError("max_length is too small for prompt plus fixed target")
+        raise RouterDataError("max_length is too small for prompt plus supervised target")
 
     prompt = render_router_prompt(tokenizer, input_text, system_prompt)
     prompt_ids = list(

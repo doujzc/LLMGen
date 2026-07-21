@@ -5,7 +5,9 @@ import math
 import pytest
 
 from llmgen.router import (
+    CODE_PATH_SEPARATOR,
     GeneratedPath,
+    MultiPathTokenTrie,
     RouterDataError,
     TokenTrie,
     active_skill_ids_from_registry,
@@ -75,18 +77,21 @@ def test_registry_bucket_indices_are_cross_checked() -> None:
         )
 
 
-def test_multi_positive_queries_expand_by_distinct_code_path() -> None:
+def test_multi_positive_query_builds_one_ordered_multicode_target() -> None:
     codes, _ = normalize_code_rows(CODE_ROWS)
     queries = [{"id": "q1", "query": "do both", "skill_ids": ["s1", "s2", "s3"]}]
     examples = build_retrieval_examples(queries, codes)
-    assert len(examples) == 2
-    assert {tuple(row["target_tokens"]) for row in examples} == {
-        ("<L1_0>", "<L2_0>"),
-        ("<L1_1>", "<L2_1>"),
-    }
-    collided = next(row for row in examples if row["target_skill_ids"] == ["s1", "s2"])
-    assert collided["positive_skill_ids"] == ["s1", "s2", "s3"]
-    assert all(row["group_id"] == canonical_query_group("do both") for row in examples)
+    assert len(examples) == 1
+    assert examples[0]["target_paths"] == [
+        ["<L1_0>", "<L2_0>"],
+        ["<L1_1>", "<L2_1>"],
+    ]
+    assert examples[0]["target_text"] == (
+        "<L1_0><L2_0>" + CODE_PATH_SEPARATOR + "<L1_1><L2_1>"
+    )
+    assert examples[0]["path_skill_ids"] == [["s1", "s2"], ["s3"]]
+    assert examples[0]["positive_skill_ids"] == ["s1", "s2", "s3"]
+    assert examples[0]["group_id"] == canonical_query_group("do both")
 
 
 def test_closed_set_export_collapses_multi_target_sft_rows() -> None:
@@ -95,13 +100,7 @@ def test_closed_set_export_collapses_multi_target_sft_rows() -> None:
             "query_id": "q1",
             "input_text": "do both",
             "positive_skill_ids": ["s1", "s2", "s3"],
-            "target_skill_ids": ["s1", "s2"],
-        },
-        {
-            "query_id": "q1",
-            "input_text": "do both",
-            "positive_skill_ids": ["s1", "s2", "s3"],
-            "target_skill_ids": ["s3"],
+            "target_skill_ids": ["s1", "s2", "s3"],
         },
     ]
     queries, qrels = build_closed_set_evaluation_rows(
@@ -158,6 +157,24 @@ def test_qrels_are_authoritative_when_supplied() -> None:
     assert examples[0]["target_skill_ids"] == ["s3"]
 
 
+def test_qrel_source_order_becomes_autoregressive_target_order() -> None:
+    codes, _ = normalize_code_rows(CODE_ROWS)
+    queries = [{"id": "q1", "query": "third, then first"}]
+    qrels = qrels_by_query(
+        [
+            {"query_id": "q1", "skill_id": "s3", "relevance": 1},
+            {"query_id": "q1", "skill_id": "s1", "relevance": 1},
+        ]
+    )
+
+    examples = build_retrieval_examples(queries, codes, qrels)
+
+    assert examples[0]["target_paths"] == [
+        ["<L1_1>", "<L2_1>"],
+        ["<L1_0>", "<L2_0>"],
+    ]
+
+
 def test_memorization_uses_official_document_order() -> None:
     codes, _ = normalize_code_rows(CODE_ROWS)
     rows = build_memorization_examples(
@@ -208,6 +225,38 @@ def test_trie_requires_exactly_l_tokens_then_eos() -> None:
     assert trie.is_active_path((11, 22))
 
 
+def test_multi_path_trie_generates_newline_delimited_unique_paths() -> None:
+    trie = MultiPathTokenTrie(
+        [(10, 20), (10, 21), (11, 22)],
+        eos_token_id=2,
+        separator_token_ids=(13,),
+        max_paths=3,
+    )
+    assert trie.allowed_next(()) == (10, 11)
+    assert trie.allowed_next((10,)) == (20, 21)
+    assert trie.allowed_next((10, 20)) == (2, 13)
+    assert trie.allowed_next((10, 20, 13)) == (10, 11)
+    # The already emitted (10, 20) path is unavailable below its shared prefix.
+    assert trie.allowed_next((10, 20, 13, 10)) == (21,)
+    sequence = (10, 20, 13, 10, 21, 13, 11, 22)
+    assert trie.allowed_next(sequence) == (2,)
+    assert trie.parse_complete(sequence) == ((10, 20), (10, 21), (11, 22))
+
+
+def test_multi_path_trie_supports_multitoken_separator_and_early_eos() -> None:
+    trie = MultiPathTokenTrie(
+        [(10, 20), (11, 21)],
+        eos_token_id=2,
+        separator_token_ids=(13, 14),
+        max_paths=2,
+    )
+    assert trie.allowed_next((10, 20)) == (2, 13)
+    assert trie.allowed_next((10, 20, 13)) == (14,)
+    assert trie.allowed_next((10, 20, 13, 14)) == (11,)
+    with pytest.raises(RouterDataError, match="invalid"):
+        trie.parse_complete((10, 20, 13, 14, 11, 21, 13, 14, 10, 20))
+
+
 def test_bucket_expansion_keeps_all_colliding_skills() -> None:
     path_a = ("<L1_0>", "<L2_0>")
     path_b = ("<L1_1>", "<L2_1>")
@@ -215,8 +264,8 @@ def test_bucket_expansion_keeps_all_colliding_skills() -> None:
         [GeneratedPath(path_b, -0.2), GeneratedPath(path_a, -0.1)],
         {path_a: ("s1", "s2"), path_b: ("s3",)},
     )
-    assert [row["skill_id"] for row in candidates] == ["s1", "s2", "s3"]
-    assert candidates[0]["score"] == candidates[1]["score"] == -0.1
+    assert [row["skill_id"] for row in candidates] == ["s3", "s1", "s2"]
+    assert candidates[1]["score"] == candidates[2]["score"] == -0.1
 
 
 def test_skillret_metrics_for_multi_positive_query() -> None:
@@ -257,6 +306,9 @@ def test_code_path_metrics_ignore_collision_bucket_tie_breaks() -> None:
     assert metrics["code_recall@2"] == 1.0
     assert metrics["bucket_recall@2"] == 1.0
     assert metrics["bucket_completeness@2"] == 1.0
+    assert metrics["ordered_code_exact_match"] == 1.0
+    assert metrics["code_count_exact_match"] == 1.0
+    assert metrics["code_count_absolute_error"] == 0.0
 
 
 class FakeTokenizer:
@@ -264,7 +316,12 @@ class FakeTokenizer:
     chat_template = None
 
     def __init__(self) -> None:
-        self.special = {"<L1_0>": 10, "<L2_0>": 20}
+        self.special = {
+            "<L1_0>": 10,
+            "<L2_0>": 20,
+            "<L1_1>": 11,
+            "<L2_1>": 21,
+        }
 
     def encode(self, text, add_special_tokens=False, **kwargs):
         if text in self.special:
@@ -289,6 +346,45 @@ def test_target_only_encoding_masks_the_entire_prompt() -> None:
     assert encoded["labels"][-3:] == [10, 20, 2]
     assert set(encoded["labels"][:-3]) == {-100}
     assert len(encoded["attention_mask"]) == len(encoded["input_ids"])
+
+
+def test_target_only_encoding_supervises_newline_between_paths() -> None:
+    tokenizer = FakeTokenizer()
+    token_ids = code_token_id_map(tokenizer, tokenizer.special)
+    encoded = encode_target_only_example(
+        tokenizer,
+        {
+            "input_text": "do both",
+            "target_paths": [
+                ["<L1_0>", "<L2_0>"],
+                ["<L1_1>", "<L2_1>"],
+            ],
+        },
+        code_token_ids=token_ids,
+        num_levels=2,
+        max_length=64,
+    )
+    assert encoded["input_ids"][-6:] == [10, 20, 100, 11, 21, 2]
+    assert encoded["labels"][-6:] == [10, 20, 100, 11, 21, 2]
+
+
+def test_target_only_encoding_rejects_duplicate_paths() -> None:
+    tokenizer = FakeTokenizer()
+    token_ids = code_token_id_map(tokenizer, tokenizer.special)
+    with pytest.raises(RouterDataError, match="duplicate code path"):
+        encode_target_only_example(
+            tokenizer,
+            {
+                "input_text": "repeat",
+                "target_paths": [
+                    ["<L1_0>", "<L2_0>"],
+                    ["<L1_0>", "<L2_0>"],
+                ],
+            },
+            code_token_ids=token_ids,
+            num_levels=2,
+            max_length=64,
+        )
 
 
 def test_qwen3_style_chat_template_disables_thinking() -> None:

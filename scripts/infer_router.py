@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Constrained-beam inference and SkillRet evaluation for the causal router."""
+"""Constrained autoregressive multi-skill inference and evaluation."""
 
 from __future__ import annotations
 
@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from llmgen.router import (
+    CODE_PATH_SEPARATOR,
     GeneratedPath,
+    MultiPathTokenTrie,
     RouterDataError,
-    TokenTrie,
     active_skill_ids_from_registry,
     aggregate_retrieval_metrics,
     buckets_from_codes,
@@ -31,14 +32,14 @@ from llmgen.skillret import sha256_file
 
 
 DEFAULT_SYSTEM_PROMPT = (
-    "Select the Agent Skill code that best matches the user request. "
-    "Answer with code tokens only."
+    "Select every Agent Skill needed for the user request in execution order. "
+    "Output one hierarchical skill code per line, with no other text."
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate fixed-length skill codes using an active-registry trie."
+        description="Autoregressively generate newline-delimited skill codes."
     )
     parser.add_argument("--model-name-or-path", required=True)
     parser.add_argument(
@@ -63,8 +64,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Prompt-token budget; defaults to the router training manifest/model context.",
     )
-    parser.add_argument("--beam-size", type=int, default=20)
-    parser.add_argument("--num-code-paths", type=int, default=20)
+    parser.add_argument(
+        "--max-code-paths",
+        type=int,
+        default=8,
+        help="Safety cap; EOS may stop generation after any complete path.",
+    )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--cutoffs", type=int, nargs="+", default=(1, 5, 10))
     parser.add_argument("--device", default="cuda:0")
@@ -119,6 +124,16 @@ def _validate_training_contract(args: argparse.Namespace) -> int | None:
     if not training_manifest.is_file():
         return None
     payload = json.loads(training_manifest.read_text(encoding="utf-8"))
+    generation_contract = payload.get("generation_contract")
+    if not isinstance(generation_contract, dict) or generation_contract.get(
+        "mode"
+    ) != "autoregressive_multi_path":
+        raise RouterDataError(
+            "router checkpoint predates autoregressive multi-path generation; "
+            "rebuild router data and retrain Stage 2"
+        )
+    if generation_contract.get("path_separator") != CODE_PATH_SEPARATOR:
+        raise RouterDataError("router checkpoint uses a different path separator")
     expected_tokens_hash = payload.get("virtual_tokens_sha256")
     if expected_tokens_hash and expected_tokens_hash != sha256_file(args.virtual_tokens):
         raise RouterDataError(
@@ -187,6 +202,19 @@ def _load_model_and_tokenizer(args: argparse.Namespace, virtual_tokens: tuple[st
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "right"
     token_ids = code_token_id_map(tokenizer, virtual_tokens)
+    separator_token_ids = tuple(
+        int(value)
+        for value in tokenizer.encode(
+            CODE_PATH_SEPARATOR,
+            add_special_tokens=False,
+            verbose=False,
+        )
+    )
+    if not separator_token_ids:
+        raise RouterDataError("tokenizer encodes the code-path separator as empty")
+    if int(tokenizer.eos_token_id) in separator_token_ids:
+        raise RouterDataError("code-path separator contains the tokenizer EOS token")
+    args._separator_token_ids = separator_token_ids
 
     model_kwargs: dict[str, Any] = {"trust_remote_code": args.trust_remote_code}
     requested_dtype = _dtype(torch, args.dtype)
@@ -226,7 +254,12 @@ def _load_model_and_tokenizer(args: argparse.Namespace, virtual_tokens: tuple[st
             if isinstance(value, (int, float)) and int(value) > 0
         ]
         total_limit = min(limits) if limits else 1024
-        args.max_input_length = total_limit - args._num_levels - 1
+        output_budget = (
+            args.max_code_paths * args._num_levels
+            + (args.max_code_paths - 1) * len(separator_token_ids)
+            + 1
+        )
+        args.max_input_length = total_limit - output_budget
     if args.max_input_length < 1:
         raise RouterDataError("max_input_length leaves no room for the prompt")
     return torch, tokenizer, model, token_ids
@@ -235,8 +268,8 @@ def _load_model_and_tokenizer(args: argparse.Namespace, virtual_tokens: tuple[st
 def _logits_processor_class(torch: Any):
     from transformers import LogitsProcessor
 
-    class TrieLogitsProcessor(LogitsProcessor):
-        def __init__(self, trie: TokenTrie, prompt_width: int) -> None:
+    class MultiPathTrieLogitsProcessor(LogitsProcessor):
+        def __init__(self, trie: MultiPathTokenTrie, prompt_width: int) -> None:
             self.trie = trie
             self.prompt_width = prompt_width
 
@@ -244,15 +277,22 @@ def _logits_processor_class(torch: Any):
             generated = input_ids[:, self.prompt_width :]
             masked = torch.full_like(scores, -float("inf"))
             for row_index, suffix in enumerate(generated.tolist()):
-                allowed = self.trie.allowed_next(suffix)
+                # Finished rows remain in a padded batch while other rows keep
+                # decoding. Their pad token is EOS, so keep EOS legal without
+                # asking the active grammar to parse beyond termination.
+                allowed = (
+                    (self.trie.eos_token_id,)
+                    if self.trie.eos_token_id in suffix
+                    else self.trie.allowed_next(suffix)
+                )
                 if not allowed:
                     raise RuntimeError(
-                        f"beam reached an invalid code prefix: {suffix!r}"
+                        f"generation reached an invalid code sequence: {suffix!r}"
                     )
                 masked[row_index, list(allowed)] = scores[row_index, list(allowed)]
             return masked
 
-    return TrieLogitsProcessor
+    return MultiPathTrieLogitsProcessor
 
 
 def _chunks(rows: list[dict[str, Any]], size: int):
@@ -266,7 +306,7 @@ def _generate_batch(
     tokenizer: Any,
     model: Any,
     torch: Any,
-    trie: TokenTrie,
+    trie: MultiPathTokenTrie,
     id_to_token: dict[int, str],
     buckets: dict[tuple[str, ...], tuple[str, ...]],
     args: argparse.Namespace,
@@ -285,56 +325,59 @@ def _generate_batch(
     )
     encoded = {name: value.to(args.device) for name, value in encoded.items()}
     prompt_width = int(encoded["input_ids"].shape[1])
-    active_path_count = len(trie.paths)
-    num_beams = min(args.beam_size, active_path_count)
-    num_return_sequences = min(args.num_code_paths, num_beams)
-    TrieLogitsProcessor = _logits_processor_class(torch)
-    processor = TrieLogitsProcessor(trie, prompt_width)
+    MultiPathTrieLogitsProcessor = _logits_processor_class(torch)
+    processor = MultiPathTrieLogitsProcessor(trie, prompt_width)
     from transformers import LogitsProcessorList
 
+    max_new_tokens = (
+        trie.max_paths * trie.num_levels
+        + (trie.max_paths - 1) * len(trie.separator_token_ids)
+        + 1
+    )
     with torch.inference_mode():
         generated = model.generate(
             **encoded,
             do_sample=False,
-            num_beams=num_beams,
-            num_return_sequences=num_return_sequences,
-            max_new_tokens=trie.num_levels + 1,
-            # EOS becomes legal after the Lth code token.  Setting L+1 here
-            # would have Hugging Face mask the only token allowed by the trie.
+            num_beams=1,
+            num_return_sequences=1,
+            max_new_tokens=max_new_tokens,
             min_new_tokens=trie.num_levels,
             eos_token_id=trie.eos_token_id,
             pad_token_id=int(tokenizer.pad_token_id),
             logits_processor=LogitsProcessorList([processor]),
             return_dict_in_generate=True,
             output_scores=True,
-            length_penalty=0.0,
-            early_stopping=True,
         )
 
-    sequence_scores = getattr(generated, "sequences_scores", None)
+    transition_scores = None
+    compute_transition_scores = getattr(model, "compute_transition_scores", None)
+    if callable(compute_transition_scores):
+        transition_scores = compute_transition_scores(
+            generated.sequences,
+            generated.scores,
+            normalize_logits=True,
+        )
     results: list[dict[str, Any]] = []
     for batch_index, query_row in enumerate(batch):
+        suffix = generated.sequences[batch_index, prompt_width:].tolist()
+        try:
+            eos_position = suffix.index(trie.eos_token_id)
+        except ValueError as exc:
+            raise RuntimeError("constrained generation did not emit EOS") from exc
+        sequence_ids = tuple(int(value) for value in suffix[:eos_position])
+        path_id_sequence = trie.parse_complete(sequence_ids)
         paths: list[GeneratedPath] = []
         path_payloads: list[dict[str, Any]] = []
-        offset = batch_index * num_return_sequences
-        for beam_offset in range(num_return_sequences):
-            row_index = offset + beam_offset
-            suffix = generated.sequences[row_index, prompt_width:].tolist()
-            if len(suffix) < trie.num_levels + 1:
-                raise RuntimeError("constrained generation ended before L tokens plus EOS")
-            path_ids = tuple(int(value) for value in suffix[: trie.num_levels])
-            if not trie.is_active_path(path_ids):
-                raise RuntimeError(f"model returned a path outside the active trie: {path_ids}")
-            if int(suffix[trie.num_levels]) != trie.eos_token_id:
-                raise RuntimeError("model did not emit EOS immediately after the Lth token")
+        cursor = 0
+        for path_ids in path_id_sequence:
             path_tokens = tuple(id_to_token[token_id] for token_id in path_ids)
-            score = (
-                float(sequence_scores[row_index].item())
-                if sequence_scores is not None
-                else 0.0
-            )
-            if any(existing.tokens == path_tokens for existing in paths):
-                continue
+            score = 0.0
+            if transition_scores is not None:
+                score = float(
+                    transition_scores[
+                        batch_index, cursor : cursor + trie.num_levels
+                    ].sum().item()
+                )
             paths.append(GeneratedPath(path_tokens, score))
             path_payloads.append(
                 {
@@ -344,17 +387,15 @@ def _generate_batch(
                     "skill_ids": list(buckets[path_tokens]),
                 }
             )
-        paths.sort(key=lambda item: (-item.score, item.tokens))
-        # Keep the serialized path order consistent with candidate path_rank.
-        payload_by_tokens = {
-            tuple(item["code_tokens"]): item for item in path_payloads
-        }
-        path_payloads = [payload_by_tokens[path.tokens] for path in paths]
+            cursor += trie.num_levels + len(trie.separator_token_ids)
         candidates = rank_bucket_candidates(paths, buckets, limit=args.top_k)
         results.append(
             {
                 "query_id": query_row["id"],
                 "query": query_row["query"],
+                "generated_text": CODE_PATH_SEPARATOR.join(
+                    path["code_text"] for path in path_payloads
+                ),
                 "paths": path_payloads,
                 "candidates": candidates,
             }
@@ -364,10 +405,8 @@ def _generate_batch(
 
 def main() -> None:
     args = parse_args()
-    if args.batch_size < 1 or args.beam_size < 1 or args.num_code_paths < 1:
-        raise RouterDataError("batch/beam/path counts must be positive")
-    if args.num_code_paths > args.beam_size:
-        raise RouterDataError("num_code_paths cannot exceed beam_size")
+    if args.batch_size < 1 or args.max_code_paths < 1:
+        raise RouterDataError("batch_size and max_code_paths must be positive")
     if args.top_k < 1:
         raise RouterDataError("top_k must be positive")
     if any(cutoff < 1 for cutoff in args.cutoffs):
@@ -400,7 +439,12 @@ def main() -> None:
         raise RouterDataError(
             f"active code uses token absent from virtual_tokens.txt: {exc.args[0]!r}"
         ) from exc
-    trie = TokenTrie(active_token_paths, eos_token_id=int(tokenizer.eos_token_id))
+    trie = MultiPathTokenTrie(
+        active_token_paths,
+        eos_token_id=int(tokenizer.eos_token_id),
+        separator_token_ids=args._separator_token_ids,
+        max_paths=args.max_code_paths,
+    )
     if trie.num_levels != num_levels:
         raise RuntimeError("active trie changed the configured number of levels")
     id_to_token = {token_id: token for token, token_id in token_ids.items()}
@@ -453,6 +497,11 @@ def main() -> None:
             "num_active_skills": len(active_skill_ids),
             "num_active_paths": len(buckets),
             "num_levels": num_levels,
+            "generation": {
+                "mode": "autoregressive_multi_path",
+                "separator": CODE_PATH_SEPARATOR,
+                "max_code_paths": trie.max_paths,
+            },
             "cutoffs": sorted(set(args.cutoffs)),
             "metrics": aggregate_retrieval_metrics(per_query),
         }

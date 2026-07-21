@@ -1,7 +1,12 @@
 # LLMGen
 
-面向 Agent Skills 的低时延生成式召回：模型每条候选只生成可配置的 `L` 个层级
-special tokens，再由 collision bucket 展开为多个 skills。
+面向 Agent Skills 的生成式召回：模型按执行顺序自回归生成一个或多个固定长度层级码，
+每条 code 占一行，再由 collision bucket 展开为 skills。例如：
+
+```text
+<SK_L1_7><SK_L2_12>
+<SK_L1_3><SK_L2_5>
+```
 
 项目同时保留可解释 taxonomy tokenizer 与学习式平衡 tokenizer；完整训练链路默认
 使用后者。默认通过 OpenAI-compatible API 调用 `Qwen3-Embedding-8B`，Router
@@ -55,7 +60,7 @@ API 配置、分步运行和输出格式见
 ## 训练与推理
 
 默认训练配置是 [configs/clawhub.env](configs/clawhub.env)。在新机器上通常只需修改
-开头的 `EMBEDDING_MODEL` 和 `ROUTER_MODEL`；数据路径、三层编码、LoRA、4 卡
+开头的 `EMBEDDING_MODEL` 和 `ROUTER_MODEL`；数据路径、两层编码、LoRA、4 卡
 DeepSpeed 和闭集测试均已有默认值，也可通过同名环境变量临时覆盖。
 脚本会优先使用仓库的 `.venv`，未找到时使用当前激活的 Conda 环境中的 `python`。
 
@@ -71,9 +76,10 @@ VLLM=.venv-vllm/bin/vllm bash scripts/serve_qwen3_embedding.sh
 这里固定 `vLLM==0.8.5.post1`、`torch==2.6.0+cu124`；8B 模型可用
 `TENSOR_PARALLEL_SIZE` 调整卡数。
 
-完整流程使用 `L=3`、`16/16/16` 分支、末层 Sinkhorn、LoRA 和单机 4 卡
+完整流程使用 `L=2`、`64/64` 分支、末层 Sinkhorn、LoRA 和单机 4 卡
 DeepSpeed ZeRO-3。Tokenizer 与 memorization 覆盖全部 1,000 候选，retrieval 使用
-3,353 条训练 query；最终在 399 条 test query 上对同一候选集评估。
+3,353 条训练 query；每个多-skill query 是一条换行分隔的有序多-code target，最终在
+399 条 test query 上对同一候选集评估。
 
 ```bash
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
@@ -165,8 +171,14 @@ ROUTER_RESUME_RETRIEVAL=latest \
 Stage-2 参数集中在公共配置中，步骤 05/06 分别执行独立的 ZeRO-3 launch，支持 Qwen3
 系列的 full/LoRA 和 checkpoint resume。DeepSpeed 下的 activation checkpoint 默认
 使用完整重计算的 reentrant 实现，避免重计算时读取到 ZeRO-3 的零尺寸参数占位。步骤
-07 执行固定 `L` 的 trie-constrained beam search，并输出 NDCG、Recall、MAP、MRR、
-Completeness、code recall 与 bucket-expanded recall。
+07 执行 trie-constrained 单序列自回归生成：每生成完一条两层 code，模型选择 EOS
+结束，或生成换行并继续下一条 code。该步骤不使用 beam search，并输出 NDCG、Recall、
+MAP、MRR、Completeness、code recall 与 bucket-expanded recall。可用
+`EVAL_MAX_CODE_PATHS` 设置异常情况下的路径数上限，默认 8；结果还包含有序 code
+序列 exact match 和生成路径数误差。
+
+两层 code 与多-code 输出都改变了 Router/Index 契约；已有三层 index 或单路径 Router
+checkpoint 不能直接复用，需要从步骤 02 开始重新训练。
 
 步骤 07 默认在上传的 test queries 上做闭集评估：
 
