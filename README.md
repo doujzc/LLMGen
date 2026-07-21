@@ -248,7 +248,35 @@ export ROUTER_MAX_LENGTH=768
 
 缩短上下文可能截断较长 query，因此应优先使用 ZeRO-3 offload。
 
-## 10. 测试
+## 10. 低召回诊断
+
+先分析数据、code 分布、训练日志和现有预测：
+
+```bash
+bash scripts/clawhub_train/08_diagnose.sh
+```
+
+再加载最终 checkpoint，对训练集和测试集各抽样 128 条计算 teacher-forced token
+准确率：
+
+```bash
+DIAG_WITH_MODEL=1 DEVICE=cuda:0 \
+  bash scripts/clawhub_train/08_diagnose.sh
+```
+
+报告写入 `$RUN_DIR/diagnostics/test.json`。如需判断是否只记住训练数据，再生成训练集预测：
+
+```bash
+QUERY_SET=train EVAL_DIR="$RUN_DIR/evaluation-train" \
+  bash scripts/clawhub_train/07_evaluate.sh
+
+DIAG_SPLIT=train \
+DIAG_PREDICTIONS="$RUN_DIR/evaluation-train/predictions.jsonl" \
+DIAG_OUTPUT="$RUN_DIR/diagnostics/train.json" \
+  bash scripts/clawhub_train/08_diagnose.sh
+```
+
+## 11. 测试
 
 ```bash
 python -m pytest
