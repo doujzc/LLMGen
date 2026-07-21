@@ -25,6 +25,15 @@ if [[ -n "$ROUTER_RESUME_RETRIEVAL" ]]; then
   RESUME_ARGS=(--resume-retrieval-from-checkpoint "$ROUTER_RESUME_RETRIEVAL")
 fi
 
+REPLAY_ARGS=()
+if [[ "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0.0" ]]; then
+  skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
+  REPLAY_ARGS=(
+    --retrieval-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
+    --retrieval-replay-fraction "$ROUTER_RETRIEVAL_REPLAY_FRACTION"
+  )
+fi
+
 "${ROUTER_LAUNCH[@]}" scripts/train_router.py \
   "${MODEL_ARGS[@]}" \
   "${ROUTER_COMMON_ARGS[@]}" \
@@ -33,6 +42,7 @@ fi
   --retrieval-validation "$ROUTER_DATA_DIR/retrieval_validation.jsonl" \
   --retrieval-epochs "$ROUTER_RETRIEVAL_EPOCHS" \
   --retrieval-learning-rate "$ROUTER_RETRIEVAL_LR" \
+  "${REPLAY_ARGS[@]}" \
   "${RESUME_ARGS[@]}" \
   "${ROUTER_COMPAT_EXTRA_ARGS[@]}" \
   "$@"

@@ -13,7 +13,7 @@ import hashlib
 import math
 import random
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -466,11 +466,15 @@ def grouped_train_validation_split(
     validation_fraction: float,
     seed: int,
     group_key: str = "group_id",
+    preserve_target_key: str | None = None,
+    min_train_target_groups: int = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Split by group, keeping every target for a query together."""
+    """Split by group while optionally preserving target coverage in train."""
 
     if not 0.0 <= validation_fraction < 1.0:
         raise RouterDataError("validation_fraction must be in [0, 1)")
+    if min_train_target_groups < 1:
+        raise RouterDataError("min_train_target_groups must be positive")
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row_number, row in enumerate(rows, start=1):
         group = row.get(group_key)
@@ -488,7 +492,41 @@ def grouped_train_validation_split(
     else:
         validation_count = max(1, round(len(shuffled) * validation_fraction))
         validation_count = min(validation_count, len(shuffled) - 1)
-    validation_groups = set(shuffled[:validation_count])
+    if preserve_target_key is None:
+        validation_groups = set(shuffled[:validation_count])
+    else:
+        group_targets: dict[str, set[str]] = {}
+        target_group_counts: Counter[str] = Counter()
+        for group_id, group_rows in groups.items():
+            targets: set[str] = set()
+            for row in group_rows:
+                raw_targets = row.get(preserve_target_key)
+                if not isinstance(raw_targets, (list, tuple, set)) or not raw_targets:
+                    raise RouterDataError(
+                        f"group {group_id!r} has no non-empty {preserve_target_key}"
+                    )
+                for target in raw_targets:
+                    if not isinstance(target, str) or not target:
+                        raise RouterDataError(
+                            f"group {group_id!r} has an invalid target in {preserve_target_key}"
+                        )
+                    targets.add(target)
+            group_targets[group_id] = targets
+            target_group_counts.update(targets)
+
+        remaining = target_group_counts.copy()
+        validation_groups: set[str] = set()
+        for group_id in shuffled:
+            if len(validation_groups) >= validation_count:
+                break
+            targets = group_targets[group_id]
+            if any(
+                remaining[target] - 1 < min_train_target_groups
+                for target in targets
+            ):
+                continue
+            validation_groups.add(group_id)
+            remaining.subtract(targets)
 
     train: list[dict[str, Any]] = []
     validation: list[dict[str, Any]] = []
@@ -496,6 +534,33 @@ def grouped_train_validation_split(
         destination = validation if group_id in validation_groups else train
         destination.extend(groups[group_id])
     return train, validation
+
+
+def mix_replay_rows(
+    primary_rows: Sequence[Mapping[str, Any]],
+    replay_rows: Sequence[Mapping[str, Any]],
+    *,
+    replay_fraction: float,
+    seed: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Mix deterministic replay examples into a phase's primary SFT rows."""
+
+    if not 0.0 <= replay_fraction < 1.0:
+        raise RouterDataError("replay_fraction must be in [0, 1)")
+    primary = [dict(row) for row in primary_rows]
+    if replay_fraction == 0.0:
+        return primary, 0
+    if not primary:
+        raise RouterDataError("primary replay mixture is empty")
+    if not replay_rows:
+        raise RouterDataError("replay_fraction is positive but replay data is empty")
+    requested = max(1, round(len(primary) * replay_fraction / (1.0 - replay_fraction)))
+    replay = [dict(row) for row in replay_rows]
+    random.Random(seed).shuffle(replay)
+    selected = replay[: min(requested, len(replay))]
+    mixed = [*primary, *selected]
+    random.Random(seed + 1).shuffle(mixed)
+    return mixed, len(selected)
 
 
 class TokenTrie:

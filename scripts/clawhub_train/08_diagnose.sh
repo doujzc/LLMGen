@@ -19,7 +19,11 @@ skillret_require_file "$INDEX_DIR/train_registry.json"
 skillret_require_file "$PROCESSED_DIR/qrels_train.jsonl"
 skillret_require_file "$PROCESSED_DIR/qrels_${DIAG_SPLIT}.jsonl"
 skillret_require_file "$PROCESSED_DIR/queries_${DIAG_SPLIT}.jsonl"
-skillret_require_file "$ROUTER_DATA_DIR/retrieval_train.jsonl"
+DIAG_ROUTER_TRAIN="${DIAG_ROUTER_TRAIN:-$ROUTER_DATA_DIR/retrieval_train.jsonl}"
+DIAG_MODEL_PATH="${DIAG_MODEL_PATH:-$ROUTER_OUTPUT_DIR/retrieval}"
+DIAG_ROUTER_MANIFEST="${DIAG_ROUTER_MANIFEST:-$DIAG_MODEL_PATH/router_manifest.json}"
+DIAG_TEACHER_EVAL_DATA="${DIAG_TEACHER_EVAL_DATA:-}"
+skillret_require_file "$DIAG_ROUTER_TRAIN"
 
 DIAG_OUTPUT="${DIAG_OUTPUT:-$RUN_DIR/diagnostics/${DIAG_SPLIT}.json}"
 DIAG_PREDICTIONS="${DIAG_PREDICTIONS:-$RUN_DIR/evaluation/predictions.jsonl}"
@@ -33,9 +37,10 @@ ARGS=(
   --train-qrels "$PROCESSED_DIR/qrels_train.jsonl"
   --eval-qrels "$PROCESSED_DIR/qrels_${DIAG_SPLIT}.jsonl"
   --eval-queries "$PROCESSED_DIR/queries_${DIAG_SPLIT}.jsonl"
-  --router-train "$ROUTER_DATA_DIR/retrieval_train.jsonl"
+  --router-train "$DIAG_ROUTER_TRAIN"
   --output "$DIAG_OUTPUT"
   --cutoffs 1 5 10
+  --min-train-code-accuracy "${DIAG_MIN_TRAIN_CODE_ACCURACY:-0.75}"
 )
 
 if [[ -f "$DIAG_PREDICTIONS" ]]; then
@@ -43,8 +48,15 @@ if [[ -f "$DIAG_PREDICTIONS" ]]; then
 else
   echo "Prediction file not found; continuing with data/code diagnostics: $DIAG_PREDICTIONS" >&2
 fi
-if [[ -f "$ROUTER_OUTPUT_DIR/retrieval/router_manifest.json" ]]; then
-  ARGS+=(--router-manifest "$ROUTER_OUTPUT_DIR/retrieval/router_manifest.json")
+if [[ -f "$DIAG_ROUTER_MANIFEST" ]]; then
+  ARGS+=(--router-manifest "$DIAG_ROUTER_MANIFEST")
+fi
+if [[ -n "$DIAG_TEACHER_EVAL_DATA" ]]; then
+  skillret_require_file "$DIAG_TEACHER_EVAL_DATA"
+  ARGS+=(--teacher-eval-data "$DIAG_TEACHER_EVAL_DATA")
+fi
+if [[ -n "${DIAG_SYSTEM_PROMPT:-}" ]]; then
+  ARGS+=(--system-prompt "$DIAG_SYSTEM_PROMPT")
 fi
 if [[ -f "$STAGE1_DIR/history.jsonl" ]]; then
   ARGS+=(--stage1-history "$STAGE1_DIR/history.jsonl")
@@ -55,10 +67,10 @@ fi
 
 case "$DIAG_WITH_MODEL" in
   1|true|yes)
-    skillret_require_dir "$ROUTER_OUTPUT_DIR/retrieval"
+    skillret_require_dir "$DIAG_MODEL_PATH"
     skillret_require_file "$INDEX_DIR/virtual_tokens.txt"
     ARGS+=(
-      --model-name-or-path "$ROUTER_OUTPUT_DIR/retrieval"
+      --model-name-or-path "$DIAG_MODEL_PATH"
       --base-model-name-or-path "$ROUTER_MODEL"
       --virtual-tokens "$INDEX_DIR/virtual_tokens.txt"
       --device "$DEVICE"

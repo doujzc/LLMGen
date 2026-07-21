@@ -508,6 +508,239 @@ def code_assignment_metrics(codes: Any, codebook_sizes: Sequence[int]) -> dict[s
     }
 
 
+def residual_nearest_codes(
+    encoded: Any,
+    codebooks: Sequence[Any],
+) -> np.ndarray:
+    """Return ordinary RQ nearest-neighbour codes from encoded skill vectors."""
+
+    residual = np.asarray(encoded, dtype=np.float32).copy()
+    if residual.ndim != 2 or not len(residual):
+        raise ValueError("encoded vectors must be a non-empty [N, D] matrix")
+    assignments = np.empty((len(residual), len(codebooks)), dtype=np.int64)
+    for level, raw_codebook in enumerate(codebooks):
+        centers = np.asarray(raw_codebook, dtype=np.float32)
+        if centers.ndim != 2 or centers.shape[1] != residual.shape[1] or not len(centers):
+            raise ValueError("every codebook must be a non-empty [K, D] matrix")
+        distances = (
+            np.sum(residual * residual, axis=1, keepdims=True)
+            + np.sum(centers * centers, axis=1)[None, :]
+            - 2.0 * residual @ centers.T
+        )
+        indices = np.argmin(distances, axis=1).astype(np.int64, copy=False)
+        assignments[:, level] = indices
+        residual -= centers[indices]
+    return assignments
+
+
+def _balanced_capacities(costs: np.ndarray) -> np.ndarray:
+    """Choose deterministic floor/ceil capacities using nearest-code demand."""
+
+    sample_count, code_count = costs.shape
+    base, remainder = divmod(sample_count, code_count)
+    capacities = np.full(code_count, base, dtype=np.int64)
+    if remainder:
+        demand = np.bincount(np.argmin(costs, axis=1), minlength=code_count)
+        # Stable sorting makes the code index the deterministic tie-breaker.
+        extra = np.argsort(-demand, kind="stable")[:remainder]
+        capacities[extra] += 1
+    return capacities
+
+
+def _deferred_balanced_assignment(
+    costs: np.ndarray,
+    capacities: np.ndarray,
+) -> np.ndarray:
+    """Scalable hard assignment with exact capacities and deterministic ties."""
+
+    sample_count, code_count = costs.shape
+    preferences = np.argsort(costs, axis=1, kind="stable")
+    next_preference = np.zeros(sample_count, dtype=np.int64)
+    accepted: list[list[int]] = [[] for _ in range(code_count)]
+    pending = list(range(sample_count))
+    while pending:
+        proposals: list[list[int]] = [[] for _ in range(code_count)]
+        for sample in pending:
+            position = int(next_preference[sample])
+            if position >= code_count:
+                raise RuntimeError("balanced assignment exhausted every code preference")
+            proposals[int(preferences[sample, position])].append(sample)
+        pending = []
+        for code, new_samples in enumerate(proposals):
+            if not new_samples:
+                continue
+            candidates = accepted[code] + new_samples
+            candidates.sort(key=lambda sample: (float(costs[sample, code]), sample))
+            capacity = int(capacities[code])
+            accepted[code] = candidates[:capacity]
+            rejected = candidates[capacity:]
+            for sample in rejected:
+                next_preference[sample] += 1
+            pending.extend(rejected)
+
+    assignments = np.full(sample_count, -1, dtype=np.int64)
+    for code, samples in enumerate(accepted):
+        assignments[np.asarray(samples, dtype=np.int64)] = code
+    if np.any(assignments < 0):
+        raise RuntimeError("balanced assignment left samples unassigned")
+    return assignments
+
+
+def _balanced_group_assignment(
+    costs: np.ndarray,
+    *,
+    exact_group_size: int,
+) -> np.ndarray:
+    """Min-cost balanced assignment for one hierarchical prefix group."""
+
+    from scipy.optimize import linear_sum_assignment
+
+    sample_count, code_count = costs.shape
+    if sample_count <= code_count:
+        rows, codes = linear_sum_assignment(costs)
+        assignments = np.empty(sample_count, dtype=np.int64)
+        assignments[rows] = codes
+        return assignments
+
+    capacities = _balanced_capacities(costs)
+    if sample_count <= exact_group_size:
+        slots = np.repeat(np.arange(code_count, dtype=np.int64), capacities)
+        rows, slot_indices = linear_sum_assignment(costs[:, slots])
+        assignments = np.empty(sample_count, dtype=np.int64)
+        assignments[rows] = slots[slot_indices]
+        return assignments
+    return _deferred_balanced_assignment(costs, capacities)
+
+
+def _globally_balanced_prefix_assignment(
+    distances: np.ndarray,
+    prefix_groups: Sequence[np.ndarray],
+) -> np.ndarray:
+    """Balance a level globally while keeping codes unique in every prefix."""
+
+    from scipy.optimize import linear_sum_assignment
+
+    sample_count, code_count = distances.shape
+    capacities = _balanced_capacities(distances)
+    remaining = capacities.copy()
+    assignments = np.full(sample_count, -1, dtype=np.int64)
+    # Larger groups are the most constrained and are therefore allocated first.
+    ordered_groups = sorted(
+        prefix_groups,
+        key=lambda members: (-len(members), tuple(int(value) for value in members)),
+    )
+    for group_index, members in enumerate(ordered_groups):
+        groups_left = len(ordered_groups) - group_index
+        available = np.flatnonzero(remaining > 0)
+        if len(available) < len(members):
+            raise RuntimeError("global hierarchical balance has too few available codes")
+        required = set(np.flatnonzero(remaining == groups_left).tolist())
+        if len(required) > len(members):
+            raise RuntimeError("global hierarchical balance became infeasible")
+        group_costs = distances[np.ix_(members, available)].astype(np.float64, copy=True)
+        if required:
+            scale = max(float(np.max(np.abs(group_costs))), 1.0)
+            required_columns = [
+                column for column, code in enumerate(available) if int(code) in required
+            ]
+            group_costs[:, required_columns] -= scale * (len(members) + 1)
+        rows, columns = linear_sum_assignment(group_costs)
+        selected = available[columns]
+        if not required.issubset(set(int(value) for value in selected)):
+            raise RuntimeError("global hierarchical balance skipped a required code")
+        assignments[members[rows]] = selected
+        remaining[selected] -= 1
+    if np.any(assignments < 0) or np.any(remaining != 0):
+        raise RuntimeError("global hierarchical balance did not consume exact capacities")
+    return assignments
+
+
+def balanced_hierarchical_codes(
+    encoded: Any,
+    codebooks: Sequence[Any],
+    *,
+    exact_group_size: int = 2048,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Assign balanced hierarchical codes while preserving learned distances.
+
+    Every level receives exact floor/ceil global usage.  From the second level
+    onward, codes are also unique inside each existing prefix whenever that is
+    feasible.  Consequently, when the product of codebook sizes is at least
+    the number of skills, final paths are collision-free without adding a third
+    fallback token.  Small groups use an exact Hungarian assignment; large
+    groups use a capacity-constrained deferred assignment to avoid an N x N
+    cost matrix.
+    """
+
+    residual = np.asarray(encoded, dtype=np.float32).copy()
+    if residual.ndim != 2 or not len(residual):
+        raise ValueError("encoded vectors must be a non-empty [N, D] matrix")
+    if exact_group_size < 1:
+        raise ValueError("exact_group_size must be positive")
+    normalized_codebooks = [np.asarray(value, dtype=np.float32) for value in codebooks]
+    if not normalized_codebooks:
+        raise ValueError("at least one codebook is required")
+    for centers in normalized_codebooks:
+        if centers.ndim != 2 or centers.shape[1] != residual.shape[1] or not len(centers):
+            raise ValueError("every codebook must be a non-empty [K, D] matrix")
+
+    sample_count = len(residual)
+    assignments = np.empty((sample_count, len(normalized_codebooks)), dtype=np.int64)
+    prefix_groups = [np.arange(sample_count, dtype=np.int64)]
+    level_diagnostics: list[dict[str, Any]] = []
+    for level, centers in enumerate(normalized_codebooks):
+        distances = (
+            np.sum(residual * residual, axis=1, keepdims=True)
+            + np.sum(centers * centers, axis=1)[None, :]
+            - 2.0 * residual @ centers.T
+        )
+        nearest = np.argmin(distances, axis=1)
+        if len(prefix_groups) > 1 and all(
+            len(members) <= len(centers) for members in prefix_groups
+        ):
+            assignments[:, level] = _globally_balanced_prefix_assignment(
+                distances, prefix_groups
+            )
+        else:
+            for members in prefix_groups:
+                assignments[members, level] = _balanced_group_assignment(
+                    distances[members], exact_group_size=exact_group_size
+                )
+        selected = assignments[:, level]
+        selected_distance = distances[np.arange(sample_count), selected]
+        nearest_distance = distances[np.arange(sample_count), nearest]
+        mean_nearest_distance = float(np.mean(nearest_distance))
+        mean_assigned_distance = float(np.mean(selected_distance))
+        residual -= centers[selected]
+
+        regrouped: dict[tuple[int, ...], list[int]] = {}
+        for sample, prefix in enumerate(assignments[:, : level + 1]):
+            regrouped.setdefault(tuple(int(value) for value in prefix), []).append(sample)
+        prefix_groups = [
+            np.asarray(members, dtype=np.int64)
+            for _, members in sorted(regrouped.items())
+        ]
+        level_diagnostics.append(
+            {
+                "level": level + 1,
+                "mean_nearest_squared_distance": mean_nearest_distance,
+                "mean_assigned_squared_distance": mean_assigned_distance,
+                "distance_inflation": (
+                    mean_assigned_distance / max(mean_nearest_distance, 1e-12)
+                ),
+                "reassigned_fraction": float(np.mean(selected != nearest)),
+                "num_prefixes": len(prefix_groups),
+                "max_prefix_size": max(len(group) for group in prefix_groups),
+            }
+        )
+
+    return assignments, {
+        "mode": "balanced_hierarchical",
+        "exact_group_size": exact_group_size,
+        "levels": level_diagnostics,
+    }
+
+
 def _rng_state() -> dict[str, Any]:
     state: dict[str, Any] = {
         "python": random.getstate(),
@@ -836,6 +1069,21 @@ class ToolWeaverStage1Trainer:
             with history_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             if should_evaluate:
+                print(
+                    json.dumps(
+                        {
+                            "event": "stage1_progress",
+                            "epoch": epoch + 1,
+                            "epochs": self.training_config.epochs,
+                            "global_step": self.global_step,
+                            "loss": latest_metrics.get("loss"),
+                            "collision_rate": latest_metrics.get("collision_rate"),
+                            "levels": latest_metrics.get("levels"),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
                 score = self._score(latest_metrics)
                 if self.best_score is None or score < self.best_score:
                     self.best_score = score

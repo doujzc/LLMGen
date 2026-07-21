@@ -62,6 +62,7 @@ def _write_split(
     *,
     validation_fraction: float,
     seed: int,
+    preserve_target_key: str | None = None,
 ) -> dict[str, int]:
     if not rows:
         raise RouterDataError(f"{phase} router data is empty")
@@ -69,9 +70,20 @@ def _write_split(
         rows,
         validation_fraction=validation_fraction,
         seed=seed,
+        preserve_target_key=preserve_target_key,
     )
     write_jsonl(output_dir / f"{phase}_train.jsonl", train)
     write_jsonl(output_dir / f"{phase}_validation.jsonl", validation)
+    train_targets = {
+        str(target)
+        for row in train
+        for target in row.get("target_skill_ids", [])
+    }
+    validation_targets = {
+        str(target)
+        for row in validation
+        for target in row.get("target_skill_ids", [])
+    }
     return {
         "all_examples": len(rows),
         "train_examples": len(train),
@@ -79,6 +91,9 @@ def _write_split(
         "all_groups": len({row["group_id"] for row in rows}),
         "train_groups": len({row["group_id"] for row in train}),
         "validation_groups": len({row["group_id"] for row in validation}),
+        "train_target_skills": len(train_targets),
+        "validation_target_skills": len(validation_targets),
+        "unseen_validation_target_skills": len(validation_targets - train_targets),
         "max_target_paths": max(
             (
                 len(row["target_paths"])
@@ -159,6 +174,7 @@ def main() -> None:
             validation_fraction=retrieval_validation_fraction,
             # Use a separate deterministic shuffle from memorization.
             seed=args.seed + 1,
+            preserve_target_key="positive_skill_ids",
         )
 
     def source_artifact(path: str | None):
@@ -184,6 +200,9 @@ def main() -> None:
             "memorization": memorization_validation_fraction,
             "retrieval": retrieval_validation_fraction,
         },
+        "retrieval_validation_policy": (
+            "query_grouped_preserve_every_target_in_train"
+        ),
         "seed": args.seed,
         "sources": {
             "catalog": source_artifact(args.catalog),

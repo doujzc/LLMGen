@@ -4,7 +4,7 @@
 
 - `Qwen3-Embedding-8B` 生成 Skill embeddings；
 - `Qwen3-1.7B` 作为 Router；
-- 两层 `64×64` Skill Code；
+- 两层 `128×128` Skill Code；
 - 多 Skill 完整自回归输出，每条 code 占一行；
 - 单机 4 卡 DeepSpeed ZeRO-3 全参数训练；
 - 训练和测试共享同一套 1,000 Skill 候选集。
@@ -65,7 +65,7 @@ CUDA 12.4 的 PyTorch wheel 可以在支持 CUDA 12.5 的 NVIDIA 驱动上运行
 export EMBEDDING_MODEL=/models/Qwen3-Embedding-8B
 export ROUTER_MODEL=/models/Qwen3-1.7B
 
-export RUN_DIR=runs/clawhub-qwen3-1.7b-full
+export RUN_DIR=runs/clawhub-qwen3-1.7b-full-v3
 export PROCESSED_DIR="$RUN_DIR/processed"
 export EMBEDDING_DIR="$RUN_DIR/embeddings"
 
@@ -88,7 +88,8 @@ export DEVICE=cuda
 4 GPUs × micro batch 1 × gradient accumulation 8 = 32
 ```
 
-ClawHub 默认执行 3 个 Memorization epochs 和 3 个 Retrieval epochs。
+ClawHub 默认执行 10 个 Memorization epochs 和 15 个 Retrieval epochs；Retrieval
+训练中混入 20% Memorization replay，避免 code 映射被覆盖。
 
 ## 4. 启动 Embedding 服务
 
@@ -153,7 +154,7 @@ SKIP_PREPARE=1 bash scripts/run_clawhub_full.sh
 脚本依次执行：
 
 1. 训练两层层级 Skill Tokenizer；
-2. 为 1,000 个 Skills 导出固定 code；
+2. 为 1,000 个 Skills 导出固定 code，并执行碰撞、利用率和熵质量门禁；
 3. 构造多 Skill 自回归 SFT 数据；
 4. 全参数训练 Memorization 阶段；
 5. 从 Memorization 模型继续全参数训练 Retrieval 阶段；
@@ -170,12 +171,21 @@ bash scripts/clawhub_train/06_train_retrieval.sh
 bash scripts/clawhub_train/07_evaluate.sh
 ```
 
+旧版 `64×64 / clawhub-v2` 的 Stage 1 和 Router checkpoint 不兼容，必须使用新的
+`RUN_DIR` 从 Stage 1 重新训练。导出成功后可快速确认 code 质量：
+
+```bash
+python -c 'import json,os; x=json.load(open(os.path.join(os.environ["RUN_DIR"],"index/manifest.json"))); print(json.dumps(x["splits"]["train"]["quality_gate"], indent=2))'
+```
+
+`passed` 必须为 `true`；否则脚本会在训练 Router 前直接退出。
+
 ## 7. 输出目录
 
 主要产物为：
 
 ```text
-runs/clawhub-qwen3-1.7b-full/
+runs/clawhub-qwen3-1.7b-full-v3/
 ├── processed/
 ├── embeddings/
 ├── stage1/
@@ -275,6 +285,16 @@ DIAG_PREDICTIONS="$RUN_DIR/evaluation-train/predictions.jsonl" \
 DIAG_OUTPUT="$RUN_DIR/diagnostics/train.json" \
   bash scripts/clawhub_train/08_diagnose.sh
 ```
+
+分别检查 Memorization checkpoint 是否学会 code，以及 Retrieval 后是否遗忘：
+
+```bash
+DIAG_SAMPLE_SIZE=256 DEVICE=cuda:0 \
+  bash scripts/clawhub_train/09_diagnose_memorization.sh
+```
+
+查看两个报告中的 `teacher_forcing.train.categories.code.constrained_accuracy`：
+Memorization checkpoint 应达到 95% 左右，Retrieval checkpoint 不应显著下降。
 
 ## 11. 测试
 

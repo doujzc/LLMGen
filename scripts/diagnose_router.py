@@ -54,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-qrels", required=True)
     parser.add_argument("--eval-queries", required=True)
     parser.add_argument("--router-train", required=True)
+    parser.add_argument(
+        "--teacher-eval-data",
+        help="Optional prebuilt router JSONL used for teacher-forced eval.",
+    )
     parser.add_argument("--predictions")
     parser.add_argument("--router-manifest")
     parser.add_argument("--stage1-history")
@@ -75,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--sample-size", type=int, default=128)
+    parser.add_argument("--min-train-code-accuracy", type=float, default=0.75)
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -678,6 +683,7 @@ def analyze_teacher_forcing(
     skill_to_code: Mapping[str, Sequence[str]],
     buckets: Mapping[tuple[str, ...], Sequence[str]],
     router_manifest: Mapping[str, Any] | None,
+    teacher_eval_rows: Sequence[Mapping[str, Any]] | None,
 ) -> dict[str, Any]:
     if not args.virtual_tokens:
         raise RouterDataError("--virtual-tokens is required with --model-name-or-path")
@@ -692,13 +698,18 @@ def analyze_teacher_forcing(
         )
     )
     active_paths = [tuple(token_ids[token] for token in path) for path in buckets]
+    eval_rows = (
+        [dict(row) for row in teacher_eval_rows]
+        if teacher_eval_rows is not None
+        else build_retrieval_examples(eval_queries, skill_to_code, eval_relevance)
+    )
+    all_teacher_rows = [*router_train_rows, *eval_rows]
     trie = MultiPathTokenTrie(
         active_paths,
         eos_token_id=int(tokenizer.eos_token_id),
         separator_token_ids=separator_ids,
-        max_paths=max(len(row.get("target_paths", [])) for row in router_train_rows),
+        max_paths=max(len(row.get("target_paths", [])) for row in all_teacher_rows),
     )
-    eval_rows = build_retrieval_examples(eval_queries, skill_to_code, eval_relevance)
     max_length = args.max_length
     if max_length is None and router_manifest:
         value = router_manifest.get("max_length")
@@ -708,6 +719,7 @@ def analyze_teacher_forcing(
     train_sample = _sample_rows(router_train_rows, args.sample_size, args.seed)
     eval_sample = _sample_rows(eval_rows, args.sample_size, args.seed + 1)
     return {
+        "eval_source": "prebuilt" if teacher_eval_rows is not None else "retrieval_qrels",
         "train": _teacher_forced_split(
             rows=train_sample,
             torch=torch,
@@ -737,7 +749,11 @@ def analyze_teacher_forcing(
     }
 
 
-def build_findings(report: Mapping[str, Any], cutoffs: Sequence[int]) -> list[dict[str, str]]:
+def build_findings(
+    report: Mapping[str, Any],
+    cutoffs: Sequence[int],
+    min_train_code_accuracy: float = 0.75,
+) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
     dataset = report["dataset"]
     codes = report["codes"]
@@ -836,14 +852,15 @@ def build_findings(report: Mapping[str, Any], cutoffs: Sequence[int]) -> list[di
     if teacher:
         train_code = teacher["train"]["categories"]["code"]["constrained_accuracy"]
         eval_code = teacher["eval"]["categories"]["code"]["constrained_accuracy"]
-        if train_code < 0.75:
+        if train_code < min_train_code_accuracy:
             findings.append(
                 {
                     "severity": "critical",
                     "code": "router_underfit_or_checkpoint_failure",
                     "message": (
                         f"Teacher-forced constrained code accuracy on train is only "
-                        f"{train_code:.1%}; inspect optimization, saved weights, and token embeddings."
+                        f"{train_code:.1%} (required {min_train_code_accuracy:.1%}); "
+                        "inspect optimization, saved weights, and token embeddings."
                     ),
                 }
             )
@@ -885,6 +902,8 @@ def main() -> None:
     args = parse_args()
     if args.batch_size < 1 or args.sample_size < 1:
         raise RouterDataError("batch-size and sample-size must be positive")
+    if not 0.0 <= args.min_train_code_accuracy <= 1.0:
+        raise RouterDataError("min-train-code-accuracy must be in [0, 1]")
     if not args.cutoffs or any(value < 1 for value in args.cutoffs):
         raise RouterDataError("cutoffs must be positive")
 
@@ -894,6 +913,9 @@ def main() -> None:
     eval_relevance = qrels_by_query(read_jsonl(args.eval_qrels))
     eval_queries = read_jsonl(args.eval_queries)
     router_train_rows = read_jsonl(args.router_train)
+    teacher_eval_rows = (
+        read_jsonl(args.teacher_eval_data) if args.teacher_eval_data else None
+    )
     source_train_queries = (
         read_jsonl(args.source_train_queries)
         if args.source_train_queries and Path(args.source_train_queries).is_file()
@@ -940,8 +962,11 @@ def main() -> None:
             skill_to_code=skill_to_code,
             buckets=buckets,
             router_manifest=router_manifest,
+            teacher_eval_rows=teacher_eval_rows,
         )
-    report["findings"] = build_findings(report, args.cutoffs)
+    report["findings"] = build_findings(
+        report, args.cutoffs, args.min_train_code_accuracy
+    )
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,12 @@ from typing import Any
 import numpy as np
 import torch
 
-from llmgen.neural.toolweaver import load_toolweaver_rqvae
+from llmgen.neural.toolweaver import (
+    balanced_hierarchical_codes,
+    code_assignment_metrics,
+    load_toolweaver_rqvae,
+    residual_nearest_codes,
+)
 from llmgen.skillret import (
     all_code_tokens,
     code_token,
@@ -44,6 +49,30 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Must match the checkpoint; defaults to its model_config token_format.",
     )
+    parser.add_argument(
+        "--assignment-mode",
+        choices=("nearest", "balanced_hierarchical"),
+        default="nearest",
+        help=(
+            "nearest reproduces ordinary RQ inference; balanced_hierarchical "
+            "uses learned distances with global floor/ceil balance and "
+            "prefix-local uniqueness constraints."
+        ),
+    )
+    parser.add_argument("--assignment-exact-group-size", type=int, default=2048)
+    parser.add_argument(
+        "--quality-gate-split",
+        choices=("train", "test"),
+        default=None,
+        help="Fail export when this split violates any configured quality threshold.",
+    )
+    parser.add_argument("--max-collision-rate", type=float, default=1.0)
+    parser.add_argument("--max-raw-collision-rate", type=float, default=1.0)
+    parser.add_argument("--max-bucket-size", type=int, default=None)
+    parser.add_argument("--min-level-utilization", type=float, default=0.0)
+    parser.add_argument("--min-normalized-entropy", type=float, default=0.0)
+    parser.add_argument("--min-raw-level-utilization", type=float, default=0.0)
+    parser.add_argument("--min-raw-normalized-entropy", type=float, default=0.0)
     return parser.parse_args()
 
 
@@ -56,6 +85,57 @@ def _collision_metrics(buckets: dict[str, list[str]], num_skills: int) -> dict[s
         "max_bucket_size": max((len(members) for members in buckets.values()), default=0),
         "mean_bucket_size": num_skills / max(len(buckets), 1),
     }
+
+
+def _quality_violations(
+    *,
+    metrics: dict[str, Any],
+    raw_metrics: dict[str, Any],
+    max_collision_rate: float,
+    max_raw_collision_rate: float,
+    max_bucket_size: int | None,
+    min_level_utilization: float,
+    min_normalized_entropy: float,
+    min_raw_level_utilization: float,
+    min_raw_normalized_entropy: float,
+) -> list[str]:
+    violations: list[str] = []
+    if float(metrics["collision_rate"]) > max_collision_rate:
+        violations.append(
+            f"collision_rate={metrics['collision_rate']:.4f} > {max_collision_rate:.4f}"
+        )
+    if float(raw_metrics["collision_rate"]) > max_raw_collision_rate:
+        violations.append(
+            f"raw collision_rate={raw_metrics['collision_rate']:.4f} "
+            f"> {max_raw_collision_rate:.4f}"
+        )
+    if max_bucket_size is not None and int(metrics["max_bucket_size"]) > max_bucket_size:
+        violations.append(
+            f"max_bucket_size={metrics['max_bucket_size']} > {max_bucket_size}"
+        )
+    for level in metrics["levels"]:
+        if float(level["utilization"]) < min_level_utilization:
+            violations.append(
+                f"level {level['level']} utilization={level['utilization']:.4f} "
+                f"< {min_level_utilization:.4f}"
+            )
+        if float(level["normalized_entropy"]) < min_normalized_entropy:
+            violations.append(
+                f"level {level['level']} normalized_entropy="
+                f"{level['normalized_entropy']:.4f} < {min_normalized_entropy:.4f}"
+            )
+    for level in raw_metrics["levels"]:
+        if float(level["utilization"]) < min_raw_level_utilization:
+            violations.append(
+                f"raw level {level['level']} utilization={level['utilization']:.4f} "
+                f"< {min_raw_level_utilization:.4f}"
+            )
+        if float(level["normalized_entropy"]) < min_raw_normalized_entropy:
+            violations.append(
+                f"raw level {level['level']} normalized_entropy="
+                f"{level['normalized_entropy']:.4f} < {min_raw_normalized_entropy:.4f}"
+            )
+    return violations
 
 
 def _export_split(
@@ -72,6 +152,16 @@ def _export_split(
     normalize_embeddings: bool,
     expected_order_hash: str | None,
     expected_embedding_sha256: str | None,
+    assignment_mode: str,
+    assignment_exact_group_size: int,
+    enforce_quality_gate: bool,
+    max_collision_rate: float,
+    max_raw_collision_rate: float,
+    max_bucket_size: int | None,
+    min_level_utilization: float,
+    min_normalized_entropy: float,
+    min_raw_level_utilization: float,
+    min_raw_normalized_entropy: float,
 ) -> dict[str, Any]:
     ids = [str(row["skill_id"]) for row in read_jsonl(catalog_path)]
     actual_order_hash = ordered_ids_sha256(ids)
@@ -88,7 +178,7 @@ def _export_split(
             f"{split} embedding/catalog mismatch: {embeddings.shape} versus {len(ids)} ids"
         )
 
-    all_indices: list[list[int]] = []
+    encoded_rows: list[np.ndarray] = []
     model.eval()
     with torch.inference_mode():
         for start in range(0, len(ids), batch_size):
@@ -98,12 +188,44 @@ def _export_split(
             if normalize_embeddings:
                 batch = torch.nn.functional.normalize(batch, p=2, dim=1)
             batch = batch.to(device)
-            indices = model.get_indices(batch, use_sk=False)
-            if indices.ndim != 2 or indices.shape[1] != len(branching_factors):
-                raise RuntimeError(
-                    f"RQ-VAE returned {tuple(indices.shape)}, expected [batch,{len(branching_factors)}]"
-                )
-            all_indices.extend(indices.detach().cpu().to(torch.int64).tolist())
+            encoded_rows.append(
+                model.encoder(batch).detach().float().cpu().numpy()
+            )
+    encoded = np.concatenate(encoded_rows, axis=0)
+    codebooks = [
+        quantizer.embedding.weight.detach().float().cpu().numpy()
+        for quantizer in model.rq.vq_layers
+    ]
+    raw_indices = residual_nearest_codes(encoded, codebooks)
+    if assignment_mode == "balanced_hierarchical":
+        all_indices_array, assignment_diagnostics = balanced_hierarchical_codes(
+            encoded,
+            codebooks,
+            exact_group_size=assignment_exact_group_size,
+        )
+    else:
+        all_indices_array = raw_indices
+        assignment_diagnostics = {"mode": "nearest"}
+    raw_metrics = code_assignment_metrics(raw_indices, branching_factors)
+    assigned_metrics = code_assignment_metrics(all_indices_array, branching_factors)
+    violations = _quality_violations(
+        metrics=assigned_metrics,
+        raw_metrics=raw_metrics,
+        max_collision_rate=max_collision_rate,
+        max_raw_collision_rate=max_raw_collision_rate,
+        max_bucket_size=max_bucket_size,
+        min_level_utilization=min_level_utilization,
+        min_normalized_entropy=min_normalized_entropy,
+        min_raw_level_utilization=min_raw_level_utilization,
+        min_raw_normalized_entropy=min_raw_normalized_entropy,
+    )
+    if enforce_quality_gate and violations:
+        details = "\n  - ".join(violations)
+        raise RuntimeError(
+            f"{split} code quality gate failed; do not train the router with this index:\n"
+            f"  - {details}"
+        )
+    all_indices = all_indices_array.tolist()
 
     buckets: dict[str, list[str]] = defaultdict(list)
     rows = []
@@ -125,6 +247,7 @@ def _export_split(
         "num_levels": len(branching_factors),
         "branching_factors": branching_factors,
         "token_format": token_format,
+        "assignment_mode": assignment_mode,
         "ordered_skill_ids_sha256": actual_order_hash,
         "buckets": {key: sorted(value) for key, value in sorted(buckets.items())},
     }
@@ -135,7 +258,26 @@ def _export_split(
         "codes_sha256": sha256_file(codes_path),
         "registry_sha256": sha256_file(registry_path),
         "ordered_skill_ids_sha256": registry["ordered_skill_ids_sha256"],
-        "metrics": _collision_metrics(registry["buckets"], len(ids)),
+        "metrics": {
+            **_collision_metrics(registry["buckets"], len(ids)),
+            **assigned_metrics,
+        },
+        "raw_nearest_metrics": raw_metrics,
+        "assignment_diagnostics": assignment_diagnostics,
+        "quality_gate": {
+            "enforced": enforce_quality_gate,
+            "passed": not violations,
+            "violations": violations,
+            "thresholds": {
+                "max_collision_rate": max_collision_rate,
+                "max_raw_collision_rate": max_raw_collision_rate,
+                "max_bucket_size": max_bucket_size,
+                "min_level_utilization": min_level_utilization,
+                "min_normalized_entropy": min_normalized_entropy,
+                "min_raw_level_utilization": min_raw_level_utilization,
+                "min_raw_normalized_entropy": min_raw_normalized_entropy,
+            },
+        },
     }
 
 
@@ -143,6 +285,21 @@ def main() -> None:
     args = parse_args()
     if args.batch_size < 1:
         raise ValueError("--batch-size must be positive")
+    if args.assignment_exact_group_size < 1:
+        raise ValueError("--assignment-exact-group-size must be positive")
+    for name in (
+        "max_collision_rate",
+        "max_raw_collision_rate",
+        "min_level_utilization",
+        "min_normalized_entropy",
+        "min_raw_level_utilization",
+        "min_raw_normalized_entropy",
+    ):
+        value = float(getattr(args, name))
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"--{name.replace('_', '-')} must be in [0, 1]")
+    if args.max_bucket_size is not None and args.max_bucket_size < 1:
+        raise ValueError("--max-bucket-size must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     model, checkpoint = load_toolweaver_rqvae(
         args.checkpoint,
@@ -216,6 +373,16 @@ def main() -> None:
             )
             or embedding_manifest.get("ordered_skill_ids_sha256", {}).get(split),
             expected_embedding_sha256=embedding_manifest.get("sha256", {}).get(split),
+            assignment_mode=args.assignment_mode,
+            assignment_exact_group_size=args.assignment_exact_group_size,
+            enforce_quality_gate=args.quality_gate_split == split,
+            max_collision_rate=args.max_collision_rate,
+            max_raw_collision_rate=args.max_raw_collision_rate,
+            max_bucket_size=args.max_bucket_size,
+            min_level_utilization=args.min_level_utilization,
+            min_normalized_entropy=args.min_normalized_entropy,
+            min_raw_level_utilization=args.min_raw_level_utilization,
+            min_raw_normalized_entropy=args.min_raw_normalized_entropy,
         )
 
     tokens = all_code_tokens(branching_factors, token_format)
@@ -231,6 +398,7 @@ def main() -> None:
         "num_levels": len(branching_factors),
         "branching_factors": branching_factors,
         "token_format": token_format,
+        "assignment_mode": args.assignment_mode,
         "normalize_embeddings": normalize_embeddings,
         "num_virtual_tokens": len(tokens),
         "virtual_tokens": str(virtual_tokens_path),

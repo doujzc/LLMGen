@@ -14,9 +14,11 @@ from llmgen.neural.toolweaver import (
     TOOLWEAVER_UPSTREAM_HASHES,
     ToolWeaverModelConfig,
     ToolWeaverStage1Trainer,
+    balanced_hierarchical_codes,
     code_assignment_metrics,
     create_toolweaver_rqvae,
     load_toolweaver_rqvae,
+    residual_nearest_codes,
 )
 
 
@@ -82,6 +84,39 @@ def test_code_metrics_report_collision_utilization_entropy_and_cv():
     assert metrics["levels"][0]["utilization"] == 1.0
     assert metrics["levels"][1]["utilization"] == 1.0
     assert metrics["levels"][0]["coefficient_of_variation"] == 0.0
+
+
+def test_balanced_hierarchical_assignment_eliminates_avoidable_collisions():
+    encoded = np.zeros((4, 2), dtype=np.float32)
+    codebooks = (
+        np.array([[0.0, 0.0], [10.0, 0.0]], dtype=np.float32),
+        np.array([[0.0, 0.0], [0.0, 10.0]], dtype=np.float32),
+    )
+    raw = residual_nearest_codes(encoded, codebooks)
+    balanced, diagnostics = balanced_hierarchical_codes(
+        encoded, codebooks, exact_group_size=16
+    )
+
+    assert code_assignment_metrics(raw, (2, 2))["collision_rate"] == 0.75
+    metrics = code_assignment_metrics(balanced, (2, 2))
+    assert metrics["collision_rate"] == 0.0
+    assert metrics["max_bucket_size"] == 1
+    assert [level["utilization"] for level in metrics["levels"]] == [1.0, 1.0]
+    assert diagnostics["mode"] == "balanced_hierarchical"
+
+
+def test_balanced_hierarchical_assignment_supports_configurable_levels():
+    rng = np.random.default_rng(23)
+    encoded = rng.normal(size=(17, 3)).astype(np.float32)
+    codebooks = tuple(
+        rng.normal(size=(size, 3)).astype(np.float32)
+        for size in (3, 3, 2)
+    )
+    balanced, diagnostics = balanced_hierarchical_codes(encoded, codebooks)
+
+    assert balanced.shape == (17, 3)
+    assert code_assignment_metrics(balanced, (3, 3, 2))["collision_rate"] == 0.0
+    assert len(diagnostics["levels"]) == 3
 
 
 def test_full_training_checkpoint_loader_and_resume(tmp_path):

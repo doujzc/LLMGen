@@ -20,6 +20,7 @@ from llmgen.router import (
     code_token_id_map,
     encode_target_only_example,
     grouped_train_validation_split,
+    mix_replay_rows,
     normalize_code_rows,
     qrels_by_query,
     query_code_path_metrics,
@@ -212,6 +213,42 @@ def test_grouped_split_never_leaks_multi_target_query() -> None:
     validation_groups = {row["group_id"] for row in validation}
     assert train_groups.isdisjoint(validation_groups)
     assert sum(row["group_id"] == "q1" for row in train + validation) == 2
+
+
+def test_grouped_split_preserves_every_validation_target_in_train() -> None:
+    rows = [
+        {"group_id": "q1", "positive_skill_ids": ["rare", "common"]},
+        {"group_id": "q2", "positive_skill_ids": ["common"]},
+        {"group_id": "q3", "positive_skill_ids": ["common"]},
+        {"group_id": "q4", "positive_skill_ids": ["other"]},
+        {"group_id": "q5", "positive_skill_ids": ["other"]},
+    ]
+    train, validation = grouped_train_validation_split(
+        rows,
+        validation_fraction=0.4,
+        seed=3,
+        preserve_target_key="positive_skill_ids",
+    )
+    train_targets = {
+        target for row in train for target in row["positive_skill_ids"]
+    }
+    validation_targets = {
+        target for row in validation for target in row["positive_skill_ids"]
+    }
+    assert len(validation) == 2
+    assert validation_targets <= train_targets
+    assert any("rare" in row["positive_skill_ids"] for row in train)
+
+
+def test_replay_mixture_is_deterministic_and_respects_fraction() -> None:
+    primary = [{"group_id": f"q{index}"} for index in range(8)]
+    replay = [{"group_id": f"s{index}"} for index in range(8)]
+    first = mix_replay_rows(primary, replay, replay_fraction=0.2, seed=7)
+    second = mix_replay_rows(primary, replay, replay_fraction=0.2, seed=7)
+    assert first == second
+    mixed, replay_count = first
+    assert replay_count == 2
+    assert len(mixed) == 10
 
 
 def test_trie_requires_exactly_l_tokens_then_eos() -> None:

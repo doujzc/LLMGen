@@ -21,6 +21,7 @@ from llmgen.router import (
     code_token_id_map,
     encode_target_only_example,
     load_virtual_tokens,
+    mix_replay_rows,
     read_jsonl,
 )
 from llmgen.skillret import sha256_file
@@ -51,6 +52,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--memorization-validation")
     parser.add_argument("--retrieval-train")
     parser.add_argument("--retrieval-validation")
+    parser.add_argument(
+        "--retrieval-replay-data",
+        help="Optional memorization_train.jsonl replayed during retrieval SFT.",
+    )
+    parser.add_argument("--retrieval-replay-fraction", type=float, default=0.0)
     parser.add_argument("--num-levels", type=int, required=True)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--memorization-system-prompt", default=MEMORIZATION_SYSTEM_PROMPT)
@@ -289,6 +295,7 @@ def _dataset_class(torch: Any):
             num_levels: int,
             max_length: int,
             system_prompt: str,
+            phase_system_prompts: dict[str, str] | None = None,
         ) -> None:
             self.rows = rows
             self.tokenizer = tokenizer
@@ -296,18 +303,23 @@ def _dataset_class(torch: Any):
             self.num_levels = num_levels
             self.max_length = max_length
             self.system_prompt = system_prompt
+            self.phase_system_prompts = dict(phase_system_prompts or {})
 
         def __len__(self) -> int:
             return len(self.rows)
 
         def __getitem__(self, index: int) -> dict[str, list[int]]:
+            row = self.rows[index]
+            row_system_prompt = self.phase_system_prompts.get(
+                str(row.get("phase", "")), self.system_prompt
+            )
             return encode_target_only_example(
                 self.tokenizer,
-                self.rows[index],
+                row,
                 code_token_ids=self.token_ids,
                 num_levels=self.num_levels,
                 max_length=self.max_length,
-                system_prompt=self.system_prompt,
+                system_prompt=row_system_prompt,
             )
 
     return RouterDataset
@@ -409,10 +421,20 @@ def _run_phase(
     model: Any,
     token_ids: dict[str, int],
     training_args: Any | None = None,
+    replay_path: str | None = None,
+    replay_fraction: float = 0.0,
+    replay_system_prompt: str | None = None,
 ) -> None:
-    train_rows = read_jsonl(train_path)
-    if not train_rows:
+    primary_train_rows = read_jsonl(train_path)
+    if not primary_train_rows:
         raise RouterDataError(f"{phase} training data is empty")
+    replay_rows = read_jsonl(replay_path) if replay_path else []
+    train_rows, replay_examples = mix_replay_rows(
+        primary_train_rows,
+        replay_rows,
+        replay_fraction=replay_fraction,
+        seed=args.seed,
+    )
     validation_rows = read_jsonl(validation_path) if validation_path else []
     Dataset = _dataset_class(torch)
     train_dataset = Dataset(
@@ -422,6 +444,11 @@ def _run_phase(
         num_levels=args.num_levels,
         max_length=args.max_length,
         system_prompt=system_prompt,
+        phase_system_prompts=(
+            {"memorization": replay_system_prompt}
+            if replay_system_prompt is not None
+            else None
+        ),
     )
     validation_dataset = (
         Dataset(
@@ -510,6 +537,10 @@ def _run_phase(
             "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
             "train_data": str(Path(train_path).resolve()),
             "train_data_sha256": sha256_file(train_path),
+            "replay_data": str(Path(replay_path).resolve()) if replay_path else None,
+            "replay_data_sha256": sha256_file(replay_path) if replay_path else None,
+            "replay_fraction_requested": replay_fraction,
+            "replay_fraction_actual": replay_examples / max(len(train_rows), 1),
             "validation_data": (
                 str(Path(validation_path).resolve()) if validation_path else None
             ),
@@ -547,6 +578,7 @@ def _run_phase(
                 "deepspeed": deepspeed_metadata,
             },
             "system_prompt": system_prompt,
+            "replay_system_prompt": replay_system_prompt,
             "max_length": args.max_length,
             "generation_contract": {
                 "mode": (
@@ -559,6 +591,8 @@ def _run_phase(
             },
             "examples": {
                 "train": len(train_rows),
+                "primary_train": len(primary_train_rows),
+                "replay": replay_examples,
                 "validation": len(validation_rows),
             },
         }
@@ -598,6 +632,13 @@ def main() -> None:
     if args.save_steps % args.eval_steps:
         raise RouterDataError(
             "save_steps must be a multiple of eval_steps when validation is enabled"
+        )
+    if not 0.0 <= args.retrieval_replay_fraction < 1.0:
+        raise RouterDataError("--retrieval-replay-fraction must be in [0, 1)")
+    if bool(args.retrieval_replay_data) != (args.retrieval_replay_fraction > 0.0):
+        raise RouterDataError(
+            "set both --retrieval-replay-data and a positive "
+            "--retrieval-replay-fraction, or neither"
         )
     if args.adapter_name_or_path and args.lora:
         raise RouterDataError("use either --adapter-name-or-path or --lora, not both")
@@ -680,6 +721,9 @@ def main() -> None:
             model=model,
             token_ids=token_ids,
             training_args=deepspeed_training_args,
+            replay_path=None,
+            replay_fraction=0.0,
+            replay_system_prompt=None,
         )
 
     if args.stage in {"retrieval", "both"}:
@@ -698,6 +742,9 @@ def main() -> None:
             model=model,
             token_ids=token_ids,
             training_args=deepspeed_training_args,
+            replay_path=args.retrieval_replay_data,
+            replay_fraction=args.retrieval_replay_fraction,
+            replay_system_prompt=args.memorization_system_prompt,
         )
 
 
