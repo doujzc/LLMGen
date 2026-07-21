@@ -4,6 +4,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 skillret_require_file "$STAGE1_DIR/best.pt"
 read -r -a CODE_SPLIT_ARGS <<< "${CODE_SPLITS:-train test}"
+read -r -a CODE_MIN_RAW_LEVEL_UTILIZATION_ARGS <<< "$CODE_MIN_RAW_LEVEL_UTILIZATION"
 ARGS=(
   --checkpoint "$STAGE1_DIR/best.pt"
   --processed-dir "$PROCESSED_DIR"
@@ -19,7 +20,7 @@ ARGS=(
   --max-bucket-size "$CODE_MAX_BUCKET_SIZE"
   --min-level-utilization "$CODE_MIN_LEVEL_UTILIZATION"
   --min-normalized-entropy "$CODE_MIN_NORMALIZED_ENTROPY"
-  --min-raw-level-utilization "$CODE_MIN_RAW_LEVEL_UTILIZATION"
+  --min-raw-level-utilization "${CODE_MIN_RAW_LEVEL_UTILIZATION_ARGS[@]}"
   --min-raw-normalized-entropy "$CODE_MIN_RAW_NORMALIZED_ENTROPY"
 )
 if [[ -n "$CODE_QUALITY_GATE_SPLIT" ]]; then

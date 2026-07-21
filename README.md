@@ -179,6 +179,8 @@ python -c 'import json,os; x=json.load(open(os.path.join(os.environ["RUN_DIR"],"
 ```
 
 `passed` 必须为 `true`；否则脚本会在训练 Router 前直接退出。
+默认 raw-nearest 利用率门槛按层为 `75% / 65%`，最终平衡 code 的每层利用率和
+归一化熵仍必须达到 90%。
 
 ## 7. 输出目录
 

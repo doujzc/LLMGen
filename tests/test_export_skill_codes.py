@@ -21,7 +21,7 @@ def test_quality_gate_checks_raw_metrics_before_balanced_post_assignment():
         max_bucket_size=1,
         min_level_utilization=0.9,
         min_normalized_entropy=0.9,
-        min_raw_level_utilization=0.75,
+        min_raw_level_utilization=(0.75, 0.65),
         min_raw_normalized_entropy=0.8,
     )
 

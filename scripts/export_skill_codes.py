@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import torch
@@ -71,7 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-bucket-size", type=int, default=None)
     parser.add_argument("--min-level-utilization", type=float, default=0.0)
     parser.add_argument("--min-normalized-entropy", type=float, default=0.0)
-    parser.add_argument("--min-raw-level-utilization", type=float, default=0.0)
+    parser.add_argument(
+        "--min-raw-level-utilization",
+        type=float,
+        nargs="+",
+        default=(0.0,),
+        help="One value broadcast to all levels, or one threshold per level.",
+    )
     parser.add_argument("--min-raw-normalized-entropy", type=float, default=0.0)
     return parser.parse_args()
 
@@ -96,7 +102,7 @@ def _quality_violations(
     max_bucket_size: int | None,
     min_level_utilization: float,
     min_normalized_entropy: float,
-    min_raw_level_utilization: float,
+    min_raw_level_utilization: Sequence[float],
     min_raw_normalized_entropy: float,
 ) -> list[str]:
     violations: list[str] = []
@@ -124,11 +130,22 @@ def _quality_violations(
                 f"level {level['level']} normalized_entropy="
                 f"{level['normalized_entropy']:.4f} < {min_normalized_entropy:.4f}"
             )
-    for level in raw_metrics["levels"]:
-        if float(level["utilization"]) < min_raw_level_utilization:
+    raw_levels = raw_metrics["levels"]
+    raw_utilization_thresholds = tuple(float(value) for value in min_raw_level_utilization)
+    if len(raw_utilization_thresholds) not in {1, len(raw_levels)}:
+        raise ValueError(
+            "min_raw_level_utilization must contain one value or one per code level"
+        )
+    for level_index, level in enumerate(raw_levels):
+        utilization_threshold = (
+            raw_utilization_thresholds[0]
+            if len(raw_utilization_thresholds) == 1
+            else raw_utilization_thresholds[level_index]
+        )
+        if float(level["utilization"]) < utilization_threshold:
             violations.append(
                 f"raw level {level['level']} utilization={level['utilization']:.4f} "
-                f"< {min_raw_level_utilization:.4f}"
+                f"< {utilization_threshold:.4f}"
             )
         if float(level["normalized_entropy"]) < min_raw_normalized_entropy:
             violations.append(
@@ -160,7 +177,7 @@ def _export_split(
     max_bucket_size: int | None,
     min_level_utilization: float,
     min_normalized_entropy: float,
-    min_raw_level_utilization: float,
+    min_raw_level_utilization: Sequence[float],
     min_raw_normalized_entropy: float,
 ) -> dict[str, Any]:
     ids = [str(row["skill_id"]) for row in read_jsonl(catalog_path)]
@@ -274,7 +291,7 @@ def _export_split(
                 "max_bucket_size": max_bucket_size,
                 "min_level_utilization": min_level_utilization,
                 "min_normalized_entropy": min_normalized_entropy,
-                "min_raw_level_utilization": min_raw_level_utilization,
+                "min_raw_level_utilization": list(min_raw_level_utilization),
                 "min_raw_normalized_entropy": min_raw_normalized_entropy,
             },
         },
@@ -292,12 +309,16 @@ def main() -> None:
         "max_raw_collision_rate",
         "min_level_utilization",
         "min_normalized_entropy",
-        "min_raw_level_utilization",
         "min_raw_normalized_entropy",
     ):
         value = float(getattr(args, name))
         if not 0.0 <= value <= 1.0:
             raise ValueError(f"--{name.replace('_', '-')} must be in [0, 1]")
+    if not args.min_raw_level_utilization or any(
+        not 0.0 <= float(value) <= 1.0
+        for value in args.min_raw_level_utilization
+    ):
+        raise ValueError("--min-raw-level-utilization values must be in [0, 1]")
     if args.max_bucket_size is not None and args.max_bucket_size < 1:
         raise ValueError("--max-bucket-size must be positive")
     args.output_dir.mkdir(parents=True, exist_ok=True)
