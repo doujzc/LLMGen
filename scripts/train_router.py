@@ -24,6 +24,7 @@ from llmgen.router import (
     mix_replay_rows,
     read_jsonl,
 )
+from llmgen.router_bundle import dump_router_decoder_artifacts
 from llmgen.skillret import sha256_file
 
 
@@ -43,6 +44,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-name-or-path", required=True)
     parser.add_argument("--virtual-tokens", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--skill-catalog",
+        help="Catalog JSONL bundled beside each final model for human decoding.",
+    )
+    parser.add_argument(
+        "--skill-codes",
+        help="Code JSONL bundled beside each final model for human decoding.",
+    )
+    parser.add_argument(
+        "--skill-registry",
+        help="Active registry JSON bundled beside each final model for decoding.",
+    )
     parser.add_argument(
         "--stage",
         choices=("memorization", "retrieval", "both"),
@@ -596,6 +609,19 @@ def _run_phase(
                 "validation": len(validation_rows),
             },
         }
+        decoder_inputs = (
+            args.skill_catalog,
+            args.skill_codes,
+            args.skill_registry,
+        )
+        if all(decoder_inputs):
+            state["decoder_artifacts"] = dump_router_decoder_artifacts(
+                output_dir=phase_dir,
+                catalog_path=args.skill_catalog,
+                codes_path=args.skill_codes,
+                registry_path=args.skill_registry,
+                virtual_tokens_path=args.virtual_tokens,
+            )
         with (phase_dir / "router_manifest.json").open(
             "w", encoding="utf-8"
         ) as handle:
@@ -625,6 +651,15 @@ def main() -> None:
             raise RouterDataError("LOCAL_RANK must be an integer") from exc
     if args.bf16 and args.fp16:
         raise RouterDataError("--bf16 and --fp16 are mutually exclusive")
+    decoder_inputs = (
+        args.skill_catalog,
+        args.skill_codes,
+        args.skill_registry,
+    )
+    if any(decoder_inputs) and not all(decoder_inputs):
+        raise RouterDataError(
+            "--skill-catalog, --skill-codes, and --skill-registry must be set together"
+        )
     if args.num_levels < 1 or args.max_length <= args.num_levels + 1:
         raise RouterDataError("invalid num_levels/max_length combination")
     if args.eval_steps < 1 or args.save_steps < 1:

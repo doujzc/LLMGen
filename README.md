@@ -298,7 +298,40 @@ DIAG_SAMPLE_SIZE=256 DEVICE=cuda:0 \
 查看两个报告中的 `teacher_forcing.train.categories.code.constrained_accuracy`：
 Memorization checkpoint 应达到 95% 左右，Retrieval checkpoint 不应显著下降。
 
-## 11. 测试
+## 11. Web 人工测试
+
+新训练的 `memorization/` 和 `retrieval/` 模型目录会自动包含：
+
+```text
+skill_decode_map.json  # token/path -> 原始 Skill ID、名称和元数据
+virtual_tokens.txt     # 完整虚拟 token 命名空间
+```
+
+旧 checkpoint 先补齐这两个文件：
+
+```bash
+bash scripts/clawhub_train/10_export_web_bundle.sh \
+  "$RUN_DIR/router/retrieval"
+```
+
+启动本地调试界面：
+
+```bash
+python -m web_server.server \
+  --model-dir "$RUN_DIR/router/retrieval" \
+  --device cuda:0 \
+  --dtype bfloat16
+```
+
+浏览器打开 `http://127.0.0.1:8080`。LoRA checkpoint 会从
+`adapter_config.json` 自动读取 base model；若原路径在新机器上无效，额外传入
+`--base-model-name-or-path /models/Qwen3-1.7B`。远程机器建议通过 SSH 转发端口：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@server
+```
+
+## 12. 测试
 
 ```bash
 python -m pytest

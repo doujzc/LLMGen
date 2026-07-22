@@ -139,32 +139,65 @@ def _validate_training_contract(args: argparse.Namespace) -> int | None:
         raise RouterDataError(
             "virtual_tokens.txt differs from the router training artifact"
         )
+    decode_map_path = getattr(args, "decode_map", None)
+    if decode_map_path:
+        decoder_artifacts = payload.get("decoder_artifacts")
+        expected_decode_hash = (
+            decoder_artifacts.get("decode_map_sha256")
+            if isinstance(decoder_artifacts, dict)
+            else None
+        )
+        if (
+            expected_decode_hash
+            and sha256_file(decode_map_path) != expected_decode_hash
+        ):
+            raise RouterDataError(
+                "bundled skill_decode_map.json differs from the router manifest"
+            )
     expected_stage1_sha256 = payload.get("stage1_checkpoint_sha256")
     if expected_stage1_sha256:
-        index_manifest_path = Path(args.codes).resolve().parent / "manifest.json"
-        if not index_manifest_path.is_file():
-            raise RouterDataError(
-                "index manifest is required to verify router/codebook lineage"
+        if decode_map_path:
+            from llmgen.router_bundle import load_skill_decode_map
+
+            decode_map = load_skill_decode_map(decode_map_path)
+            actual_stage1_sha256 = decode_map.get("provenance", {}).get(
+                "stage1_checkpoint_sha256"
             )
-        index_manifest = json.loads(index_manifest_path.read_text(encoding="utf-8"))
-        actual_stage1_sha256 = index_manifest.get("checkpoint_sha256")
-        if actual_stage1_sha256 != expected_stage1_sha256:
-            raise RouterDataError(
-                "router checkpoint and supplied index use different Stage-1 codebooks"
-            )
-        actual_codes_sha256 = sha256_file(args.codes)
-        indexed_splits = index_manifest.get("splits")
-        if not isinstance(indexed_splits, dict):
-            raise RouterDataError("index manifest has no split artifacts")
-        indexed_code_hashes = {
-            details.get("codes_sha256")
-            for details in indexed_splits.values()
-            if isinstance(details, dict)
-        }
-        if actual_codes_sha256 not in indexed_code_hashes:
-            raise RouterDataError(
-                "codes artifact is not recorded by its adjacent index manifest"
-            )
+            if actual_stage1_sha256 != expected_stage1_sha256:
+                raise RouterDataError(
+                    "router checkpoint and bundled decode map use different "
+                    "Stage-1 codebooks"
+                )
+        else:
+            codes_path = getattr(args, "codes", None)
+            if not codes_path:
+                raise RouterDataError(
+                    "codes or a bundled decode map is required to verify codebook lineage"
+                )
+            index_manifest_path = Path(codes_path).resolve().parent / "manifest.json"
+            if not index_manifest_path.is_file():
+                raise RouterDataError(
+                    "index manifest is required to verify router/codebook lineage"
+                )
+            index_manifest = json.loads(index_manifest_path.read_text(encoding="utf-8"))
+            actual_stage1_sha256 = index_manifest.get("checkpoint_sha256")
+            if actual_stage1_sha256 != expected_stage1_sha256:
+                raise RouterDataError(
+                    "router checkpoint and supplied index use different Stage-1 codebooks"
+                )
+            actual_codes_sha256 = sha256_file(codes_path)
+            indexed_splits = index_manifest.get("splits")
+            if not isinstance(indexed_splits, dict):
+                raise RouterDataError("index manifest has no split artifacts")
+            indexed_code_hashes = {
+                details.get("codes_sha256")
+                for details in indexed_splits.values()
+                if isinstance(details, dict)
+            }
+            if actual_codes_sha256 not in indexed_code_hashes:
+                raise RouterDataError(
+                    "codes artifact is not recorded by its adjacent index manifest"
+                )
     trained_max_length = payload.get("max_length")
     return (
         int(trained_max_length)

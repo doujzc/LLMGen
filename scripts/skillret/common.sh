@@ -111,6 +111,9 @@ skillret_configure_router() {
 
   ROUTER_COMMON_ARGS=(
     --virtual-tokens "$INDEX_DIR/virtual_tokens.txt"
+    --skill-catalog "$PROCESSED_DIR/catalog_train.jsonl"
+    --skill-codes "$INDEX_DIR/train_codes.jsonl"
+    --skill-registry "$INDEX_DIR/train_registry.json"
     --output-dir "$ROUTER_OUTPUT_DIR"
     --num-levels "$NUM_LEVELS"
     --max-length "$ROUTER_MAX_LENGTH"

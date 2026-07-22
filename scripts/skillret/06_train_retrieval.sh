@@ -2,6 +2,9 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 skillret_require_file "$INDEX_DIR/virtual_tokens.txt"
+skillret_require_file "$PROCESSED_DIR/catalog_train.jsonl"
+skillret_require_file "$INDEX_DIR/train_codes.jsonl"
+skillret_require_file "$INDEX_DIR/train_registry.json"
 skillret_require_file "$ROUTER_DATA_DIR/retrieval_train.jsonl"
 skillret_require_file "$ROUTER_DATA_DIR/retrieval_validation.jsonl"
 skillret_require_dir "$ROUTER_OUTPUT_DIR/memorization"

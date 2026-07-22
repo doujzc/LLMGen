@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>LLMGen Skill Router Lab</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="LLMGen 首页">
+          <span class="brand-mark">LG</span>
+          <span>
+            <strong>Skill Router Lab</strong>
+            <small>LLMGen · Manual evaluation console</small>
+          </span>
+        </a>
+        <div id="status" class="status loading">
+          <span class="status-dot"></span>
+          <span id="status-text">正在连接模型</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div>
+            <p class="eyebrow">GENERATIVE SKILL ROUTING</p>
+            <h1>把真实请求交给模型，<br />看它如何组合 Skills。</h1>
+            <p class="hero-copy">
+              输入个人手机 Agent 风格的复杂请求。模型将以完整自回归方式生成多条两层 code，
+              再解码为原始候选 Skill。
+            </p>
+          </div>
+          <dl id="model-stats" class="stats" aria-label="模型信息">
+            <div><dt>候选 Skills</dt><dd>—</dd></div>
+            <div><dt>有效路径</dt><dd>—</dd></div>
+            <div><dt>Code 层数</dt><dd>—</dd></div>
+          </dl>
+        </section>
+
+        <section class="workspace">
+          <form id="query-form" class="query-panel">
+            <div class="panel-heading">
+              <div>
+                <span class="step">01</span>
+                <h2>测试 Query</h2>
+              </div>
+              <button id="example-button" class="text-button" type="button">填入示例</button>
+            </div>
+            <label class="sr-only" for="query">用户请求</label>
+            <textarea
+              id="query"
+              name="query"
+              rows="7"
+              maxlength="20000"
+              placeholder="例如：下周要去上海出差，帮我查天气和高铁，选一个靠近会场的酒店，把行程加入日历并提醒我提前带伞……"
+              required
+            ></textarea>
+            <div class="controls">
+              <label>
+                <span>最多生成路径</span>
+                <select id="max-paths" name="max_paths">
+                  <option value="2">2</option>
+                  <option value="4" selected>4</option>
+                  <option value="6">6</option>
+                  <option value="8">8</option>
+                </select>
+              </label>
+              <label>
+                <span>候选 Top K</span>
+                <select id="top-k" name="top_k">
+                  <option value="5">5</option>
+                  <option value="10" selected>10</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                </select>
+              </label>
+              <span class="shortcut">⌘ / Ctrl + Enter</span>
+              <button id="submit-button" class="primary-button" type="submit">
+                <span class="button-label">运行路由</span>
+                <span class="button-arrow">→</span>
+              </button>
+            </div>
+            <p id="form-error" class="error" role="alert" hidden></p>
+          </form>
+
+          <section id="result-panel" class="result-panel empty" aria-live="polite">
+            <div id="empty-state" class="empty-state">
+              <div class="empty-glyph"><span></span><span></span><span></span></div>
+              <h2>等待第一次路由</h2>
+              <p>结果会在这里展开：先看生成路径，再看解码后的 Skill 排序。</p>
+            </div>
+
+            <div id="results" hidden>
+              <div class="result-header">
+                <div>
+                  <span class="step">02</span>
+                  <h2>模型输出</h2>
+                </div>
+                <div class="latency"><span>端到端时延</span><strong id="latency">—</strong></div>
+              </div>
+
+              <div class="output-block">
+                <span class="block-label">RAW AUTOREGRESSIVE OUTPUT</span>
+                <pre id="generated-text"></pre>
+              </div>
+
+              <div class="section-title">
+                <h3>生成路径</h3>
+                <span id="path-count" class="count-pill">0 paths</span>
+              </div>
+              <div id="paths" class="path-grid"></div>
+
+              <div class="section-title candidates-title">
+                <h3>解码候选</h3>
+                <span class="hint">同一路径内按候选原始顺序展开</span>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Rank</th>
+                      <th>Skill</th>
+                      <th>领域</th>
+                      <th>Code</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody id="candidate-rows"></tbody>
+                </table>
+              </div>
+
+              <details class="raw-details">
+                <summary>查看完整 JSON</summary>
+                <pre id="raw-json"></pre>
+              </details>
+            </div>
+          </section>
+        </section>
+
+        <section class="catalog-panel">
+          <div class="catalog-copy">
+            <span class="step">03</span>
+            <div>
+              <h2>候选集检索</h2>
+              <p>按名称、ID、描述或领域检查模型当前加载的候选。</p>
+            </div>
+          </div>
+          <div class="catalog-search">
+            <label class="sr-only" for="catalog-query">检索候选集</label>
+            <input id="catalog-query" type="search" placeholder="搜索候选 Skill…" />
+            <span id="catalog-total"></span>
+          </div>
+          <div id="catalog-results" class="catalog-results"></div>
+        </section>
+      </main>
+
+      <footer>
+        <span>LLMGen</span>
+        <span>Constrained autoregressive decoding · Local debugging only</span>
+      </footer>
+    </div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
