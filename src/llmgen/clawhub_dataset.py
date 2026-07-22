@@ -191,6 +191,34 @@ def stable_hash(*values: object) -> int:
     return int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
 
 
+def workflow_split(workflow: Mapping[str, Any], *, seed: int) -> str:
+    """Assign complete workflows to a deterministic, target-count-neutral split.
+
+    Generated coverage/recovery workflows are training-only. Base workflows
+    use a 90/5/5 split independent of their construction round so 2-, 3-, and
+    4-target examples all occur in train, validation, and test. Minimal legacy
+    fixtures without ``anchor_round`` retain their explicit split hint.
+    """
+
+    if workflow.get("coverage_backfill") or workflow.get("recovery"):
+        return "train"
+    if "anchor_round" not in workflow:
+        hint = str(workflow.get("split_hint") or "train")
+        if hint == "train":
+            return "train"
+        return (
+            "validation"
+            if stable_hash(seed, workflow.get("workflow_id")) % 2 == 0
+            else "test"
+        )
+    bucket = stable_hash(seed, "workflow_split", workflow.get("workflow_id")) % 20
+    if bucket == 0:
+        return "validation"
+    if bucket == 1:
+        return "test"
+    return "train"
+
+
 def normalized_text(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
 
@@ -1676,7 +1704,7 @@ def append_coverage_workflows(
             raise DatasetBuildError(
                 f"coverage input is missing review/workflow for query {query_id}"
             )
-        if bool(review.get("pass")) and workflow.get("split_hint") == "train":
+        if bool(review.get("pass")) and workflow_split(workflow, seed=seed) == "train":
             accepted_train_counts.update(set(map(str, query["skill_ids"])))
 
     deficits = {
@@ -2031,10 +2059,7 @@ def export_training_dataset(
     split_rows: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
     for row in accepted:
         workflow = workflows_by_id[str(row["workflow_id"])]
-        if workflow["split_hint"] == "train":
-            split = "train"
-        else:
-            split = "validation" if stable_hash(seed, row["anchor_skill_id"]) % 2 == 0 else "test"
+        split = workflow_split(workflow, seed=seed)
         review = reviews_by_id[str(row["query_id"])]
         skill_ids = list(map(str, row["skill_ids"]))
         intent_mode = str(row.get("intent_mode") or "explicit")
@@ -2215,7 +2240,7 @@ def export_training_dataset(
     ]
     artifacts = {
         name: {
-            "path": str(output_dir / name),
+            "path": name,
             "bytes": (output_dir / name).stat().st_size,
             "sha256": sha256_file(output_dir / name),
         }
@@ -2224,7 +2249,7 @@ def export_training_dataset(
     manifest = {
         "format_version": 1,
         "created_at": utc_now(),
-        "candidate_source": str(catalog_path),
+        "candidate_source": catalog_path.name,
         "candidate_count": len(candidate_rows),
         "candidate_policy": "retain_all_input_catalog_skills",
         "artifacts": artifacts,
@@ -2246,6 +2271,12 @@ def export_training_dataset(
         "target_count_distribution": dict(
             sorted(Counter(len(row["skill_ids"]) for rows in split_rows.values() for row in rows).items())
         ),
+        "split_target_count_distribution": {
+            split: dict(
+                sorted(Counter(len(row["skill_ids"]) for row in rows).items())
+            )
+            for split, rows in split_rows.items()
+        },
         "cross_domain_query_count": sum(len(row["domains"]) > 1 for rows in split_rows.values() for row in rows),
         "split_domain_counts": split_domain_counts,
         "train_positive_skill_count": len(combined_positive_counts),

@@ -24,5 +24,8 @@ fi
 if [[ -n "${EMBEDDING_MAX_BATCH_CHARS:-}" ]]; then
   ARGS+=(--embedding-max-batch-chars "$EMBEDDING_MAX_BATCH_CHARS")
 fi
+if [[ -n "${EMBEDDING_MAX_SKILL_CHARS:-}" ]]; then
+  ARGS+=(--max-skill-chars "$EMBEDDING_MAX_SKILL_CHARS")
+fi
 
 "$PYTHON" "${PREPARE_SCRIPT:-scripts/prepare_skillret.py}" "${ARGS[@]}" "$@"

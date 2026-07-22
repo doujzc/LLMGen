@@ -1,6 +1,6 @@
 # ClawHub multi-skill query data
 
-This directory contains generated routing data for one frozen 568-skill ClawHub candidate set. The set was filtered from a Top-1,000 source crawl; filtered source records never enter the training catalog or inference decoder. Intermediate generation artifacts are excluded from Git, while the reviewed files under `final/` are versioned and immediately trainable after clone.
+This directory contains generated routing data for one frozen 1,000-skill ClawHub candidate set. Every candidate from the verified Top-1,000 archive snapshot is retained. Intermediate generation artifacts are excluded from Git, while the reviewed files under `final/` are versioned and immediately trainable after clone.
 
 Create `~/llm_api.txt` outside the repository:
 
@@ -42,19 +42,22 @@ Coverage controls for a future rebuild:
 ```bash
 WORKFLOWS_PER_SKILL=3 \
 MIN_TRAIN_POSITIVES_PER_SKILL=10 \
-COVERAGE_ROUNDS=3 \
+MIN_ALIGNMENT_QUERIES_PER_SKILL=5 \
+COVERAGE_ROUNDS=5 \
 COVERAGE_OVERSAMPLE_FACTOR=3.0 \
   bash scripts/run_clawhub_data.sh
 ```
 
 Final files under `final/`:
 
-- `skills.jsonl`: the single shared 568-skill candidate registry.
+- `skills.jsonl`: the single shared 1,000-skill candidate registry.
 - `queries_{train,validation,test}.jsonl`: query text and multi-skill targets.
 - `queries_alignment.jsonl`: independently reviewed one-query-to-one-skill curriculum data.
+- `qrels_alignment.jsonl`: one positive relevance row for every single-skill curriculum query.
 - `qrels_{train,validation,test}.jsonl`: one positive relevance row per query/skill pair.
 - `queries.jsonl`: accepted examples with evidence spans, split, and review scores.
 - `manifest.json`: counts, coverage, domain distribution, and quality audit.
+- `quality_report.json`: compact audit result for coverage, implicit intent, and target-order augmentation.
 
 Train directly from the versioned files:
 

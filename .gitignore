@@ -19,5 +19,6 @@ data/clawhub_training/*
 data/clawhub_training/final/*
 !data/clawhub_training/final/*.jsonl
 !data/clawhub_training/final/manifest.json
+!data/clawhub_training/final/quality_report.json
 outputs/
 runs/

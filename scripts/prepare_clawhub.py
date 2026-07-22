@@ -288,15 +288,20 @@ def _catalog_row(row: Mapping[str, Any], max_chars: int | None) -> dict[str, Any
 
 
 def _normalize_queries(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {
+    normalized = []
+    for row in rows:
+        value = {
             "query_id": str(row.get("id") or row.get("query_id")),
             "query": str(row["query"]),
             "skill_ids": [str(value) for value in row["skill_ids"]],
             "k": len(row["skill_ids"]),
         }
-        for row in rows
-    ]
+        if row.get("source_query_id"):
+            value["source_query_id"] = str(row["source_query_id"])
+        if row.get("target_order_variant") is not None:
+            value["target_order_variant"] = int(row["target_order_variant"])
+        normalized.append(value)
+    return normalized
 
 
 def _batches(
@@ -363,10 +368,12 @@ def main() -> None:
     catalog_path = args.processed_dir / "catalog_train.jsonl"
     write_jsonl(catalog_path, catalog)
     split_details: dict[str, Any] = {}
+    normalized_queries_by_split: dict[str, list[dict[str, Any]]] = {}
     for split in SPLITS:
         queries_path = args.processed_dir / f"queries_{split}.jsonl"
         qrels_path = args.processed_dir / f"qrels_{split}.jsonl"
         queries = _normalize_queries(_load_rows(args.dataset_dir / f"queries_{split}.jsonl"))
+        normalized_queries_by_split[split] = queries
         qrels = [
             {
                 "query_id": str(row["query_id"]),
@@ -431,7 +438,28 @@ def main() -> None:
         }
 
     train_qrels = _load_rows(args.processed_dir / "qrels_train.jsonl")
-    source, target, weight = build_collaborative_edges(validated["skill_ids"], train_qrels)
+    query_to_source = {
+        str(row["query_id"]): str(row.get("source_query_id") or row["query_id"])
+        for row in normalized_queries_by_split["train"]
+    }
+    semantic_pairs: set[tuple[str, str]] = set()
+    semantic_train_qrels = []
+    for row in train_qrels:
+        source_query_id = query_to_source[str(row["query_id"])]
+        pair = (source_query_id, str(row["skill_id"]))
+        if pair in semantic_pairs:
+            continue
+        semantic_pairs.add(pair)
+        semantic_train_qrels.append(
+            {
+                "query_id": source_query_id,
+                "skill_id": str(row["skill_id"]),
+                "relevance": float(row.get("relevance", 1)),
+            }
+        )
+    source, target, weight = build_collaborative_edges(
+        validated["skill_ids"], semantic_train_qrels
+    )
     graph_path = args.processed_dir / "collab_graph_train.npz"
     np.savez_compressed(
         graph_path,
@@ -503,6 +531,8 @@ def main() -> None:
             "num_edges": int(weight.size),
             "normalization": "co_use_count/sqrt(skill_frequency_product)",
             "source_split": "train_qrels_only",
+            "source_query_policy": "deduplicate_target_order_variants_by_source_query_id",
+            "semantic_qrel_count": len(semantic_train_qrels),
             "sha256": sha256_file(graph_path),
         },
         "embeddings": embedding_manifest,

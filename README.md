@@ -1,13 +1,13 @@
 # LLMGen：ClawHub 全参数训练
 
-本仓库提供基于 568 个 ClawHub Agent Skills 的完整生成式路由训练流程。默认配置为：
+本仓库提供基于 1000 个 ClawHub Agent Skills 的完整生成式路由训练流程。默认配置为：
 
 - `Qwen3-Embedding-8B` 生成 Skill embeddings；
 - `Qwen3-1.7B` 作为 Router；
 - 两层 `128×128` Skill Code；
 - 多 Skill 完整自回归输出，每条 code 占一行；
 - 单机 4 卡 DeepSpeed ZeRO-3 全参数训练；
-- catalog、训练、验证、测试、code registry、解码空间和 Web 服务共享同一套 568 Skill 候选集。
+- catalog、训练、验证、测试、code registry、解码空间和 Web 服务共享同一套 1000 Skill 候选集。
 
 模型输出示例：
 
@@ -40,9 +40,10 @@ cd LLMGen
 git rev-parse --short HEAD
 ```
 
-从 ClawHub Top 1,000 原始抓取结果中筛选出的 568 个候选，以及 4,200 条多 Skill
-query 已提交在 `data/clawhub_training/final/`，无需重新爬取或调用模型生成数据。每个
-候选至少有一条训练正样本；被过滤的原始条目不进入任何训练或推理解码空间。
+ClawHub Top 1,000 快照的全部 1000 个候选及已复核数据均提交在
+`data/clawhub_training/final/`，无需重新爬取或调用模型生成数据。其中包含 5,963 条
+单 Skill 课程样本和 12,711 条已导出多 Skill 数据（训练集包含目标顺序增广）。
+每个候选至少有 5 条单 Skill 样本，单/多 Skill 未增广正样本合计至少 10 条。
 
 ## 2. 安装训练环境
 
@@ -81,7 +82,7 @@ CUDA 12.4 的 PyTorch wheel 可以在支持 CUDA 12.5 的 NVIDIA 驱动上运行
 export EMBEDDING_MODEL=/models/Qwen3-Embedding-8B
 export ROUTER_MODEL=/models/Qwen3-1.7B
 
-export RUN_DIR=runs/clawhub-qwen3-1.7b-full-v3
+export RUN_DIR=runs/clawhub-top1000-qwen3-1.7b-full-v1
 export PROCESSED_DIR="$RUN_DIR/processed"
 export EMBEDDING_DIR="$RUN_DIR/embeddings"
 
@@ -93,6 +94,9 @@ export ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE=1
 export ROUTER_GRADIENT_ACCUMULATION_STEPS=8
 export ROUTER_PRECISION=bf16
 export ROUTER_GRADIENT_CHECKPOINTING=1
+
+# 默认已是 1400；避免超长 Skill 说明超过 Embedding/Router 上下文。
+export EMBEDDING_MAX_SKILL_CHARS=1400
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export DEVICE=cuda
@@ -170,12 +174,12 @@ SKIP_PREPARE=1 bash scripts/run_clawhub_full.sh
 脚本依次执行：
 
 1. 训练两层层级 Skill Tokenizer；
-2. 为唯一候选集中的 568 个 Skills 导出固定 code，并执行碰撞、利用率和熵质量门禁；
+2. 为唯一候选集中的 1000 个 Skills 导出固定 code，并执行碰撞、利用率和熵质量门禁；
 3. 构造单 Skill 能力对齐与多 Skill 自回归 SFT 数据；
 4. 全参数训练 Memorization 阶段；
 5. 从 Memorization 模型先训练 `retrieval_alignment` 单 Skill 课程，再继续训练多
    Skill Retrieval；
-6. 在同一个 568 Skill 候选集上评估。
+6. 在同一个 1000 Skill 候选集上评估。
 
 每一步也可以单独运行，便于调试和恢复：
 
@@ -188,9 +192,10 @@ bash scripts/clawhub_train/06_train_retrieval.sh
 bash scripts/clawhub_train/07_evaluate.sh
 ```
 
-旧版 `64×64 / clawhub-v2`，以及基于 1,000 条未过滤 catalog 生成的 Stage 1 和 Router
-checkpoint，均与当前唯一候选集不兼容。必须使用新的 `RUN_DIR`，从第 5 节预处理和
-Stage 1 开始重新训练；不能对旧运行目录设置 `SKIP_PREPARE=1`。导出成功后可快速确认
+旧版 `64×64 / clawhub-v2`、568-Skill checkpoint，以及任何不是基于当前
+`manifest.json` 候选集生成的 Stage 1 和 Router checkpoint，均与当前数据不兼容。
+必须使用新的 `RUN_DIR`，从第 5 节预处理和 Stage 1 开始重新训练；不能对旧运行目录
+设置 `SKIP_PREPARE=1`。导出成功后可快速确认
 code 质量：
 
 ```bash
@@ -206,7 +211,7 @@ python -c 'import json,os; x=json.load(open(os.path.join(os.environ["RUN_DIR"],"
 主要产物为：
 
 ```text
-runs/clawhub-qwen3-1.7b-full-v3/
+runs/clawhub-top1000-qwen3-1.7b-full-v1/
 ├── processed/
 ├── embeddings/
 ├── stage1/
@@ -330,18 +335,18 @@ skill_decode_map.json  # token/path -> 原始 Skill ID、名称和元数据
 virtual_tokens.txt     # 完整虚拟 token 命名空间
 ```
 
-Retrieval 模型的解码映射覆盖且只覆盖这 568 个候选。导出时会校验每个候选都有训练
+Retrieval 模型的解码映射覆盖且只覆盖这 1000 个候选。导出时会校验每个候选都有训练
 正样本；Web 候选检索、约束生成 Trie 和 token 解码映射使用同一组 Skill ID。
 
-仅当旧 checkpoint 本身就是基于当前 568 个候选训练时，才能补齐这两个文件：
+仅当旧 checkpoint 本身就是基于当前 1000 个候选训练时，才能补齐这两个文件：
 
 ```bash
 bash scripts/clawhub_train/10_export_web_bundle.sh \
   "$RUN_DIR/router/retrieval"
 ```
 
-旧的 1,000 Skill checkpoint 会因 catalog、registry 和训练目标集合不一致而被拒绝，
-不能通过重新导出 bundle 转换为 568 Skill 模型。
+其他候选快照的 checkpoint 会因 catalog、registry 和训练目标集合不一致而被拒绝，
+不能通过重新导出 bundle 转换为当前 1000-Skill 模型。
 
 启动本地调试界面：
 

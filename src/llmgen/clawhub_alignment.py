@@ -17,6 +17,7 @@ from llmgen.clawhub_dataset import (
     _deduplicate_near_queries,
     load_jsonl,
     normalized_text,
+    workflow_split,
 )
 
 
@@ -302,7 +303,7 @@ def append_alignment_backfill_queries(
         }
         for query in multiskill_queries:
             workflow = workflows.get(str(query.get("workflow_id")))
-            if workflow and workflow.get("split_hint") == "train":
+            if workflow and workflow_split(workflow, seed=20260720) == "train":
                 multiskill_counts.update(set(map(str, query["skill_ids"])))
     required_alignment_counts = {
         str(profile["skill_id"]): max(
@@ -617,7 +618,7 @@ def export_alignment_dataset(
     for name in ("queries_alignment.jsonl", "qrels_alignment.jsonl"):
         path = output_dir / name
         artifacts[name] = {
-            "path": str(path),
+            "path": name,
             "bytes": path.stat().st_size,
             "sha256": sha256_file(path),
         }

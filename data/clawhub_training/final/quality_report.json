@@ -1,0 +1,73 @@
+{
+  "candidate_count": 1000,
+  "created_at": "2026-07-22T09:56:00.671466Z",
+  "dataset_dir": ".",
+  "explicit_intent": {
+    "mean_quality_scores": {
+      "coherence": 4.503430647114221,
+      "complexity": 4.141800080721109,
+      "mobile_style": 3.7753262478138034,
+      "specificity": 4.286694470604063,
+      "target_necessity": 4.839230458764967
+    },
+    "query_count": 7433
+  },
+  "implicit_intent": {
+    "implicit_target_count": 6616,
+    "mean_quality_scores": {
+      "coherence": 4.593974990526715,
+      "complexity": 4.142288745737021,
+      "mobile_style": 4.362068965517241,
+      "specificity": 4.005115574081091,
+      "target_necessity": 4.780409245926488
+    },
+    "query_count": 5278,
+    "query_fraction": 0.4152309023680277
+  },
+  "query_counts": {
+    "test": 161,
+    "train": 12360,
+    "validation": 190
+  },
+  "semantic_train_coverage": {
+    "mean": 19.033,
+    "minimum": 10,
+    "required_per_candidate": 10,
+    "undercovered_candidate_count": 0
+  },
+  "semantic_train_query_count": 4959,
+  "single_skill_alignment": {
+    "covered_candidate_count": 1000,
+    "mean_per_candidate": 5.963,
+    "minimum_per_candidate": 5,
+    "query_count": 5963
+  },
+  "stage": "dataset_quality_audit",
+  "status": "pass",
+  "target_count_by_split": {
+    "test": {
+      "2": 80,
+      "3": 52,
+      "4": 29
+    },
+    "train": {
+      "2": 5034,
+      "3": 5196,
+      "4": 2130
+    },
+    "validation": {
+      "2": 81,
+      "3": 76,
+      "4": 33
+    }
+  },
+  "target_order": {
+    "augmentation_factor": 2.4924379915305503,
+    "augmented_train_query_count": 12360,
+    "mean_target_position_coverage": 1.0,
+    "variant_count_distribution": {
+      "2": 2517,
+      "3": 2442
+    }
+  }
+}

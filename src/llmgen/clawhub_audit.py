@@ -66,6 +66,22 @@ def audit_training_dataset(
         for split in SPLITS
     }
     all_rows = [row for split in SPLITS for row in split_rows[split]]
+    target_counts_by_split = {
+        split: Counter(len(row.get("skill_ids") or []) for row in rows)
+        for split, rows in split_rows.items()
+    }
+    unseen_target_counts = sorted(
+        (
+            set(target_counts_by_split["validation"])
+            | set(target_counts_by_split["test"])
+        )
+        - set(target_counts_by_split["train"])
+    )
+    if unseen_target_counts:
+        raise DatasetBuildError(
+            "held-out splits contain target counts absent from train: "
+            + ", ".join(map(str, unseen_target_counts))
+        )
     implicit_rows = [row for row in all_rows if row.get("intent_mode") == "implicit"]
     explicit_rows = [row for row in all_rows if row.get("intent_mode") == "explicit"]
     for row in all_rows:
@@ -125,10 +141,14 @@ def audit_training_dataset(
     report = {
         "stage": "dataset_quality_audit",
         "created_at": utc_now(),
-        "dataset_dir": str(dataset_dir),
+        "dataset_dir": ".",
         "candidate_count": len(skills),
         "query_counts": {split: len(split_rows[split]) for split in SPLITS},
         "semantic_train_query_count": len(groups),
+        "target_count_by_split": {
+            split: dict(sorted(counts.items()))
+            for split, counts in target_counts_by_split.items()
+        },
         "single_skill_alignment": {
             "query_count": len(alignment_rows),
             "covered_candidate_count": len(alignment_counts),

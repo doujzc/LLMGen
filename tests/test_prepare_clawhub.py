@@ -15,13 +15,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 def test_versioned_clawhub_dataset_is_directly_trainable() -> None:
     validated = validate_dataset(REPO_ROOT / "data/clawhub_training/final")
     assert validated["counts"] == {
-        "skills": 568,
-        "queries_train": 3353,
-        "qrels_train": 9707,
-        "queries_validation": 448,
-        "qrels_validation": 1344,
-        "queries_test": 399,
-        "qrels_test": 1197,
+        "skills": 1000,
+        "queries_train": 12360,
+        "qrels_train": 34176,
+        "queries_validation": 190,
+        "qrels_validation": 522,
+        "queries_test": 161,
+        "qrels_test": 432,
+        "queries_alignment": 5963,
+        "qrels_alignment": 5963,
     }
     assert len(validated["skill_ids"]) == len(set(validated["skill_ids"]))
 
