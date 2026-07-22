@@ -27,7 +27,7 @@
         <section class="hero">
           <div>
             <p class="eyebrow">GENERATIVE SKILL ROUTING</p>
-            <h1>把真实请求交给模型，<br />看它如何组合 Skills。</h1>
+            <h1>输入真实请求，查看模型选择的 Skills。</h1>
             <p class="hero-copy">
               输入个人手机 Agent 风格的复杂请求。模型将以完整自回归方式生成多条两层 code，
               再解码为原始候选 Skill。
@@ -91,6 +91,12 @@
               <div class="empty-glyph"><span></span><span></span><span></span></div>
               <h2>等待第一次路由</h2>
               <p>结果会在这里展开：先看生成路径，再看解码后的 Skill 排序。</p>
+            </div>
+
+            <div id="loading-state" class="loading-state" hidden>
+              <div class="route-loader" aria-hidden="true"><span></span><span></span><span></span></div>
+              <h2>模型正在路由</h2>
+              <p>正在约束生成 Skill Code 并解码候选，请稍候。</p>
             </div>
 
             <div id="results" hidden>
@@ -162,6 +168,34 @@
         <span>Constrained autoregressive decoding · Local debugging only</span>
       </footer>
     </div>
+
+    <dialog id="skill-dialog" class="skill-dialog">
+      <div class="dialog-head">
+        <div>
+          <span class="eyebrow">SKILL DETAIL</span>
+          <h2 id="detail-name">Skill</h2>
+          <code id="detail-id"></code>
+        </div>
+        <button id="dialog-close" class="dialog-close" type="button" aria-label="关闭详情">×</button>
+      </div>
+      <div id="detail-tags" class="detail-tags"></div>
+      <section class="detail-section">
+        <h3>能力说明</h3>
+        <p id="detail-capability"></p>
+      </section>
+      <section class="detail-section">
+        <h3>原始描述</h3>
+        <p id="detail-description" class="preserve-lines"></p>
+      </section>
+      <section class="detail-section candidate-text-section">
+        <h3>训练候选文本</h3>
+        <pre id="detail-text"></pre>
+      </section>
+      <div class="dialog-foot">
+        <code id="detail-code"></code>
+        <a id="detail-source" href="#" target="_blank" rel="noopener noreferrer">在 ClawHub 查看 ↗</a>
+      </div>
+    </dialog>
     <script src="/static/app.js" defer></script>
   </body>
 </html>

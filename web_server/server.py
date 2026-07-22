@@ -74,6 +74,19 @@ def handler_class(runtime: RouterRuntime):
                     return
                 self._json(HTTPStatus.OK, runtime.catalog(query, limit))
                 return
+            if parsed.path == "/api/skill":
+                params = parse_qs(parsed.query)
+                skill_id = params.get("id", [""])[0]
+                if not skill_id:
+                    self._error(HTTPStatus.BAD_REQUEST, "id is required")
+                    return
+                try:
+                    detail = runtime.skill_detail(skill_id)
+                except RouterDataError as exc:
+                    self._error(HTTPStatus.NOT_FOUND, str(exc))
+                    return
+                self._json(HTTPStatus.OK, detail)
+                return
             static_path = STATIC_ROUTES.get(parsed.path)
             if static_path is None or not static_path.is_file():
                 self._error(HTTPStatus.NOT_FOUND, "not found")

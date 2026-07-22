@@ -27,6 +27,7 @@ DECODE_MAP_SCHEMA_VERSION = 1
 _METADATA_FIELDS = (
     "name",
     "description",
+    "text",
     "domain",
     "capability_zh",
     "mobile_fit",

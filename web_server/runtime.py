@@ -139,6 +139,15 @@ class RouterRuntime:
         )
         return {"total": len(rows), "skills": rows[: max(1, min(limit, 1000))]}
 
+    def skill_detail(self, skill_id: str) -> dict[str, Any]:
+        metadata = self.skills.get(skill_id)
+        if metadata is None:
+            raise RouterDataError(f"unknown skill_id: {skill_id!r}")
+        return {
+            **metadata,
+            **self.decode_map["skill_to_code"][skill_id],
+        }
+
     def infer(
         self,
         query: str,

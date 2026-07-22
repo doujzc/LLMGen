@@ -15,6 +15,15 @@ class StubRuntime:
     def catalog(self, query, limit):
         return {"total": 1, "skills": [{"skill_id": "s1", "name": query or "天气"}]}
 
+    def skill_detail(self, skill_id):
+        return {
+            "skill_id": skill_id,
+            "name": "天气",
+            "description": "获取天气预报",
+            "text": "天气 | 获取天气预报",
+            "code_text": "<L1_0><L2_0>",
+        }
+
     def infer(self, query, *, max_code_paths, top_k):
         return {
             "query": query,
@@ -48,6 +57,9 @@ def test_web_api_health_catalog_and_inference() -> None:
 
         _, catalog = _request(base + "/api/catalog?q=%E5%A4%A9%E6%B0%94&limit=5")
         assert catalog["skills"][0]["name"] == "天气"
+
+        _, detail = _request(base + "/api/skill?id=s1")
+        assert detail["text"] == "天气 | 获取天气预报"
 
         _, result = _request(
             base + "/api/infer",

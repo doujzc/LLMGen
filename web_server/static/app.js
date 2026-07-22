@@ -1,4 +1,9 @@
-const state = { health: null, catalogTimer: null };
+const state = {
+  health: null,
+  catalogTimer: null,
+  hasResult: false,
+  skillCache: new Map(),
+};
 
 const $ = (selector) => document.querySelector(selector);
 const status = $("#status");
@@ -7,6 +12,7 @@ const form = $("#query-form");
 const queryInput = $("#query");
 const submitButton = $("#submit-button");
 const errorBox = $("#form-error");
+const skillDialog = $("#skill-dialog");
 
 const exampleQuery =
   "我周五晚上到杭州，周日返程。帮我根据天气安排一条适合拍照的两日路线，订高铁和离景点近的酒店，把行程写进日历；如果下雨就调整成室内活动，并在每天出发前提醒我带对应物品。";
@@ -66,6 +72,14 @@ function clearError() {
   errorBox.textContent = "";
 }
 
+function skillButton(skill, className = "skill-link") {
+  const button = textNode("button", className, skill.name || skill.skill_id);
+  button.type = "button";
+  button.dataset.skillId = skill.skill_id;
+  button.addEventListener("click", () => openSkill(skill.skill_id));
+  return button;
+}
+
 function renderPaths(paths) {
   const container = $("#paths");
   container.replaceChildren();
@@ -78,8 +92,9 @@ function renderPaths(paths) {
     );
     const tokens = textNode("div", "tokens");
     path.code_tokens.forEach((token) => tokens.append(textNode("code", "token", token)));
-    const names = path.skills.map((skill) => skill.name || skill.skill_id).join(" · ");
-    card.append(top, tokens, textNode("div", "decoded-names", names));
+    const names = textNode("div", "decoded-names");
+    path.skills.forEach((skill) => names.append(skillButton(skill)));
+    card.append(top, tokens, names);
     container.append(card);
   });
   $("#path-count").textContent = `${paths.length} path${paths.length === 1 ? "" : "s"}`;
@@ -92,10 +107,8 @@ function renderCandidates(candidates) {
     const row = document.createElement("tr");
     row.append(textNode("td", "rank", String(index + 1).padStart(2, "0")));
     const skill = document.createElement("td");
-    skill.append(
-      textNode("span", "skill-name", candidate.name || candidate.skill_id),
-      textNode("span", "skill-id", candidate.skill_id),
-    );
+    skill.append(skillButton(candidate, "skill-name skill-link"));
+    skill.append(textNode("span", "skill-id", candidate.skill_id));
     const domain = document.createElement("td");
     domain.append(textNode("span", "domain-tag", candidate.domain || "未分类"));
     row.append(
@@ -110,8 +123,10 @@ function renderCandidates(candidates) {
 
 function renderResult(result) {
   $("#empty-state").hidden = true;
+  $("#loading-state").hidden = true;
   $("#results").hidden = false;
   $("#result-panel").classList.remove("empty");
+  state.hasResult = true;
   $("#latency").textContent = `${Number(result.latency_ms).toLocaleString()} ms`;
   $("#generated-text").textContent = result.generated_text || "(empty)";
   renderPaths(result.paths);
@@ -128,6 +143,9 @@ async function runInference(event) {
     queryInput.focus();
     return;
   }
+  $("#empty-state").hidden = true;
+  $("#results").hidden = true;
+  $("#loading-state").hidden = false;
   submitButton.disabled = true;
   $(".button-label").textContent = "推理中…";
   try {
@@ -143,6 +161,9 @@ async function runInference(event) {
     renderResult(result);
     if (window.innerWidth < 1000) $("#result-panel").scrollIntoView({ behavior: "smooth" });
   } catch (error) {
+    $("#loading-state").hidden = true;
+    $("#results").hidden = !state.hasResult;
+    $("#empty-state").hidden = state.hasResult;
     showError(error.message);
   } finally {
     submitButton.disabled = false;
@@ -155,14 +176,62 @@ function renderCatalog(payload) {
   const container = $("#catalog-results");
   container.replaceChildren();
   payload.skills.slice(0, 12).forEach((skill) => {
-    const item = textNode("article", "catalog-item");
+    const item = textNode("button", "catalog-item");
+    item.type = "button";
+    item.addEventListener("click", () => openSkill(skill.skill_id));
     item.append(
       textNode("strong", "", skill.name || skill.skill_id),
       textNode("code", "", skill.code_text),
-      textNode("p", "", skill.description || skill.capability_zh || skill.skill_id),
+      textNode(
+        "span",
+        "catalog-description",
+        skill.description || skill.capability_zh || skill.skill_id,
+      ),
     );
     container.append(item);
   });
+}
+
+function detailTag(value) {
+  return textNode("span", "detail-tag", value);
+}
+
+function renderSkillDetail(skill) {
+  $("#detail-name").textContent = skill.name || skill.skill_id;
+  $("#detail-id").textContent = skill.skill_id;
+  $("#detail-capability").textContent =
+    skill.capability_zh || skill.description || "暂无能力说明";
+  $("#detail-description").textContent = skill.description || "暂无原始描述";
+  $("#detail-text").textContent =
+    skill.text || skill.description || skill.capability_zh || "暂无候选文本";
+  $("#detail-code").textContent = skill.code_text || "";
+
+  const tags = $("#detail-tags");
+  tags.replaceChildren();
+  if (skill.domain) tags.append(detailTag(`领域 · ${skill.domain}`));
+  if (skill.mobile_fit) tags.append(detailTag(`手机适配 · ${skill.mobile_fit}`));
+  if (skill.rank !== undefined && skill.rank !== null) {
+    tags.append(detailTag(`ClawHub 排名 · ${skill.rank}`));
+  }
+  (skill.roles || []).forEach((role) => tags.append(detailTag(`role · ${role}`)));
+
+  const source = $("#detail-source");
+  source.hidden = !skill.source_url;
+  if (skill.source_url) source.href = skill.source_url;
+}
+
+async function openSkill(skillId) {
+  try {
+    let skill = state.skillCache.get(skillId);
+    if (!skill) {
+      skill = await jsonRequest(`/api/skill?id=${encodeURIComponent(skillId)}`);
+      state.skillCache.set(skillId, skill);
+    }
+    renderSkillDetail(skill);
+    if (!skillDialog.open) skillDialog.showModal();
+  } catch (error) {
+    showError(`无法加载 Skill 详情：${error.message}`);
+  }
 }
 
 async function loadCatalog() {
@@ -185,6 +254,10 @@ document.addEventListener("keydown", (event) => {
 $("#catalog-query").addEventListener("input", () => {
   window.clearTimeout(state.catalogTimer);
   state.catalogTimer = window.setTimeout(loadCatalog, 180);
+});
+$("#dialog-close").addEventListener("click", () => skillDialog.close());
+skillDialog.addEventListener("click", (event) => {
+  if (event.target === skillDialog) skillDialog.close();
 });
 
 loadHealth();

@@ -12,7 +12,12 @@ from llmgen.router_bundle import (
 
 
 CATALOG = [
-    {"skill_id": "s1", "name": "天气查询", "domain": "生活"},
+    {
+        "skill_id": "s1",
+        "name": "天气查询",
+        "domain": "生活",
+        "text": "天气查询 | 获取实时天气和预报",
+    },
     {"skill_id": "s2", "name": "行程规划", "domain": "出行"},
     {"skill_id": "s3", "name": "日历提醒", "domain": "效率"},
 ]
@@ -42,6 +47,7 @@ def test_decode_map_exposes_token_and_exact_path_names() -> None:
 
     assert payload["num_skills"] == 3
     assert payload["num_paths"] == 2
+    assert payload["skills"]["s1"]["text"] == "天气查询 | 获取实时天气和预报"
     assert payload["token_to_candidates"]["<L1_0>"] == [
         {"skill_id": "s1", "name": "天气查询"},
         {"skill_id": "s2", "name": "行程规划"},
