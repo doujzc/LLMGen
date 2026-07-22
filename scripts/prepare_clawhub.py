@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
 import os
@@ -98,6 +98,7 @@ def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
         raise ValueError("skills.jsonl contains missing or duplicate skill_id values")
     allowed = set(skill_ids)
     query_ids_by_split: dict[str, set[str]] = {}
+    train_semantic_positives: dict[str, set[str]] = {}
     workflow_splits: dict[str, str] = {}
     counts: dict[str, int] = {"skills": len(skills)}
 
@@ -123,12 +124,46 @@ def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
                 raise ValueError(f"query {query_id} has incomplete evidence")
             if any(str(span) not in query for span in evidence.values()):
                 raise ValueError(f"query {query_id} has a non-verbatim evidence span")
+            intent_mode = str(row.get("intent_mode") or "explicit")
+            if intent_mode not in {"explicit", "implicit"}:
+                raise ValueError(f"query {query_id} has invalid intent_mode")
+            implicit_ids = list(map(str, row.get("implicit_skill_ids") or []))
+            if not set(implicit_ids) <= targets:
+                raise ValueError(f"query {query_id} has a non-target implicit skill")
+            target_intents = row.get("target_intents") or {
+                skill_id: "implicit" if skill_id in implicit_ids else "explicit"
+                for skill_id in targets
+            }
+            if not isinstance(target_intents, dict) or set(map(str, target_intents)) != targets:
+                raise ValueError(f"query {query_id} has incomplete target intents")
+            expected_intents = {
+                skill_id: "implicit" if skill_id in implicit_ids else "explicit"
+                for skill_id in targets
+            }
+            if {str(key): str(value) for key, value in target_intents.items()} != expected_intents:
+                raise ValueError(f"query {query_id} target intents disagree with implicit skills")
+            rationales = row.get("implicit_rationales") or {}
+            if not isinstance(rationales, dict) or set(map(str, rationales)) != set(implicit_ids):
+                raise ValueError(f"query {query_id} has incomplete implicit rationales")
+            if intent_mode == "explicit" and implicit_ids:
+                raise ValueError(f"explicit query {query_id} declares implicit targets")
+            if intent_mode == "implicit" and not 1 <= len(implicit_ids) < len(targets):
+                raise ValueError(f"implicit query {query_id} needs explicit and implicit targets")
             workflow_id = str(row.get("workflow_id") or "")
             previous = workflow_splits.setdefault(workflow_id, split)
             if not workflow_id or previous != split:
                 raise ValueError(f"workflow crosses query splits: {workflow_id}")
             query_ids.add(query_id)
             positives[query_id] = targets
+            if split == "train":
+                source_query_id = str(row.get("source_query_id") or query_id)
+                previous_targets = train_semantic_positives.setdefault(
+                    source_query_id, targets
+                )
+                if previous_targets != targets:
+                    raise ValueError(
+                        f"target-order variants disagree for {source_query_id}"
+                    )
 
         qrel_targets: dict[str, set[str]] = defaultdict(set)
         pairs: set[tuple[str, str]] = set()
@@ -162,6 +197,70 @@ def validate_dataset(dataset_dir: Path) -> dict[str, Any]:
         split: counts[f"qrels_{split}"] for split in SPLITS
     }:
         raise ValueError("manifest qrel split counts disagree with data files")
+    train_positive_counts: Counter[str] = Counter(
+        skill_id
+        for targets in train_semantic_positives.values()
+        for skill_id in targets
+    )
+    alignment_queries_path = dataset_dir / "queries_alignment.jsonl"
+    alignment_qrels_path = dataset_dir / "qrels_alignment.jsonl"
+    if alignment_queries_path.is_file() != alignment_qrels_path.is_file():
+        raise FileNotFoundError(
+            "alignment queries/qrels must either both exist or both be absent"
+        )
+    alignment_positive_counts: Counter[str] = Counter()
+    if alignment_queries_path.is_file():
+        alignment_queries = _load_rows(alignment_queries_path)
+        alignment_qrels = _load_rows(alignment_qrels_path)
+        alignment_targets: dict[str, str] = {}
+        for row in alignment_queries:
+            query_id = str(row.get("id") or row.get("query_id") or "")
+            targets = list(map(str, row.get("skill_ids") or []))
+            if not query_id or query_id in alignment_targets or len(targets) != 1:
+                raise ValueError(f"invalid single-skill alignment query: {query_id!r}")
+            if targets[0] not in allowed:
+                raise ValueError(
+                    f"alignment query {query_id} references unknown skill: {targets[0]}"
+                )
+            alignment_targets[query_id] = targets[0]
+        alignment_pairs: set[tuple[str, str]] = set()
+        for row in alignment_qrels:
+            query_id = str(row.get("query_id") or "")
+            skill_id = str(row.get("skill_id") or "")
+            pair = (query_id, skill_id)
+            if (
+                pair in alignment_pairs
+                or alignment_targets.get(query_id) != skill_id
+                or float(row.get("relevance", 1)) <= 0
+            ):
+                raise ValueError(f"invalid or duplicate alignment qrel: {pair}")
+            alignment_pairs.add(pair)
+        if len(alignment_pairs) != len(alignment_targets):
+            raise ValueError("alignment qrels disagree with alignment queries")
+        alignment_positive_counts.update(alignment_targets.values())
+        counts["queries_alignment"] = len(alignment_queries)
+        counts["qrels_alignment"] = len(alignment_qrels)
+    combined_positive_counts = train_positive_counts + alignment_positive_counts
+    required_positives = int(
+        manifest.get("min_train_positives_per_skill_required", 1)
+    )
+    undercovered = {
+        skill_id: combined_positive_counts[skill_id]
+        for skill_id in sorted(allowed)
+        if combined_positive_counts[skill_id] < required_positives
+    }
+    if undercovered:
+        raise ValueError(
+            f"candidate set contains skills with fewer than {required_positives} "
+            "train positives: "
+            + ", ".join(
+                f"{skill_id}={count}"
+                for skill_id, count in list(undercovered.items())[:10]
+            )
+        )
+    recorded_below_minimum = manifest.get("skills_below_min_train_positives_count")
+    if recorded_below_minimum is not None and int(recorded_below_minimum) != 0:
+        raise ValueError("manifest reports candidates below train-positive minimum")
     return {"skills": skills, "skill_ids": skill_ids, "counts": counts}
 
 
@@ -290,6 +389,44 @@ def main() -> None:
                 "catalog_sha256": sha256_file(catalog_path),
                 "queries_sha256": sha256_file(queries_path),
                 "qrels_sha256": sha256_file(qrels_path),
+            },
+        }
+
+    alignment_source_queries = args.dataset_dir / "queries_alignment.jsonl"
+    alignment_source_qrels = args.dataset_dir / "qrels_alignment.jsonl"
+    if alignment_source_queries.is_file() != alignment_source_qrels.is_file():
+        raise FileNotFoundError("alignment queries/qrels must either both exist or both be absent")
+    if alignment_source_queries.is_file():
+        alignment_queries = _normalize_queries(_load_rows(alignment_source_queries))
+        alignment_qrels = [
+            {
+                "query_id": str(row["query_id"]),
+                "skill_id": str(row["skill_id"]),
+                "relevance": float(row.get("relevance", 1)),
+            }
+            for row in _load_rows(alignment_source_qrels)
+        ]
+        if any(len(row["skill_ids"]) != 1 for row in alignment_queries):
+            raise ValueError("alignment query must target exactly one skill")
+        alignment_query_path = args.processed_dir / "queries_alignment.jsonl"
+        alignment_qrel_path = args.processed_dir / "qrels_alignment.jsonl"
+        write_jsonl(alignment_query_path, alignment_queries)
+        write_jsonl(alignment_qrel_path, alignment_qrels)
+        split_details["alignment"] = {
+            "counts": {
+                "skills": len(catalog),
+                "queries": len(alignment_queries),
+                "qrels": len(alignment_qrels),
+            },
+            "files": {
+                "catalog": str(catalog_path),
+                "queries": str(alignment_query_path),
+                "qrels": str(alignment_qrel_path),
+            },
+            "hashes": {
+                "ordered_skill_ids_sha256": ordered_ids_sha256(validated["skill_ids"]),
+                "queries_sha256": sha256_file(alignment_query_path),
+                "qrels_sha256": sha256_file(alignment_qrel_path),
             },
         }
 

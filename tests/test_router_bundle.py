@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
+from llmgen.router import RouterDataError
 from llmgen.router_bundle import (
     BUNDLED_VIRTUAL_TOKENS_FILENAME,
     DECODE_MAP_FILENAME,
@@ -44,7 +47,7 @@ def test_decode_map_exposes_token_and_exact_path_names() -> None:
         registry=REGISTRY,
         virtual_tokens=TOKENS,
         supervision_rows=[
-            {"target_skill_ids": ["s1"]},
+            {"target_skill_ids": ["s1", "s2"]},
             {"target_skill_ids": ["s1", "s3"]},
         ],
         supervision_phase="retrieval",
@@ -54,8 +57,8 @@ def test_decode_map_exposes_token_and_exact_path_names() -> None:
     assert payload["num_paths"] == 2
     assert payload["skills"]["s1"]["text"] == "天气查询 | 获取实时天气和预报"
     assert payload["skills"]["s1"]["train_target_count"] == 2
-    assert payload["skills"]["s2"]["has_train_target"] is False
-    assert payload["supervision"]["num_supervised_skills"] == 2
+    assert payload["skills"]["s2"]["train_target_count"] == 1
+    assert payload["supervision"]["num_candidates"] == 3
     assert payload["token_to_candidates"]["<L1_0>"] == [
         {"skill_id": "s1", "name": "天气查询"},
         {"skill_id": "s2", "name": "行程规划"},
@@ -64,6 +67,18 @@ def test_decode_map_exposes_token_and_exact_path_names() -> None:
         {"skill_id": "s1", "name": "天气查询"},
         {"skill_id": "s2", "name": "行程规划"},
     ]
+
+
+def test_retrieval_decode_map_rejects_candidate_without_train_positive() -> None:
+    with pytest.raises(RouterDataError, match="without train positives"):
+        build_skill_decode_map(
+            catalog_rows=CATALOG,
+            code_rows=CODE_ROWS,
+            registry=REGISTRY,
+            virtual_tokens=TOKENS,
+            supervision_rows=[{"target_skill_ids": ["s1", "s3"]}],
+            supervision_phase="retrieval",
+        )
 
 
 def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
@@ -79,7 +94,7 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     _write_jsonl(codes, CODE_ROWS)
     registry.write_text(json.dumps(REGISTRY), encoding="utf-8")
     tokens.write_text("\n".join(TOKENS) + "\n", encoding="utf-8")
-    _write_jsonl(training_data, [{"target_skill_ids": ["s1", "s3"]}])
+    _write_jsonl(training_data, [{"target_skill_ids": ["s1", "s2", "s3"]}])
     (index / "manifest.json").write_text(
         json.dumps({"checkpoint_sha256": "stage-one-hash"}), encoding="utf-8"
     )
@@ -101,4 +116,4 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     assert restored["provenance"]["stage1_checkpoint_sha256"] == "stage-one-hash"
     assert restored["skills"]["s3"]["name"] == "日历提醒"
     assert restored["supervision"]["phase"] == "retrieval"
-    assert restored["supervision"]["num_unsupervised_skills"] == 1
+    assert restored["supervision"]["num_candidates"] == 3

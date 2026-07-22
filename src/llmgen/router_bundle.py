@@ -92,11 +92,23 @@ def build_skill_decode_map(
             "active code registry contains skills missing from catalog: "
             + ", ".join(missing_catalog[:10])
         )
+    catalog_only = sorted(set(catalog).difference(active_ids))
+    if catalog_only:
+        raise RouterDataError(
+            "catalog contains skills outside the active code registry: "
+            + ", ".join(catalog_only[:10])
+        )
     missing_codes = sorted(set(active_ids).difference(skill_to_tokens))
     if missing_codes:
         raise RouterDataError(
             "active registry contains skills missing from codes: "
             + ", ".join(missing_codes[:10])
+        )
+    code_only = sorted(set(skill_to_tokens).difference(active_ids))
+    if code_only:
+        raise RouterDataError(
+            "code rows contain skills outside the active registry: "
+            + ", ".join(code_only[:10])
         )
     token_namespace = tuple(str(token) for token in virtual_tokens)
     if not token_namespace or len(set(token_namespace)) != len(token_namespace):
@@ -188,18 +200,20 @@ def build_skill_decode_map(
                     + ", ".join(unknown_targets[:10])
                 )
             target_counts.update(unique_targets)
-        supervised_ids = sorted(target_counts)
+        missing_supervision = sorted(set(active_ids).difference(target_counts))
+        if supervision_phase == "retrieval" and missing_supervision:
+            raise RouterDataError(
+                "retrieval candidate set contains skills without train positives: "
+                + ", ".join(missing_supervision[:10])
+            )
         for skill_id in active_ids:
             catalog[skill_id]["train_target_count"] = target_counts[skill_id]
-            catalog[skill_id]["has_train_target"] = target_counts[skill_id] > 0
         supervision = {
             "phase": supervision_phase,
             "num_examples": len(supervision_rows),
-            "num_supervised_skills": len(supervised_ids),
-            "num_unsupervised_skills": len(active_ids) - len(supervised_ids),
-            "supervised_skill_ids": supervised_ids,
+            "num_candidates": len(active_ids),
             "target_counts": {
-                skill_id: target_counts[skill_id] for skill_id in supervised_ids
+                skill_id: target_counts[skill_id] for skill_id in active_ids
             },
         }
     return {
@@ -270,6 +284,17 @@ def validate_skill_decode_map(payload: Mapping[str, Any]) -> None:
         raw_tokens = details.get("tokens")
         if tuple(raw_tokens or ()) != reconstructed[skill_id]:
             raise RouterDataError(f"decode map code mismatch for {skill_id!r}")
+    supervision = payload.get("supervision")
+    if isinstance(supervision, dict) and supervision.get("phase") == "retrieval":
+        target_counts = supervision.get("target_counts")
+        if (
+            not isinstance(target_counts, dict)
+            or set(target_counts) != set(skills)
+            or any(int(count) < 1 for count in target_counts.values())
+        ):
+            raise RouterDataError(
+                "retrieval decode map does not use one fully covered candidate set"
+            )
 
 
 def load_skill_decode_map(path: str | Path) -> dict[str, Any]:
@@ -362,8 +387,7 @@ def dump_router_decoder_artifacts(
                 for key in (
                     "phase",
                     "num_examples",
-                    "num_supervised_skills",
-                    "num_unsupervised_skills",
+                    "num_candidates",
                 )
             }
             if payload["supervision"] is not None

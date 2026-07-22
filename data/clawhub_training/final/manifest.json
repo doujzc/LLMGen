@@ -42,38 +42,46 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "skills.jsonl": {
-      "bytes": 563999,
+      "bytes": 321381,
       "path": "data/clawhub_training/final/skills.jsonl",
-      "sha256": "54069f15aa2ec4c2adb35e216131ffaa8882b24a42f537d18977b0c9ef6c958f"
+      "sha256": "3753793effd4ffd71e8f72c661dce571ab1e041f11f9abd167a74d4f2ee00fbc"
     }
   },
-  "candidate_count": 1000,
-  "candidate_only_skill_count": 6,
-  "candidate_only_skill_ids": [
-    "@doonot/zero-trust",
-    "@enzoricciulli/adaptive-reasoning",
-    "@fangkelvin/proactive-agent-skill",
-    "@ivangdavila/proactivity",
-    "@mike5230odense/self-improvement",
-    "@zlc000190/using-superpowers"
-  ],
+  "candidate_count": 568,
+  "candidate_policy": {
+    "excluded_by_mobile_fit_count": 426,
+    "excluded_by_policy_count": 6,
+    "excluded_by_policy_ids": [
+      "@doonot/zero-trust",
+      "@enzoricciulli/adaptive-reasoning",
+      "@fangkelvin/proactive-agent-skill",
+      "@ivangdavila/proactivity",
+      "@mike5230odense/self-improvement",
+      "@zlc000190/using-superpowers"
+    ],
+    "mobile_fit": [
+      "high",
+      "medium"
+    ],
+    "requires_train_positive": true
+  },
   "candidate_source": "data/clawhub/catalog.jsonl",
   "coverage_repair_skill_count": 0,
   "coverage_repair_workflow_count": 0,
   "coverage_repair_workflow_ids": [],
-  "created_at": "2026-07-20T12:00:32.505521Z",
+  "created_at": "2026-07-22T03:56:28.492869Z",
   "cross_domain_query_count": 3877,
   "final_query_count": 4200,
   "format_version": 1,
   "generated_query_count": 5786,
   "mean_train_positives_per_covered_skill": 17.089788732394368,
   "min_train_positives_per_covered_skill": 1,
-  "missing_train_target_count": 0,
-  "missing_train_target_ids": [],
+  "missing_train_candidate_count": 0,
+  "missing_train_candidate_ids": [],
   "near_duplicate_rejection_count": 0,
-  "profile_targetable_skill_count": 574,
   "reviewed_query_count": 5786,
   "seed": 20260720,
+  "source_skill_count": 1000,
   "split_domain_counts": {
     "test": {
       "agent_system_automation": 18,
@@ -152,6 +160,5 @@
     "3": 2664,
     "4": 592
   },
-  "targetable_skill_count": 568,
-  "train_target_coverage_count": 568
+  "train_candidate_coverage_count": 568
 }

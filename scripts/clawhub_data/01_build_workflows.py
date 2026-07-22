@@ -14,8 +14,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profiles", type=Path, default=Path("data/clawhub_training/skill_profiles.jsonl"))
     parser.add_argument("--output", type=Path, default=Path("data/clawhub_training/workflows.jsonl"))
-    parser.add_argument("--workflows-per-skill", type=int, default=5)
-    parser.add_argument("--min-mobile-fit", choices=("low", "medium", "high"), default="medium")
+    parser.add_argument("--workflows-per-skill", type=int, default=3)
     parser.add_argument("--seed", type=int, default=20260720)
     return parser.parse_args()
 
@@ -26,7 +25,6 @@ def main() -> None:
         args.profiles,
         args.output,
         workflows_per_skill=args.workflows_per_skill,
-        min_mobile_fit=args.min_mobile_fit,
         seed=args.seed,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

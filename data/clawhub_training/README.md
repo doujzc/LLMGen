@@ -1,6 +1,6 @@
 # ClawHub multi-skill query data
 
-This directory contains generated routing data for the frozen 1,000-skill ClawHub candidate set. Intermediate generation artifacts are excluded from Git; the reviewed files under `final/` are versioned and immediately usable for training after clone.
+This directory contains generated routing data for one frozen 568-skill ClawHub candidate set. The set was filtered from a Top-1,000 source crawl; filtered source records never enter the training catalog or inference decoder. Intermediate generation artifacts are excluded from Git, while the reviewed files under `final/` are versioned and immediately trainable after clone.
 
 Create `~/llm_api.txt` outside the repository:
 
@@ -22,19 +22,36 @@ Or rerun individual stages:
 .venv/bin/python scripts/clawhub_data/00_profile_skills.py
 .venv/bin/python scripts/clawhub_data/01_build_workflows.py
 .venv/bin/python scripts/clawhub_data/01b_apply_recovery_workflows.py
+.venv/bin/python scripts/clawhub_data/02a_generate_alignment_queries.py --help
+.venv/bin/python scripts/clawhub_data/03a_review_alignment_queries.py --help
+.venv/bin/python scripts/clawhub_data/03a2_backfill_alignment.py --help
 .venv/bin/python scripts/clawhub_data/02_generate_queries.py
 .venv/bin/python scripts/clawhub_data/03_review_queries.py
+.venv/bin/python scripts/clawhub_data/03b_build_coverage_workflows.py
 .venv/bin/python scripts/clawhub_data/04_export_dataset.py
+.venv/bin/python scripts/clawhub_data/04a_export_alignment.py --help
+.venv/bin/python scripts/clawhub_data/05_validate_dataset.py --help
 ```
 
 Defaults use Qwen3.6-Plus for profiling/generation and GLM-5.1 for independent review, with model thinking disabled. The API key is never copied into output metadata.
 
-The 1,000 skills remain the closed candidate set. Complex queries target only skills classified as high/medium mobile fit by default; forcing low-fit infrastructure skills into personal-assistant requests produces artificial labels. Stage 1 can be rerun with `--min-mobile-fit low` when full positive-target coverage is explicitly required. Stage 1b applies the audited decisions in `configs/clawhub_recovery.json`: internal meta-skills remain candidates without artificial positives, while user-visible skills that failed the first review receive coherent recovery workflows.
+The checked-in `final/` snapshot remains unchanged until a complete rebuild passes its gates. During a rebuild, every Skill in the input catalog is retained; `mobile_fit` is metadata and never filters candidates. The pipeline adds targeted coverage workflows for undercovered Skills and, by default, requires at least 10 independently reviewed train positives per candidate. A failed gate writes `coverage_failure.json` without replacing the existing final dataset.
+
+Coverage controls for a future rebuild:
+
+```bash
+WORKFLOWS_PER_SKILL=3 \
+MIN_TRAIN_POSITIVES_PER_SKILL=10 \
+COVERAGE_ROUNDS=3 \
+COVERAGE_OVERSAMPLE_FACTOR=3.0 \
+  bash scripts/run_clawhub_data.sh
+```
 
 Final files under `final/`:
 
-- `skills.jsonl`: the shared 1,000-skill candidate registry.
+- `skills.jsonl`: the single shared 568-skill candidate registry.
 - `queries_{train,validation,test}.jsonl`: query text and multi-skill targets.
+- `queries_alignment.jsonl`: independently reviewed one-query-to-one-skill curriculum data.
 - `qrels_{train,validation,test}.jsonl`: one positive relevance row per query/skill pair.
 - `queries.jsonl`: accepted examples with evidence spans, split, and review scores.
 - `manifest.json`: counts, coverage, domain distribution, and quality audit.

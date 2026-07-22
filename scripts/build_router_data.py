@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--catalog", required=True, help="catalog_train.jsonl")
     parser.add_argument("--queries", required=True, help="queries_train.jsonl")
     parser.add_argument("--qrels", required=True, help="qrels_train.jsonl")
+    parser.add_argument(
+        "--alignment-queries",
+        help="Optional queries_alignment.jsonl with exactly one target per query.",
+    )
+    parser.add_argument("--alignment-qrels", help="Optional qrels_alignment.jsonl")
     parser.add_argument("--codes", required=True, help="index/train_codes.jsonl")
     parser.add_argument(
         "--virtual-tokens",
@@ -150,6 +155,30 @@ def main() -> None:
         )
 
     if not args.skip_retrieval:
+        if bool(args.alignment_queries) != bool(args.alignment_qrels):
+            raise RouterDataError(
+                "--alignment-queries and --alignment-qrels must be provided together"
+            )
+        if args.alignment_queries:
+            alignment_queries = read_jsonl(args.alignment_queries)
+            alignment_qrels = qrels_by_query(read_jsonl(args.alignment_qrels))
+            if any(len(targets) != 1 for targets in alignment_qrels.values()):
+                raise RouterDataError(
+                    "every single-skill alignment query must have exactly one target"
+                )
+            alignment = build_retrieval_examples(
+                alignment_queries,
+                skill_to_code,
+                alignment_qrels,
+            )
+            counts["retrieval_alignment"] = _write_split(
+                output_dir,
+                "retrieval_alignment",
+                alignment,
+                validation_fraction=0.0,
+                seed=args.seed + 2,
+                preserve_target_key="positive_skill_ids",
+            )
         grouped_qrels = qrels_by_query(qrel_rows)
         query_ids = {
             row.get("query_id", row.get("id"))
@@ -208,6 +237,8 @@ def main() -> None:
             "catalog": source_artifact(args.catalog),
             "queries": source_artifact(args.queries),
             "qrels": source_artifact(args.qrels),
+            "alignment_queries": source_artifact(args.alignment_queries),
+            "alignment_qrels": source_artifact(args.alignment_qrels),
             "codes": source_artifact(args.codes),
             "virtual_tokens": source_artifact(args.virtual_tokens),
             "index_manifest": index_manifest,

@@ -1,31 +1,5 @@
 {
   "schema_version": 1,
-  "candidate_only": [
-    {
-      "skill_id": "@doonot/zero-trust",
-      "reason": "内部安全行为规范，不是用户可独立请求的动作"
-    },
-    {
-      "skill_id": "@enzoricciulli/adaptive-reasoning",
-      "reason": "内部推理模式选择，不是用户可见的执行能力"
-    },
-    {
-      "skill_id": "@fangkelvin/proactive-agent-skill",
-      "reason": "泛化的主动性行为规范，无法形成不可替代的独立动作"
-    },
-    {
-      "skill_id": "@ivangdavila/proactivity",
-      "reason": "泛化的主动性行为规范，无法形成不可替代的独立动作"
-    },
-    {
-      "skill_id": "@mike5230odense/self-improvement",
-      "reason": "智能体内部自我改进机制，不是手机用户任务"
-    },
-    {
-      "skill_id": "@zlc000190/using-superpowers",
-      "reason": "内部技能调用流程规范，不是用户可独立请求的动作"
-    }
-  ],
   "recovery_workflows": [
     {
       "anchor_skill_id": "@asleep123/bitwarden",

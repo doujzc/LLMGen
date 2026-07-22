@@ -18,8 +18,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="Qwen3.6-Plus")
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--batch-size", type=int, default=4)
-    parser.add_argument("--variants", type=int, default=2)
+    parser.add_argument("--variants", type=int, default=3)
+    parser.add_argument("--implicit-variants", type=int, default=1)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--sample-size", type=int)
+    parser.add_argument("--sample-seed", type=int, default=20260722)
+    parser.add_argument("--validation-retry-rounds", type=int, default=3)
+    parser.add_argument("--min-completion-rate", type=float, default=0.95)
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -33,8 +38,13 @@ def main() -> None:
         args.output,
         client,
         variants=args.variants,
+        implicit_variants=args.implicit_variants,
         batch_size=args.batch_size,
         limit=args.limit,
+        sample_size=args.sample_size,
+        sample_seed=args.sample_seed,
+        validation_retry_rounds=args.validation_retry_rounds,
+        min_completion_rate=args.min_completion_rate,
         force=args.force,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))

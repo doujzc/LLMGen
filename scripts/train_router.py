@@ -45,6 +45,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--virtual-tokens", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
+        "--phase-output-subdir",
+        help="Override the phase checkpoint subdirectory (for retrieval curriculum).",
+    )
+    parser.add_argument(
         "--skill-catalog",
         help="Catalog JSONL bundled beside each final model for human decoding.",
     )
@@ -437,6 +441,7 @@ def _run_phase(
     replay_path: str | None = None,
     replay_fraction: float = 0.0,
     replay_system_prompt: str | None = None,
+    output_subdir: str | None = None,
 ) -> None:
     primary_train_rows = read_jsonl(train_path)
     if not primary_train_rows:
@@ -476,11 +481,14 @@ def _run_phase(
         else None
     )
 
-    phase_dir = Path(args.output_dir) / phase
+    phase_output_name = output_subdir or phase
+    if Path(phase_output_name).name != phase_output_name:
+        raise RouterDataError("phase output subdirectory must be one path component")
+    phase_dir = Path(args.output_dir) / phase_output_name
     phase_dir.mkdir(parents=True, exist_ok=True)
     if training_args is None:
         training_args = _build_training_arguments(
-            phase=phase,
+            phase=phase_output_name,
             has_validation=validation_dataset is not None,
             epochs=epochs,
             learning_rate=learning_rate,
@@ -545,6 +553,7 @@ def _run_phase(
         state = {
             "schema_version": 2,
             "phase": phase,
+            "curriculum_stage": phase_output_name,
             "num_levels": args.num_levels,
             "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
             "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
@@ -717,7 +726,7 @@ def main() -> None:
             # Trainer's DeepSpeed config must exist before from_pretrained so
             # ZeRO-3 partitions parameters during model construction as well.
             deepspeed_training_args = _build_training_arguments(
-                phase=phase,
+                phase=args.phase_output_subdir or phase,
                 has_validation=(
                     bool(read_jsonl(validation_path)) if validation_path else False
                 ),
@@ -761,6 +770,7 @@ def main() -> None:
             replay_path=None,
             replay_fraction=0.0,
             replay_system_prompt=None,
+            output_subdir=args.phase_output_subdir,
         )
 
     if args.stage in {"retrieval", "both"}:
@@ -782,6 +792,7 @@ def main() -> None:
             replay_path=args.retrieval_replay_data,
             replay_fraction=args.retrieval_replay_fraction,
             replay_system_prompt=args.memorization_system_prompt,
+            output_subdir=args.phase_output_subdir,
         )
 
 

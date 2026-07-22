@@ -11,8 +11,10 @@ from llmgen.clawhub_dataset import (
     _validate_generated_variant,
     _validate_profile,
     _validate_review,
+    append_coverage_workflows,
     apply_recovery_workflows,
     build_workflow_specs,
+    export_training_dataset,
 )
 
 
@@ -55,7 +57,7 @@ def test_profile_accepts_common_capability_alias() -> None:
     assert _validate_profile(raw, skill)["capability_zh"] == "查询实时天气和未来预报"
 
 
-def test_workflows_exclude_low_mobile_fit_targets(tmp_path: Path) -> None:
+def test_workflows_keep_every_candidate_regardless_of_mobile_fit(tmp_path: Path) -> None:
     profiles = [_profile(index, "low" if index == 6 else "high") for index in range(1, 7)]
     source = tmp_path / "profiles.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in profiles))
@@ -64,17 +66,19 @@ def test_workflows_exclude_low_mobile_fit_targets(tmp_path: Path) -> None:
         source,
         output,
         workflows_per_skill=2,
-        min_mobile_fit="medium",
         seed=7,
     )
     rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert manifest["profiled_skill_count"] == 6
     assert manifest["candidate_skill_count"] == 6
-    assert manifest["targetable_skill_count"] == 5
-    assert len(rows) == 10
-    assert all("@owner/skill-6" not in row["skill_ids"] for row in rows)
+    assert manifest["candidate_filtering"] is False
+    assert len(rows) == 12
+    assert {row["anchor_skill_id"] for row in rows} == {
+        f"@owner/skill-{index}" for index in range(1, 7)
+    }
 
 
-def test_recovery_workflows_are_idempotent_and_exclude_candidate_only(tmp_path: Path) -> None:
+def test_recovery_workflows_are_idempotent_without_filtering_candidates(tmp_path: Path) -> None:
     profiles = [_profile(index) for index in range(1, 5)]
     source = tmp_path / "profiles.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in profiles))
@@ -84,7 +88,6 @@ def test_recovery_workflows_are_idempotent_and_exclude_candidate_only(tmp_path: 
     config.write_text(
         json.dumps(
             {
-                "candidate_only": [{"skill_id": "@owner/skill-4", "reason": "meta"}],
                 "recovery_workflows": [
                     {
                         "anchor_skill_id": "@owner/skill-1",
@@ -99,8 +102,12 @@ def test_recovery_workflows_are_idempotent_and_exclude_candidate_only(tmp_path: 
     second = apply_recovery_workflows(source, workflows, config)
     rows = [json.loads(line) for line in workflows.read_text().splitlines()]
     assert first["recovery_workflow_count"] == second["recovery_workflow_count"] == 1
+    assert first["candidate_skill_count"] == second["candidate_skill_count"] == 4
+    assert first["candidate_filtering"] is False
     assert sum(bool(row.get("recovery")) for row in rows) == 1
-    assert "@owner/skill-4" not in rows[-1]["skill_ids"]
+    assert {row["anchor_skill_id"] for row in rows if not row.get("recovery")} == {
+        f"@owner/skill-{index}" for index in range(1, 5)
+    }
 
 
 def _workflow() -> dict:
@@ -113,25 +120,76 @@ def _workflow() -> dict:
         "cross_domain": True,
         "unsafe_action": False,
         "targets": [
-            {"skill_id": "@owner/weather"},
-            {"skill_id": "@owner/calendar"},
+            {"skill_id": "@owner/weather", "unsafe_action": False},
+            {"skill_id": "@owner/calendar", "unsafe_action": False},
         ],
     }
 
 
 def test_generated_variant_requires_exact_evidence_for_every_target() -> None:
     raw = {
+        "intent_mode": "explicit",
         "query": "明天下午去公园前先查一下会不会下雨，再把三点出发这件事加到日历里提醒我。",
         "evidence": {
             "@owner/weather": "查一下会不会下雨",
             "@owner/calendar": "加到日历里提醒我",
         },
+        "implicit_skill_ids": [],
+        "implicit_rationales": {},
     }
-    row = _validate_generated_variant(raw, _workflow(), 0)
+    row = _validate_generated_variant(
+        raw, _workflow(), 0, variants=3, implicit_variants=1
+    )
     assert row["skill_ids"] == ["@owner/weather", "@owner/calendar"]
     raw["evidence"].pop("@owner/calendar")
     with pytest.raises(DatasetBuildError, match="evidence keys"):
-        _validate_generated_variant(raw, _workflow(), 0)
+        _validate_generated_variant(
+            raw, _workflow(), 0, variants=3, implicit_variants=1
+        )
+
+
+def test_generated_variant_supports_strong_implicit_intent() -> None:
+    raw = {
+        "intent_mode": "implicit",
+        "query": "五一带孩子去杭州玩三天，怕下雨也不想爬山，今晚把合适的安排定下来。",
+        "evidence": {
+            "@owner/weather": "怕下雨",
+            "@owner/calendar": "五一带孩子去杭州玩三天",
+        },
+        "implicit_skill_ids": ["@owner/weather"],
+        "implicit_rationales": {
+            "@owner/weather": "怕下雨这一限制要求结合当地天气筛选安排",
+        },
+    }
+    row = _validate_generated_variant(
+        raw, _workflow(), 2, variants=3, implicit_variants=1
+    )
+    assert row["intent_mode"] == "implicit"
+    assert row["target_intents"] == {
+        "@owner/weather": "implicit",
+        "@owner/calendar": "explicit",
+    }
+
+
+def test_generated_variant_rejects_unsafe_implicit_target() -> None:
+    workflow = _workflow()
+    workflow["targets"][0]["unsafe_action"] = True
+    raw = {
+        "intent_mode": "implicit",
+        "query": "五一带孩子去杭州玩三天，怕下雨也不想爬山，今晚把合适的安排定下来。",
+        "evidence": {
+            "@owner/weather": "怕下雨",
+            "@owner/calendar": "五一带孩子去杭州玩三天",
+        },
+        "implicit_skill_ids": ["@owner/weather"],
+        "implicit_rationales": {
+            "@owner/weather": "怕下雨这一限制要求结合当地天气筛选安排",
+        },
+    }
+    with pytest.raises(DatasetBuildError, match="unsafe actions"):
+        _validate_generated_variant(
+            raw, workflow, 2, variants=3, implicit_variants=1
+        )
 
 
 def test_review_pass_is_recomputed_from_strict_thresholds() -> None:
@@ -182,3 +240,147 @@ def test_near_duplicate_filter_keeps_higher_review_score() -> None:
     accepted, rejected = _deduplicate_near_queries(rows, reviews, threshold=0.8)
     assert [row["query_id"] for row in accepted] == ["q-high"]
     assert rejected[0]["query_id"] == "q-low"
+
+
+def _export_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+    profiles = [_profile(index, "low" if index == 3 else "high") for index in range(1, 4)]
+    catalog = [
+        {
+            **{key: row[key] for key in ("rank", "skill_id", "owner", "slug", "display_name", "summary")},
+            "description": f"description {row['rank']}",
+            "canonical_url": f"https://example.test/{row['rank']}",
+        }
+        for row in profiles
+    ]
+    workflows = [
+        {"workflow_id": "wf-1", "split_hint": "train"},
+        {"workflow_id": "wf-2", "split_hint": "train"},
+    ]
+    queries = [
+        {
+            "query_id": "q-1",
+            "query": "先完成第一项任务，再继续处理第二项任务并告诉我结果",
+            "query_hash": "hash-1",
+            "workflow_id": "wf-1",
+            "anchor_skill_id": "@owner/skill-1",
+            "skill_ids": ["@owner/skill-1", "@owner/skill-2"],
+            "domains": ["news_research", "documents_office"],
+            "evidence": {
+                "@owner/skill-1": "第一项任务",
+                "@owner/skill-2": "第二项任务",
+            },
+        },
+        {
+            "query_id": "q-2",
+            "query": "先处理第二项任务，完成后接着执行第三项任务并汇总",
+            "query_hash": "hash-2",
+            "workflow_id": "wf-2",
+            "anchor_skill_id": "@owner/skill-3",
+            "skill_ids": ["@owner/skill-2", "@owner/skill-3"],
+            "domains": ["documents_office", "news_research"],
+            "evidence": {
+                "@owner/skill-2": "第二项任务",
+                "@owner/skill-3": "第三项任务",
+            },
+        },
+    ]
+    reviews = [
+        {
+            "query_id": row["query_id"],
+            "pass": True,
+            "scores": {
+                "mobile_style": 5,
+                "complexity": 5,
+                "target_necessity": 5,
+                "coherence": 5,
+                "specificity": 5,
+            },
+        }
+        for row in queries
+    ]
+    paths = tuple(
+        tmp_path / name
+        for name in ("catalog.jsonl", "profiles.jsonl", "workflows.jsonl", "queries.jsonl", "reviews.jsonl")
+    )
+    for path, rows in zip(paths, (catalog, profiles, workflows, queries, reviews)):
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return paths
+
+
+def test_export_keeps_all_catalog_skills_without_mobile_fit_filter(tmp_path: Path) -> None:
+    paths = _export_fixture(tmp_path)
+    output = tmp_path / "final"
+    manifest = export_training_dataset(
+        *paths,
+        output,
+        min_train_positives_per_skill=1,
+    )
+    skills = [json.loads(line) for line in (output / "skills.jsonl").read_text().splitlines()]
+    assert manifest["candidate_count"] == 3
+    assert manifest["candidate_policy"] == "retain_all_input_catalog_skills"
+    assert {row["skill_id"] for row in skills} == {
+        "@owner/skill-1",
+        "@owner/skill-2",
+        "@owner/skill-3",
+    }
+    train_rows = [
+        json.loads(line)
+        for line in (output / "queries_train.jsonl").read_text().splitlines()
+    ]
+    q1 = [row for row in train_rows if row["source_query_id"] == "q-1"]
+    assert [row["skill_ids"] for row in q1] == [
+        ["@owner/skill-1", "@owner/skill-2"],
+        ["@owner/skill-2", "@owner/skill-1"],
+    ]
+    assert manifest["semantic_split_query_counts"]["train"] == 2
+    assert manifest["split_query_counts"]["train"] == 4
+
+
+def test_export_does_not_replace_dataset_when_training_coverage_is_low(tmp_path: Path) -> None:
+    paths = _export_fixture(tmp_path)
+    output = tmp_path / "final"
+    output.mkdir()
+    sentinel = '{"skill_id":"existing"}\n'
+    (output / "skills.jsonl").write_text(sentinel)
+    with pytest.raises(DatasetBuildError, match="fewer than 2 train positives"):
+        export_training_dataset(
+            *paths,
+            output,
+            min_train_positives_per_skill=2,
+        )
+    assert (output / "skills.jsonl").read_text() == sentinel
+    report = json.loads((output / "coverage_failure.json").read_text())
+    assert report["skills_below_min_train_positives_count"] == 2
+
+
+def test_coverage_backfill_targets_undercovered_candidates_idempotently(tmp_path: Path) -> None:
+    _, profiles, workflows, queries, reviews = _export_fixture(tmp_path)
+    first = append_coverage_workflows(
+        profiles,
+        workflows,
+        queries,
+        reviews,
+        min_train_positives_per_skill=2,
+        variants_per_workflow=2,
+        oversample_factor=1.0,
+        round_index=1,
+        seed=7,
+    )
+    second = append_coverage_workflows(
+        profiles,
+        workflows,
+        queries,
+        reviews,
+        min_train_positives_per_skill=2,
+        variants_per_workflow=2,
+        oversample_factor=1.0,
+        round_index=1,
+        seed=7,
+    )
+    rows = [json.loads(line) for line in workflows.read_text().splitlines()]
+    added = [row for row in rows if row.get("coverage_round") == 1]
+    assert first["undercovered_skill_count"] == 2
+    assert first["added_workflow_count"] == len(added) >= 1
+    backfilled_ids = {skill_id for row in added for skill_id in row["skill_ids"]}
+    assert {"@owner/skill-1", "@owner/skill-3"} <= backfilled_ids
+    assert second["already_present"] is True

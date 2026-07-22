@@ -14,17 +14,14 @@ class StubRuntime:
         return {
             "ready": True,
             "num_skills": 2,
-            "num_supervised_skills": 1,
             "num_paths": 2,
             "num_levels": 2,
         }
 
-    def catalog(self, query, limit, *, supervised_only=False):
+    def catalog(self, query, limit):
         return {
             "total": 1,
             "skills": [{"skill_id": "s1", "name": query or "天气"}],
-            "supervised_only": supervised_only,
-            "supervision_available": True,
         }
 
     def skill_detail(self, skill_id):
@@ -57,13 +54,12 @@ def _request(url, *, payload=None):
         return response.status, json.loads(response.read())
 
 
-def test_runtime_catalog_can_filter_unsupervised_candidates() -> None:
+def test_runtime_catalog_uses_the_only_candidate_set() -> None:
     runtime = RouterRuntime.__new__(RouterRuntime)
     runtime.skills = {
-        "s1": {"skill_id": "s1", "name": "有监督", "has_train_target": True},
-        "s2": {"skill_id": "s2", "name": "无监督", "has_train_target": False},
+        "s1": {"skill_id": "s1", "name": "候选一"},
+        "s2": {"skill_id": "s2", "name": "候选二"},
     }
-    runtime.supervised_skill_ids = {"s1"}
     runtime.decode_map = {
         "skill_to_code": {
             "s1": {"code_text": "<L1_0><L2_0>"},
@@ -71,10 +67,10 @@ def test_runtime_catalog_can_filter_unsupervised_candidates() -> None:
         }
     }
 
-    result = runtime.catalog(supervised_only=True)
+    result = runtime.catalog()
 
-    assert result["total"] == 1
-    assert result["skills"][0]["skill_id"] == "s1"
+    assert result["total"] == 2
+    assert {row["skill_id"] for row in result["skills"]} == {"s1", "s2"}
 
 
 def test_web_api_health_catalog_and_inference() -> None:
@@ -87,12 +83,8 @@ def test_web_api_health_catalog_and_inference() -> None:
         assert status == 200
         assert health["num_skills"] == 2
 
-        _, catalog = _request(
-            base
-            + "/api/catalog?q=%E5%A4%A9%E6%B0%94&limit=5&supervised_only=true"
-        )
+        _, catalog = _request(base + "/api/catalog?q=%E5%A4%A9%E6%B0%94&limit=5")
         assert catalog["skills"][0]["name"] == "天气"
-        assert catalog["supervised_only"] is True
 
         _, detail = _request(base + "/api/skill?id=s1")
         assert detail["text"] == "天气 | 获取天气预报"

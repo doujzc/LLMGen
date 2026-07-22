@@ -23,14 +23,14 @@ python -m web_server.server \
 JSON API：
 
 - `GET /api/health`
-- `GET /api/catalog?q=weather&limit=20&supervised_only=true`
+- `GET /api/catalog?q=weather&limit=20`
 - `GET /api/skill?id=@owner/skill-name`
 - `POST /api/infer`，body 为
   `{"query":"...","max_code_paths":4,"top_k":10}`
 
 为旧模型生成自包含解码文件：
 
-重新导出也会将训练候选文本写入解码文件，供界面的 Skill 详情弹窗展示。
+重新导出也会将唯一训练候选集及其文本写入解码文件，供约束解码和 Skill 详情弹窗共同使用。
 
 ```bash
 python scripts/export_router_bundle.py \

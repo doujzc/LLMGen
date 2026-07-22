@@ -53,12 +53,6 @@ class RouterRuntime:
             )
         self.decode_map = load_skill_decode_map(self.decode_map_path)
         self.skills: dict[str, dict[str, Any]] = self.decode_map["skills"]
-        self.supervision = self.decode_map.get("supervision")
-        self.supervised_skill_ids = (
-            set(self.supervision.get("supervised_skill_ids", ()))
-            if isinstance(self.supervision, dict)
-            else None
-        )
         self.buckets = {
             tuple(path["tokens"]): tuple(path["skill_ids"])
             for path in self.decode_map["paths"]
@@ -120,16 +114,6 @@ class RouterRuntime:
             "device": str(self.args.device),
             "dtype": self.args.dtype,
             "num_skills": int(self.decode_map["num_skills"]),
-            "num_supervised_skills": (
-                len(self.supervised_skill_ids)
-                if self.supervised_skill_ids is not None
-                else None
-            ),
-            "supervision_phase": (
-                self.supervision.get("phase")
-                if isinstance(self.supervision, dict)
-                else None
-            ),
             "num_paths": int(self.decode_map["num_paths"]),
             "num_levels": int(self.decode_map["num_levels"]),
             "max_code_paths": self.max_code_paths,
@@ -139,18 +123,10 @@ class RouterRuntime:
         self,
         query: str = "",
         limit: int = 100,
-        *,
-        supervised_only: bool = False,
     ) -> dict[str, Any]:
         needle = query.casefold().strip()
         rows = []
         for skill_id, metadata in self.skills.items():
-            if (
-                supervised_only
-                and self.supervised_skill_ids is not None
-                and skill_id not in self.supervised_skill_ids
-            ):
-                continue
             searchable = " ".join(
                 str(metadata.get(field, ""))
                 for field in ("skill_id", "name", "description", "domain")
@@ -168,8 +144,6 @@ class RouterRuntime:
         return {
             "total": len(rows),
             "skills": rows[: max(1, min(limit, 1000))],
-            "supervised_only": supervised_only,
-            "supervision_available": self.supervised_skill_ids is not None,
         }
 
     def skill_detail(self, skill_id: str) -> dict[str, Any]:

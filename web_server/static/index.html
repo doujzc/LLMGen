@@ -34,8 +34,7 @@
             </p>
           </div>
           <dl id="model-stats" class="stats" aria-label="模型信息">
-            <div><dt>候选全集</dt><dd>—</dd></div>
-            <div><dt id="supervision-stat-label">有 Retrieval 监督</dt><dd>—</dd></div>
+            <div><dt>候选 Skills</dt><dd>—</dd></div>
             <div><dt>有效路径</dt><dd>—</dd></div>
             <div><dt>Code 层数</dt><dd>—</dd></div>
           </dl>
@@ -155,16 +154,10 @@
               <p>按名称、ID、描述或领域检查模型当前加载的候选。</p>
             </div>
           </div>
-          <div class="catalog-search">
-            <div class="catalog-input-row">
-              <label class="sr-only" for="catalog-query">检索候选集</label>
-              <input id="catalog-query" type="search" placeholder="搜索候选 Skill…" />
-              <span id="catalog-total"></span>
-            </div>
-            <label class="filter-toggle">
-              <input id="supervised-only" type="checkbox" checked />
-              <span id="supervision-filter-label">仅看有 Retrieval 正样本的 Skills</span>
-            </label>
+          <div class="catalog-search catalog-input-row">
+            <label class="sr-only" for="catalog-query">检索候选集</label>
+            <input id="catalog-query" type="search" placeholder="搜索候选 Skill…" />
+            <span id="catalog-total"></span>
           </div>
           <div id="catalog-results" class="catalog-results"></div>
         </section>

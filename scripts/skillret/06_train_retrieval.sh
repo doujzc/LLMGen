@@ -10,16 +10,51 @@ skillret_require_file "$ROUTER_DATA_DIR/retrieval_validation.jsonl"
 skillret_require_dir "$ROUTER_OUTPUT_DIR/memorization"
 skillret_configure_router
 
+RETRIEVAL_INIT_DIR="$ROUTER_OUTPUT_DIR/memorization"
+if [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]; then
+  skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+  ALIGNMENT_MODEL_ARGS=()
+  case "$ROUTER_FINETUNE_MODE" in
+    lora)
+      ALIGNMENT_MODEL_ARGS=(
+        --model-name-or-path "$ROUTER_MODEL"
+        --adapter-name-or-path "$ROUTER_OUTPUT_DIR/memorization"
+      )
+      ;;
+    full)
+      ALIGNMENT_MODEL_ARGS=(--model-name-or-path "$ROUTER_OUTPUT_DIR/memorization")
+      ;;
+  esac
+
+  ALIGNMENT_RESUME_ARGS=()
+  if [[ -n "${ROUTER_RESUME_ALIGNMENT:-}" ]]; then
+    ALIGNMENT_RESUME_ARGS=(--resume-retrieval-from-checkpoint "$ROUTER_RESUME_ALIGNMENT")
+  fi
+
+  skillret_print_step "06a" "single-skill retrieval alignment curriculum"
+  "${ROUTER_LAUNCH[@]}" scripts/train_router.py \
+    "${ALIGNMENT_MODEL_ARGS[@]}" \
+    "${ROUTER_COMMON_ARGS[@]}" \
+    --stage retrieval \
+    --phase-output-subdir retrieval_alignment \
+    --retrieval-train "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl" \
+    --retrieval-epochs "$ROUTER_ALIGNMENT_EPOCHS" \
+    --retrieval-learning-rate "$ROUTER_ALIGNMENT_LR" \
+    "${ALIGNMENT_RESUME_ARGS[@]}" \
+    "${ROUTER_COMPAT_EXTRA_ARGS[@]}"
+  RETRIEVAL_INIT_DIR="$ROUTER_OUTPUT_DIR/retrieval_alignment"
+fi
+
 MODEL_ARGS=()
 case "$ROUTER_FINETUNE_MODE" in
   lora)
     MODEL_ARGS=(
       --model-name-or-path "$ROUTER_MODEL"
-      --adapter-name-or-path "$ROUTER_OUTPUT_DIR/memorization"
+      --adapter-name-or-path "$RETRIEVAL_INIT_DIR"
     )
     ;;
   full)
-    MODEL_ARGS=(--model-name-or-path "$ROUTER_OUTPUT_DIR/memorization")
+    MODEL_ARGS=(--model-name-or-path "$RETRIEVAL_INIT_DIR")
     ;;
 esac
 
@@ -37,6 +72,7 @@ if [[ "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_REPLAY_FR
   )
 fi
 
+skillret_print_step "06b" "multi-skill autoregressive retrieval training"
 "${ROUTER_LAUNCH[@]}" scripts/train_router.py \
   "${MODEL_ARGS[@]}" \
   "${ROUTER_COMMON_ARGS[@]}" \

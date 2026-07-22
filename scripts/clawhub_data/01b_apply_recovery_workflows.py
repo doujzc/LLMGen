@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage 01b: apply audited candidate-only and recovery workflow decisions."""
+"""Stage 01b: append audited recovery workflows without changing candidates."""
 
 from __future__ import annotations
 

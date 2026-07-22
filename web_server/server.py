@@ -72,20 +72,9 @@ def handler_class(runtime: RouterRuntime):
                 except ValueError:
                     self._error(HTTPStatus.BAD_REQUEST, "limit must be an integer")
                     return
-                supervised_only = params.get("supervised_only", ["0"])[0].lower()
-                if supervised_only not in {"0", "1", "false", "true"}:
-                    self._error(
-                        HTTPStatus.BAD_REQUEST,
-                        "supervised_only must be true or false",
-                    )
-                    return
                 self._json(
                     HTTPStatus.OK,
-                    runtime.catalog(
-                        query,
-                        limit,
-                        supervised_only=supervised_only in {"1", "true"},
-                    ),
+                    runtime.catalog(query, limit),
                 )
                 return
             if parsed.path == "/api/skill":
