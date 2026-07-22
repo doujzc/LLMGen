@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import json
 import os
@@ -77,6 +77,8 @@ def build_skill_decode_map(
     registry: Mapping[str, Any],
     virtual_tokens: Sequence[str],
     provenance: Mapping[str, Any] | None = None,
+    supervision_rows: Sequence[Mapping[str, Any]] | None = None,
+    supervision_phase: str | None = None,
 ) -> dict[str, Any]:
     """Build exact path decoding plus token-level candidate audit mappings."""
 
@@ -163,6 +165,43 @@ def build_skill_decode_map(
         token: summaries(skill_ids)
         for token, skill_ids in token_to_skill_ids.items()
     }
+    supervision = None
+    if supervision_rows is not None:
+        target_counts: Counter[str] = Counter()
+        for row_number, row in enumerate(supervision_rows, start=1):
+            raw_targets = row.get("target_skill_ids", row.get("positive_skill_ids"))
+            if raw_targets is None and isinstance(row.get("skill_id"), str):
+                raw_targets = [row["skill_id"]]
+            if not isinstance(raw_targets, (list, tuple)) or not raw_targets:
+                raise RouterDataError(
+                    f"supervision row {row_number} has no target skill IDs"
+                )
+            unique_targets = {
+                str(skill_id).strip()
+                for skill_id in raw_targets
+                if str(skill_id).strip()
+            }
+            unknown_targets = sorted(unique_targets.difference(active_ids))
+            if unknown_targets:
+                raise RouterDataError(
+                    "supervision references skills outside the active registry: "
+                    + ", ".join(unknown_targets[:10])
+                )
+            target_counts.update(unique_targets)
+        supervised_ids = sorted(target_counts)
+        for skill_id in active_ids:
+            catalog[skill_id]["train_target_count"] = target_counts[skill_id]
+            catalog[skill_id]["has_train_target"] = target_counts[skill_id] > 0
+        supervision = {
+            "phase": supervision_phase,
+            "num_examples": len(supervision_rows),
+            "num_supervised_skills": len(supervised_ids),
+            "num_unsupervised_skills": len(active_ids) - len(supervised_ids),
+            "supervised_skill_ids": supervised_ids,
+            "target_counts": {
+                skill_id: target_counts[skill_id] for skill_id in supervised_ids
+            },
+        }
     return {
         "schema_version": DECODE_MAP_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -181,6 +220,7 @@ def build_skill_decode_map(
         "paths": paths,
         "token_to_skill_ids": token_to_skill_ids,
         "token_to_candidates": token_to_candidates,
+        "supervision": supervision,
         "provenance": dict(provenance or {}),
     }
 
@@ -245,6 +285,8 @@ def dump_router_decoder_artifacts(
     codes_path: str | Path,
     registry_path: str | Path,
     virtual_tokens_path: str | Path,
+    training_data_path: str | Path | None = None,
+    supervision_phase: str | None = None,
 ) -> dict[str, Any]:
     """Write a portable decoder map and token namespace beside a model dump."""
 
@@ -256,7 +298,13 @@ def dump_router_decoder_artifacts(
     codes_path = Path(codes_path).resolve()
     registry_path = Path(registry_path).resolve()
     virtual_tokens_path = Path(virtual_tokens_path).resolve()
-    for path in (catalog_path, codes_path, registry_path, virtual_tokens_path):
+    training_data_path = (
+        Path(training_data_path).resolve() if training_data_path is not None else None
+    )
+    required_paths = [catalog_path, codes_path, registry_path, virtual_tokens_path]
+    if training_data_path is not None:
+        required_paths.append(training_data_path)
+    for path in required_paths:
         if not path.is_file():
             raise RouterDataError(f"decoder artifact input does not exist: {path}")
 
@@ -274,13 +322,21 @@ def dump_router_decoder_artifacts(
         "virtual_tokens_sha256": sha256_file(virtual_tokens_path),
         "index_manifest_sha256": index_manifest_sha256,
         "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
+        "training_data_sha256": (
+            sha256_file(training_data_path) if training_data_path is not None else None
+        ),
     }
+    supervision_rows = (
+        read_jsonl(training_data_path) if training_data_path is not None else None
+    )
     payload = build_skill_decode_map(
         catalog_rows=read_jsonl(catalog_path),
         code_rows=read_jsonl(codes_path),
         registry=_load_json_object(registry_path),
         virtual_tokens=load_virtual_tokens(virtual_tokens_path),
         provenance=provenance,
+        supervision_rows=supervision_rows,
+        supervision_phase=supervision_phase,
     )
     decode_path = destination / DECODE_MAP_FILENAME
     temporary = decode_path.with_suffix(decode_path.suffix + ".tmp")
@@ -300,5 +356,18 @@ def dump_router_decoder_artifacts(
         "num_skills": payload["num_skills"],
         "num_paths": payload["num_paths"],
         "num_levels": payload["num_levels"],
+        "supervision": (
+            {
+                key: payload["supervision"][key]
+                for key in (
+                    "phase",
+                    "num_examples",
+                    "num_supervised_skills",
+                    "num_unsupervised_skills",
+                )
+            }
+            if payload["supervision"] is not None
+            else None
+        ),
         "provenance": provenance,
     }

@@ -43,11 +43,19 @@ def test_decode_map_exposes_token_and_exact_path_names() -> None:
         code_rows=CODE_ROWS,
         registry=REGISTRY,
         virtual_tokens=TOKENS,
+        supervision_rows=[
+            {"target_skill_ids": ["s1"]},
+            {"target_skill_ids": ["s1", "s3"]},
+        ],
+        supervision_phase="retrieval",
     )
 
     assert payload["num_skills"] == 3
     assert payload["num_paths"] == 2
     assert payload["skills"]["s1"]["text"] == "天气查询 | 获取实时天气和预报"
+    assert payload["skills"]["s1"]["train_target_count"] == 2
+    assert payload["skills"]["s2"]["has_train_target"] is False
+    assert payload["supervision"]["num_supervised_skills"] == 2
     assert payload["token_to_candidates"]["<L1_0>"] == [
         {"skill_id": "s1", "name": "天气查询"},
         {"skill_id": "s2", "name": "行程规划"},
@@ -65,11 +73,13 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     codes = index / "train_codes.jsonl"
     registry = index / "train_registry.json"
     tokens = index / "virtual_tokens.txt"
+    training_data = tmp_path / "retrieval_train.jsonl"
     output = tmp_path / "model"
     _write_jsonl(catalog, CATALOG)
     _write_jsonl(codes, CODE_ROWS)
     registry.write_text(json.dumps(REGISTRY), encoding="utf-8")
     tokens.write_text("\n".join(TOKENS) + "\n", encoding="utf-8")
+    _write_jsonl(training_data, [{"target_skill_ids": ["s1", "s3"]}])
     (index / "manifest.json").write_text(
         json.dumps({"checkpoint_sha256": "stage-one-hash"}), encoding="utf-8"
     )
@@ -80,6 +90,8 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
         codes_path=codes,
         registry_path=registry,
         virtual_tokens_path=tokens,
+        training_data_path=training_data,
+        supervision_phase="retrieval",
     )
 
     assert metadata["decode_map"] == DECODE_MAP_FILENAME
@@ -88,3 +100,5 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     restored = load_skill_decode_map(output / DECODE_MAP_FILENAME)
     assert restored["provenance"]["stage1_checkpoint_sha256"] == "stage-one-hash"
     assert restored["skills"]["s3"]["name"] == "日历提醒"
+    assert restored["supervision"]["phase"] == "retrieval"
+    assert restored["supervision"]["num_unsupervised_skills"] == 1

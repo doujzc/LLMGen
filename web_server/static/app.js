@@ -42,10 +42,28 @@ async function loadHealth() {
     state.health = health;
     status.className = "status ready";
     statusText.textContent = `${health.device} · 模型已就绪`;
-    const values = [health.num_skills, health.num_paths, health.num_levels];
+    const isRetrieval = health.supervision_phase === "retrieval";
+    $("#supervision-stat-label").textContent = isRetrieval
+      ? "有 Retrieval 监督"
+      : "有训练目标监督";
+    $("#supervision-filter-label").textContent = isRetrieval
+      ? "仅看有 Retrieval 正样本的 Skills"
+      : "仅看有训练目标样本的 Skills";
+    const values = [
+      health.num_skills,
+      health.num_supervised_skills,
+      health.num_paths,
+      health.num_levels,
+    ];
     document.querySelectorAll("#model-stats dd").forEach((node, index) => {
-      node.textContent = Number(values[index]).toLocaleString();
+      node.textContent =
+        values[index] === null || values[index] === undefined
+          ? "未记录"
+          : Number(values[index]).toLocaleString();
     });
+    const supervisedOnly = $("#supervised-only");
+    supervisedOnly.disabled = health.num_supervised_skills === null;
+    if (supervisedOnly.disabled) supervisedOnly.checked = false;
     const maxPaths = $("#max-paths");
     maxPaths.replaceChildren();
     for (let value = 1; value <= health.max_code_paths; value += 1) {
@@ -173,6 +191,11 @@ async function runInference(event) {
 
 function renderCatalog(payload) {
   $("#catalog-total").textContent = `${payload.total} results`;
+  const supervisedOnly = $("#supervised-only");
+  if (!payload.supervision_available) {
+    supervisedOnly.checked = false;
+    supervisedOnly.disabled = true;
+  }
   const container = $("#catalog-results");
   container.replaceChildren();
   payload.skills.slice(0, 12).forEach((skill) => {
@@ -182,6 +205,11 @@ function renderCatalog(payload) {
     item.append(
       textNode("strong", "", skill.name || skill.skill_id),
       textNode("code", "", skill.code_text),
+      textNode(
+        "span",
+        skill.has_train_target ? "supervision-badge supervised" : "supervision-badge",
+        supervisionStatus(skill),
+      ),
       textNode(
         "span",
         "catalog-description",
@@ -194,6 +222,22 @@ function renderCatalog(payload) {
 
 function detailTag(value) {
   return textNode("span", "detail-tag", value);
+}
+
+function supervisionSampleLabel() {
+  return state.health?.supervision_phase === "retrieval"
+    ? "Retrieval 正样本"
+    : "训练目标样本";
+}
+
+function supervisionStatus(skill) {
+  if (skill.has_train_target === true) {
+    return `${supervisionSampleLabel()} ${skill.train_target_count}`;
+  }
+  if (skill.has_train_target === false) {
+    return `无${supervisionSampleLabel()}`;
+  }
+  return "监督状态未记录";
 }
 
 function renderSkillDetail(skill) {
@@ -212,6 +256,13 @@ function renderSkillDetail(skill) {
   if (skill.mobile_fit) tags.append(detailTag(`手机适配 · ${skill.mobile_fit}`));
   if (skill.rank !== undefined && skill.rank !== null) {
     tags.append(detailTag(`ClawHub 排名 · ${skill.rank}`));
+  }
+  if (skill.has_train_target === true) {
+    tags.append(
+      detailTag(`${supervisionSampleLabel()} · ${skill.train_target_count}`),
+    );
+  } else if (skill.has_train_target === false) {
+    tags.append(detailTag(supervisionStatus(skill)));
   }
   (skill.roles || []).forEach((role) => tags.append(detailTag(`role · ${role}`)));
 
@@ -236,8 +287,13 @@ async function openSkill(skillId) {
 
 async function loadCatalog() {
   const query = $("#catalog-query").value.trim();
+  const supervisedOnly = $("#supervised-only").checked;
   try {
-    renderCatalog(await jsonRequest(`/api/catalog?q=${encodeURIComponent(query)}&limit=12`));
+    renderCatalog(
+      await jsonRequest(
+        `/api/catalog?q=${encodeURIComponent(query)}&limit=12&supervised_only=${supervisedOnly}`,
+      ),
+    );
   } catch (error) {
     $("#catalog-total").textContent = "加载失败";
   }
@@ -255,10 +311,15 @@ $("#catalog-query").addEventListener("input", () => {
   window.clearTimeout(state.catalogTimer);
   state.catalogTimer = window.setTimeout(loadCatalog, 180);
 });
+$("#supervised-only").addEventListener("change", loadCatalog);
 $("#dialog-close").addEventListener("click", () => skillDialog.close());
 skillDialog.addEventListener("click", (event) => {
   if (event.target === skillDialog) skillDialog.close();
 });
 
-loadHealth();
-loadCatalog();
+async function initialize() {
+  await loadHealth();
+  await loadCatalog();
+}
+
+initialize();

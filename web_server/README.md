@@ -23,7 +23,7 @@ python -m web_server.server \
 JSON API：
 
 - `GET /api/health`
-- `GET /api/catalog?q=weather&limit=20`
+- `GET /api/catalog?q=weather&limit=20&supervised_only=true`
 - `GET /api/skill?id=@owner/skill-name`
 - `POST /api/infer`，body 为
   `{"query":"...","max_code_paths":4,"top_k":10}`
@@ -38,5 +38,7 @@ python scripts/export_router_bundle.py \
   --catalog runs/clawhub/processed/catalog_train.jsonl \
   --codes runs/clawhub/index/train_codes.jsonl \
   --registry runs/clawhub/index/train_registry.json \
-  --virtual-tokens runs/clawhub/index/virtual_tokens.txt
+  --virtual-tokens runs/clawhub/index/virtual_tokens.txt \
+  --training-data runs/clawhub/router_data/retrieval_train.jsonl \
+  --phase retrieval
 ```

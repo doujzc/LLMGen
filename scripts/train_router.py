@@ -621,6 +621,8 @@ def _run_phase(
                 codes_path=args.skill_codes,
                 registry_path=args.skill_registry,
                 virtual_tokens_path=args.virtual_tokens,
+                training_data_path=train_path,
+                supervision_phase=phase,
             )
         with (phase_dir / "router_manifest.json").open(
             "w", encoding="utf-8"

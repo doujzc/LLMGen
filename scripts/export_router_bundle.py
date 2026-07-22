@@ -18,6 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codes", required=True)
     parser.add_argument("--registry", required=True)
     parser.add_argument("--virtual-tokens", required=True)
+    parser.add_argument(
+        "--training-data",
+        help="Router phase training JSONL used to annotate target supervision.",
+    )
+    parser.add_argument("--phase", choices=("memorization", "retrieval"))
     return parser.parse_args()
 
 
@@ -34,12 +39,21 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict):
         raise RouterDataError("router_manifest.json must contain an object")
+    training_data = args.training_data or manifest.get("train_data")
+    if training_data and not Path(training_data).is_file():
+        raise RouterDataError(
+            f"router training data does not exist: {training_data}; "
+            "pass --training-data with its current location"
+        )
+    phase = args.phase or manifest.get("phase")
     artifacts = dump_router_decoder_artifacts(
         output_dir=model_dir,
         catalog_path=args.catalog,
         codes_path=args.codes,
         registry_path=args.registry,
         virtual_tokens_path=args.virtual_tokens,
+        training_data_path=training_data,
+        supervision_phase=str(phase) if phase else None,
     )
     manifest["decoder_artifacts"] = artifacts
     temporary = manifest_path.with_suffix(".json.tmp")

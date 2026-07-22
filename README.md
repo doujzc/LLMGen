@@ -307,6 +307,9 @@ skill_decode_map.json  # token/path -> 原始 Skill ID、名称和元数据
 virtual_tokens.txt     # 完整虚拟 token 命名空间
 ```
 
+Retrieval 模型的解码映射还记录每个 Skill 的训练正样本数。Web 候选检索默认只展示
+至少有一条 Retrieval 正样本的 Skill；取消筛选可检查完整候选集。
+
 旧 checkpoint 先补齐这两个文件：
 
 ```bash
