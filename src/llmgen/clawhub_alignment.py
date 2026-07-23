@@ -48,7 +48,7 @@ def _generation_prompt(
 针对每个 skill 写 {variants} 条中文 query。严格要求：
 1. 每条只需要这一个能力即可完成，不能加入依赖其他工具的附加任务；query 必须清楚、直接地表达该能力的核心动作。
 2. 像真实用户直接对手机助理说话，不写“用户希望”“调用工具”“使用skill”等数据集或实现语言。技术类能力可以保留必要英文术语。
-3. variants 要覆盖不同对象、场景或约束，不只是替换同义词；每条 12-140 个字符。
+3. variants 要覆盖不同对象、场景或约束，不只是替换同义词；每条 6-140 个字符。天气、新闻等手机口语请求可以很短，但意图必须完整。
 4. 不得出现任何 @owner/slug。产品名（例如 Notion、GitHub）只有在真实用户会说时才能出现。
 5. unsafe_action=true 时，高影响动作必须由 query 明确授权；不得索取、展示、外传或普通存储密码、密钥、令牌明文。
 6. evidence 必须是 query 中逐字出现的 2-60 字符片段，直接证明用户需要这个能力。
@@ -72,12 +72,15 @@ def _validate_variant(
     index: int,
 ) -> dict[str, Any]:
     query = " ".join(str(raw.get("query") or "").split())
-    if not 12 <= len(query) <= 180:
-        raise DatasetBuildError("single-skill query length outside [12, 180]")
+    if not 6 <= len(query) <= 180:
+        raise DatasetBuildError("single-skill query length outside [6, 180]")
     lowered = query.casefold()
-    if str(profile["skill_id"]).casefold() in lowered or re.search(
-        r"@[\w.-]+/[\w.-]+", query
-    ):
+    skill_id = str(profile["skill_id"]).casefold()
+    opaque_id_leaked = (
+        bool(re.search(r"[-_/]", skill_id))
+        and skill_id in lowered
+    )
+    if opaque_id_leaked or re.search(r"@[\w.-]+/[\w.-]+", query):
         raise DatasetBuildError("single-skill query leaks a candidate identifier")
     if any(value in lowered for value in ("调用工具", "使用skill", "目标候选", "路由训练", "用户希望")):
         raise DatasetBuildError("single-skill query contains dataset language")

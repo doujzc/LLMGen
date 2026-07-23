@@ -9,6 +9,15 @@
 - 单机 4 卡 DeepSpeed ZeRO-3 全参数训练；
 - catalog、训练、验证、测试、code registry、解码空间和 Web 服务共享同一套 1000 Skill 候选集。
 
+另提供独立的 301-candidate 轻量数据集；配置好模型和 Embedding 服务后可直接运行：
+
+```bash
+bash scripts/run_light_full.sh
+```
+
+数据说明和分阶段命令见
+[`data_light/README.md`](data_light/README.md)。
+
 模型输出示例：
 
 ```text

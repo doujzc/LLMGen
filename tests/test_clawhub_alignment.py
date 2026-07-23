@@ -37,6 +37,33 @@ def test_single_skill_variant_uses_whole_query_when_evidence_is_paraphrased() ->
     assert row["evidence"]["@owner/weather"] == row["query"]
 
 
+def test_single_skill_variant_allows_short_mobile_query_and_file_format() -> None:
+    weather = _validate_variant(
+        {"query": "今天北京天气怎样", "evidence": "北京天气"},
+        _profile("weather"),
+        0,
+    )
+    document = _validate_variant(
+        {"query": "把这个 DOCX 转成 PDF", "evidence": "DOCX 转成 PDF"},
+        _profile("docx"),
+        0,
+    )
+    assert weather["query"] == "今天北京天气怎样"
+    assert document["query"] == "把这个 DOCX 转成 PDF"
+
+
+def test_single_skill_variant_rejects_opaque_slug() -> None:
+    with pytest.raises(DatasetBuildError, match="leaks a candidate identifier"):
+        _validate_variant(
+            {
+                "query": "帮我调用 daily-hot-news 看今天热点",
+                "evidence": "今天热点",
+            },
+            _profile("daily-hot-news"),
+            0,
+        )
+
+
 def test_alignment_export_requires_every_candidate(tmp_path: Path) -> None:
     catalog = tmp_path / "catalog.jsonl"
     queries = tmp_path / "queries.jsonl"

@@ -6,6 +6,7 @@ import hashlib
 import itertools
 import json
 import math
+import os
 import random
 import re
 import threading
@@ -154,16 +155,32 @@ class ApiConfig:
 
 
 def load_api_config(path: Path, *, model: str | None = None) -> ApiConfig:
+    config_path = path.expanduser()
+    lines = [
+        raw.strip()
+        for raw in config_path.read_text(encoding="utf-8").splitlines()
+        if raw.strip() and not raw.strip().startswith("#")
+    ]
     values: dict[str, str] = {}
-    for raw in path.expanduser().read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or ":" not in line:
+    for line in lines:
+        if ":" not in line:
             continue
         key, value = line.split(":", 1)
         values[key.strip()] = value.strip().strip('"\'')
+    # A dedicated provider key file commonly contains only the secret. Keep
+    # that useful format out of the repository while taking the endpoint from
+    # the process environment. Structured base_url/api_key files remain fully
+    # backward compatible and take precedence over the environment.
+    plain_lines = [line for line in lines if ":" not in line]
+    if not values.get("api_key") and len(plain_lines) == 1:
+        values["api_key"] = plain_lines[0]
+    if not values.get("base_url"):
+        values["base_url"] = os.environ.get("API_BASE_URL", "").strip()
     missing = [key for key in ("base_url", "api_key") if not values.get(key)]
     if missing:
-        raise DatasetBuildError(f"API config is missing: {', '.join(missing)}")
+        raise DatasetBuildError(
+            f"API config {config_path} is missing: {', '.join(missing)}"
+        )
     selected = model or values.get("model")
     if not selected:
         raise DatasetBuildError("API model was not provided")
@@ -239,8 +256,16 @@ def parse_json_object(text: str) -> dict[str, Any]:
             payload = json.loads(value[start : end + 1])
         except json.JSONDecodeError as error:
             raise DatasetBuildError(f"invalid model JSON: {error}") from error
+    if isinstance(payload, list) and all(isinstance(item, dict) for item in payload):
+        # Some JSON-mode providers return the requested items array directly
+        # even when the prompt asks for {"items": [...]}. The representation
+        # is unambiguous, so normalize it before the stage-specific validators
+        # enforce IDs, counts, and fields.
+        payload = {"items": payload}
     if not isinstance(payload, dict):
-        raise DatasetBuildError("model response must be a JSON object")
+        raise DatasetBuildError(
+            "model response must be a JSON object or an array of objects"
+        )
     return payload
 
 
@@ -285,12 +310,27 @@ class ChatBatchClient:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
+                provider_options: dict[str, Any]
+                if "deepseek.com" in self.config.base_url.casefold():
+                    # DeepSeek V4 defaults to thinking mode. Its switch differs
+                    # from the enable_thinking flag used by several other
+                    # OpenAI-compatible providers; disabling it keeps bulk
+                    # dataset generation fast and avoids billing hidden
+                    # reasoning tokens.
+                    provider_options = {
+                        "extra_body": {"thinking": {"type": "disabled"}},
+                        "response_format": {"type": "json_object"},
+                    }
+                else:
+                    provider_options = {
+                        "extra_body": {"enable_thinking": False},
+                    }
                 response = self._client().chat.completions.create(
                     model=self.config.model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=self.temperature,
                     max_tokens=max_tokens,
-                    extra_body={"enable_thinking": False},
+                    **provider_options,
                 )
                 content = response.choices[0].message.content or ""
                 usage = response.usage
