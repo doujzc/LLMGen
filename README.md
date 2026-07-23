@@ -348,6 +348,24 @@ bash scripts/clawhub_train/10_export_web_bundle.sh \
 其他候选快照的 checkpoint 会因 catalog、registry 和训练目标集合不一致而被拒绝，
 不能通过重新导出 bundle 转换为当前 1000-Skill 模型。
 
+06b 仍在训练时，可以直接物化一个已经保存完成的中途 checkpoint：
+
+```bash
+bash scripts/clawhub_train/10_export_web_bundle.sh \
+  "$RUN_DIR/router/retrieval/checkpoint-500"
+```
+
+默认输出到 `$RUN_DIR/exports/retrieval-checkpoint-500`。如需指定目录：
+
+```bash
+ROUTER_CHECKPOINT_EXPORT_DIR="$RUN_DIR/exports/router-step-500" \
+  bash scripts/clawhub_train/10_export_web_bundle.sh \
+  "$RUN_DIR/router/retrieval/checkpoint-500"
+```
+
+导出目录独立于训练 checkpoint，可以在后续 checkpoint 轮转删除后继续使用。
+测试中途模型时，将下面的 `--model-dir` 改成该导出目录即可。
+
 启动本地调试界面：
 
 ```bash

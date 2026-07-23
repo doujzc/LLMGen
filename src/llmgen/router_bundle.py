@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -312,8 +313,15 @@ def dump_router_decoder_artifacts(
     virtual_tokens_path: str | Path,
     training_data_path: str | Path | None = None,
     supervision_phase: str | None = None,
+    supervision_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Write a portable decoder map and token namespace beside a model dump."""
+    """Write a portable decoder map and token namespace beside a model dump.
+
+    ``training_data_path`` records the primary artifact provenance.  A caller
+    that mixes replay rows in memory can pass the exact effective
+    ``supervision_rows`` so candidate coverage and counts describe what the
+    model actually saw rather than only the primary JSONL.
+    """
 
     from .router import read_jsonl
 
@@ -340,6 +348,25 @@ def dump_router_decoder_artifacts(
         index_manifest = _load_json_object(index_manifest_path)
         stage1_checkpoint_sha256 = index_manifest.get("checkpoint_sha256")
         index_manifest_sha256 = sha256_file(index_manifest_path)
+    effective_supervision_rows = (
+        [dict(row) for row in supervision_rows]
+        if supervision_rows is not None
+        else read_jsonl(training_data_path)
+        if training_data_path is not None
+        else None
+    )
+    supervision_hasher = hashlib.sha256()
+    if effective_supervision_rows is not None:
+        for row in effective_supervision_rows:
+            supervision_hasher.update(
+                json.dumps(
+                    row,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            supervision_hasher.update(b"\n")
     provenance = {
         "catalog_sha256": sha256_file(catalog_path),
         "codes_sha256": sha256_file(codes_path),
@@ -350,17 +377,24 @@ def dump_router_decoder_artifacts(
         "training_data_sha256": (
             sha256_file(training_data_path) if training_data_path is not None else None
         ),
+        "effective_supervision_sha256": (
+            supervision_hasher.hexdigest()
+            if effective_supervision_rows is not None
+            else None
+        ),
+        "effective_supervision_examples": (
+            len(effective_supervision_rows)
+            if effective_supervision_rows is not None
+            else None
+        ),
     }
-    supervision_rows = (
-        read_jsonl(training_data_path) if training_data_path is not None else None
-    )
     payload = build_skill_decode_map(
         catalog_rows=read_jsonl(catalog_path),
         code_rows=read_jsonl(codes_path),
         registry=_load_json_object(registry_path),
         virtual_tokens=load_virtual_tokens(virtual_tokens_path),
         provenance=provenance,
-        supervision_rows=supervision_rows,
+        supervision_rows=effective_supervision_rows,
         supervision_phase=supervision_phase,
     )
     decode_path = destination / DECODE_MAP_FILENAME

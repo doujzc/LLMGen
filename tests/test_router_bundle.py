@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +13,7 @@ from llmgen.router_bundle import (
     dump_router_decoder_artifacts,
     load_skill_decode_map,
 )
+from scripts import export_router_bundle
 
 
 CATALOG = [
@@ -117,3 +119,192 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     assert restored["skills"]["s3"]["name"] == "日历提醒"
     assert restored["supervision"]["phase"] == "retrieval"
     assert restored["supervision"]["num_candidates"] == 3
+
+
+def test_materialize_completed_checkpoint_for_web(
+    tmp_path, monkeypatch
+) -> None:
+    checkpoint = tmp_path / "router" / "retrieval" / "checkpoint-50"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "config.json").write_text(
+        json.dumps({"vocab_size": 8}), encoding="utf-8"
+    )
+    (checkpoint / "model.safetensors").write_bytes(b"consolidated-weights")
+    (checkpoint / "trainer_state.json").write_text(
+        json.dumps({"global_step": 50, "epoch": 1.25}), encoding="utf-8"
+    )
+
+    tokenizer_source = tmp_path / "router" / "retrieval_alignment"
+    tokenizer_source.mkdir()
+    template_manifest = tokenizer_source / "router_manifest.json"
+    template_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "phase": "retrieval",
+                "finetune_mode": "full",
+                "distributed": {"backend": "deepspeed", "world_size": 4},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = tmp_path / "catalog.jsonl"
+    index = tmp_path / "index"
+    index.mkdir()
+    codes = index / "train_codes.jsonl"
+    registry = index / "train_registry.json"
+    tokens = index / "virtual_tokens.txt"
+    training_data = tmp_path / "router_data" / "retrieval_train.jsonl"
+    replay_data = tmp_path / "router_data" / "memorization_train.jsonl"
+    training_data.parent.mkdir()
+    _write_jsonl(catalog, CATALOG)
+    _write_jsonl(codes, CODE_ROWS)
+    registry.write_text(json.dumps(REGISTRY), encoding="utf-8")
+    tokens.write_text("\n".join(TOKENS) + "\n", encoding="utf-8")
+    _write_jsonl(
+        training_data,
+        [
+            {
+                "phase": "retrieval",
+                "target_paths": [
+                    ["<L1_0>", "<L2_0>"],
+                ],
+                "target_skill_ids": ["s1", "s2"],
+            }
+        ],
+    )
+    _write_jsonl(
+        replay_data,
+        [
+            {
+                "phase": "memorization",
+                "target_paths": [["<L1_1>", "<L2_1>"]],
+                "target_skill_ids": ["s3"],
+            }
+        ],
+    )
+
+    def fake_save_tokenizer(**kwargs):
+        output = Path(kwargs["output_dir"])
+        (output / "tokenizer_config.json").write_text(
+            json.dumps({"added_tokens_decoder": {}}), encoding="utf-8"
+        )
+        return {
+            "source": str(Path(kwargs["tokenizer_source"]).resolve()),
+            "vocab_size": 8,
+            "num_virtual_tokens": len(TOKENS),
+        }
+
+    monkeypatch.setattr(
+        export_router_bundle,
+        "_save_checkpoint_tokenizer",
+        fake_save_tokenizer,
+    )
+    output = tmp_path / "exports" / "retrieval-checkpoint-50"
+    result = export_router_bundle.materialize_checkpoint_bundle(
+        checkpoint_dir=checkpoint,
+        output_dir=output,
+        tokenizer_source=tokenizer_source,
+        catalog_path=catalog,
+        codes_path=codes,
+        registry_path=registry,
+        virtual_tokens_path=tokens,
+        training_data_path=training_data,
+        validation_data_path=None,
+        replay_data_path=replay_data,
+        replay_fraction=0.5,
+        phase="retrieval",
+        num_levels=2,
+        max_length=1024,
+        seed=42,
+        template_manifest_path=template_manifest,
+        base_model_name_or_path="Qwen/Qwen3-1.7B",
+        trust_remote_code=False,
+    )
+
+    assert result["global_step"] == 50
+    assert result["output_dir"] == str(output.resolve())
+    assert (output / "model.safetensors").read_bytes() == b"consolidated-weights"
+    assert (output / "tokenizer_config.json").is_file()
+    assert (output / BUNDLED_VIRTUAL_TOKENS_FILENAME).is_file()
+    restored = load_skill_decode_map(output / DECODE_MAP_FILENAME)
+    assert restored["num_skills"] == 3
+    manifest = json.loads((output / "router_manifest.json").read_text())
+    assert manifest["phase"] == "retrieval"
+    assert manifest["checkpoint_export"]["global_step"] == 50
+    assert manifest["checkpoint_export"]["inference_mode"] == "full"
+    assert manifest["generation_contract"]["max_target_paths"] == 1
+    assert manifest["examples"] == {
+        "train": 2,
+        "primary_train": 1,
+        "replay": 1,
+        "validation": 0,
+    }
+    assert restored["skills"]["s3"]["train_target_count"] == 1
+
+
+def test_materialize_rejects_checkpoint_that_is_still_saving(tmp_path) -> None:
+    checkpoint = tmp_path / "checkpoint-50"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}", encoding="utf-8")
+    (checkpoint / "model.safetensors").write_bytes(b"weights")
+
+    with pytest.raises(RouterDataError, match="may still be saving"):
+        export_router_bundle._checkpoint_step(checkpoint)
+
+
+def test_checkpoint_tokenizer_reconstructs_virtual_namespace(
+    tmp_path, monkeypatch
+) -> None:
+    transformers = pytest.importorskip("transformers")
+    tokenizer_source = tmp_path / "tokenizer-source"
+    tokenizer_source.mkdir()
+    output = tmp_path / "output"
+    output.mkdir()
+    tokens = tmp_path / "virtual_tokens.txt"
+    tokens.write_text("\n".join(TOKENS) + "\n", encoding="utf-8")
+    config = output / "config.json"
+    config.write_text(json.dumps({"vocab_size": 8}), encoding="utf-8")
+
+    class FakeTokenizer:
+        additional_special_tokens = []
+
+        def __init__(self):
+            self.ids = {}
+
+        def __len__(self):
+            return 4 + len(self.ids)
+
+        def add_special_tokens(self, payload):
+            self.additional_special_tokens = payload[
+                "additional_special_tokens"
+            ]
+            for token in self.additional_special_tokens:
+                self.ids.setdefault(token, 4 + len(self.ids))
+
+        def encode(self, token, add_special_tokens=False):
+            del add_special_tokens
+            return [self.ids[token]]
+
+        def save_pretrained(self, destination):
+            Path(destination, "tokenizer_config.json").write_text(
+                "{}", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(
+        transformers.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: FakeTokenizer(),
+    )
+    metadata = export_router_bundle._save_checkpoint_tokenizer(
+        tokenizer_source=tokenizer_source,
+        output_dir=output,
+        virtual_tokens_path=tokens,
+        full_model_config_path=config,
+        trust_remote_code=False,
+    )
+
+    assert metadata["vocab_size"] == 8
+    assert metadata["num_virtual_tokens"] == 4
+    assert (output / "tokenizer_config.json").is_file()
