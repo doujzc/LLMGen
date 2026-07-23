@@ -1,78 +1,28 @@
-# LLMGen：层级 Agent Skill 路由训练
+# LLMGen：层级 Agent Skill 路由
 
-本仓库为两套闭集数据提供同一套生成式路由训练、评估、导出和 Web 调试流程：
-
-- `clawhub`：1000 个 ClawHub Agent Skills，配置为 `configs/clawhub.env`；
-- `light`：301 个轻量候选，配置为 `configs/light.env`。
-
-下文以 1000-candidate ClawHub 全参数训练为主，默认配置为：
-
-- `Qwen3-Embedding-8B` 生成 Skill embeddings；
-- `Qwen3-1.7B` 作为 Router；
-- 两层 `128×128` Skill Code；
-- 多 Skill 完整自回归输出，每条 code 占一行；
-- 单机 4 卡 DeepSpeed ZeRO-3 全参数训练；
-- catalog、训练、验证、测试、code registry、解码空间和 Web 服务共享同一套 1000 Skill 候选集。
-
-轻量数据配置好模型和 Embedding 服务后可直接运行：
-
-```bash
-bash scripts/router_pipeline.sh light full
-```
-
-数据说明和分阶段命令见
-[`data_light/README.md`](data_light/README.md)。
-
-两套数据使用同一个训练、诊断、导出和 Web 入口，首个参数只负责选择配置：
-
-```bash
-bash scripts/router_pipeline.sh clawhub paths
-bash scripts/router_pipeline.sh light paths
-bash scripts/router_pipeline.sh --help
-```
-
-通用默认参数位于 `configs/closedset.env`；`configs/clawhub.env` 与
-`configs/light.env` 只覆盖各自的数据/运行路径、codebook 容量和少量训练门槛。
-
-模型输出示例：
+LLMGen 将固定候选集中的 Agent Skills 编码为短层级 token，并微调 Qwen3 Router
+根据用户 query 自回归生成一个或多个 Skill code：
 
 ```text
 <SK_L1_1><SK_L2_7>
 <SK_L1_3><SK_L2_4>
 ```
 
-从本地 Top-1000 ZIP 快照重新生成独立数据集：
+训练、评估、解码和 Web 调试始终使用同一候选集。目前提供两套闭集数据：
 
-```bash
-# 默认读取用户提供的 2026-07-22 archives 路径；其他机器只需改 SNAPSHOT_ROOT。
-SNAPSHOT_ROOT=/path/to/clawhub-top-1000 \
-OUTPUT_ROOT=/path/to/clawhub-top-1000/llmgen-dataset-v2 \
-bash scripts/run_clawhub_archive_data.sh
-```
+| 数据集 | 候选数 | 默认 codebook | 配置 | 默认运行目录 |
+|---|---:|---:|---|---|
+| `clawhub` | 1,000 | `128×128` | `configs/clawhub.env` | `runs/clawhub-top1000-qwen3-1.7b-full-v1` |
+| `light` | 301 | `32×16` | `configs/light.env` | `runs/light301-qwen3-1.7b-full-v1` |
 
-生成流程逐包校验 SHA-256，保留全部 1000 个候选；每个 workflow 默认生成 2 条显式
-query 和 1 条隐式意图 query。训练集中的多目标顺序会生成最多 3 个排列，验证/测试不
-增广。另为每个候选生成并独立复核单 Skill query，写入
-`queries_alignment.jsonl` / `qrels_alignment.jsonl`。质量门禁要求每个 Skill 至少 5 条通过复核的
-单 Skill 样本，且单/多 Skill 未增广正样本合计至少 10 条；回填会带上历史拒绝原因。
+数据说明见
+[ClawHub Training](data/clawhub_training/README.md) 和
+[Light](data_light/README.md)。
 
-## 1. 克隆仓库
+## 安装
 
-```bash
-git clone https://github.com/doujzc/LLMGen.git
-cd LLMGen
-
-git rev-parse --short HEAD
-```
-
-ClawHub Top 1,000 快照的全部 1000 个候选及已复核数据均提交在
-`data/clawhub_training/final/`，无需重新爬取或调用模型生成数据。其中包含 5,963 条
-单 Skill 课程样本和 12,711 条已导出多 Skill 数据（训练集包含目标顺序增广）。
-每个候选至少有 5 条单 Skill 样本，单/多 Skill 未增广正样本合计至少 10 条。
-
-## 2. 安装训练环境
-
-要求 Python 3.10--3.12。使用 Conda 创建训练环境：
+要求 Python 3.10--3.12。CUDA 12.5 驱动可运行项目使用的 CUDA 12.4 PyTorch
+wheel。
 
 ```bash
 conda create -n llmgen python=3.10 -y
@@ -82,75 +32,63 @@ python -m pip install -U pip setuptools wheel
 python -m pip install -r requirements/cuda124.txt
 python -m pip install --no-build-isolation deepspeed==0.16.4
 python -m pip install -e '.[train,test]'
-```
 
-检查 PyTorch、CUDA 和可见 GPU：
-
-```bash
 python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.device_count())"
 ```
 
-预期输出类似：
+## 配置
 
-```text
-2.6.0+cu124 12.4
-4
-```
-
-CUDA 12.4 的 PyTorch wheel 可以在支持 CUDA 12.5 的 NVIDIA 驱动上运行。
-
-## 3. 配置模型和训练参数
-
-将模型路径改成目标机器上的实际位置：
+选择数据集并设置目标机器上的模型路径：
 
 ```bash
+export DATASET=clawhub  # 或 light
 export EMBEDDING_MODEL=/models/Qwen3-Embedding-8B
 export ROUTER_MODEL=/models/Qwen3-1.7B
-
-export RUN_DIR=runs/clawhub-top1000-qwen3-1.7b-full-v1
-export PROCESSED_DIR="$RUN_DIR/processed"
-export EMBEDDING_DIR="$RUN_DIR/embeddings"
-
-export ROUTER_FINETUNE_MODE=full
-export ROUTER_NUM_GPUS=4
-export ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3.json
-
-export ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE=1
-export ROUTER_GRADIENT_ACCUMULATION_STEPS=8
-export ROUTER_PRECISION=bf16
-export ROUTER_GRADIENT_CHECKPOINTING=1
-
-# 默认已是 1400；避免超长 Skill 说明超过 Embedding/Router 上下文。
-export EMBEDDING_MAX_SKILL_CHARS=1400
-
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export DEVICE=cuda
 ```
 
-对应的有效全局 batch size 为：
+默认使用 4 卡、DeepSpeed ZeRO-3 和全参数微调：
 
-```text
-4 GPUs × micro batch 1 × gradient accumulation 8 = 32
+```bash
+export ROUTER_NUM_GPUS=4
+export ROUTER_FINETUNE_MODE=full
+export ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3.json
 ```
 
-ClawHub 默认执行 10 个 Memorization epochs 和 15 个 Retrieval epochs；Retrieval
-训练中混入 20% Memorization replay，避免 code 映射被覆盖。
+三卡训练只需改为：
 
-## 4. 启动 Embedding 服务
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2
+export ROUTER_NUM_GPUS=3
+```
 
-建议为 vLLM 创建独立 Conda 环境，避免它修改训练环境中的 PyTorch/CUDA 依赖：
+LoRA 训练设置：
+
+```bash
+export ROUTER_FINETUNE_MODE=lora
+```
+
+所有配置都可被同名环境变量覆盖。自定义运行目录时设置 `RUN_DIR`；其他产物路径
+默认随之派生：
+
+```bash
+export RUN_DIR=runs/my-run
+bash scripts/router_pipeline.sh "$DATASET" paths
+```
+
+每次训练或恢复前都建议用 `paths` 核对实际生效的数据、checkpoint 和输出目录。
+
+## Embedding 预处理
+
+预处理通过 OpenAI-compatible API 调用 Embedding 模型。建议在独立 Conda 环境中
+启动 vLLM，避免改变训练环境的 PyTorch 依赖：
 
 ```bash
 conda create -n llmgen-vllm python=3.10 -y
 conda activate llmgen-vllm
-
-cd /path/to/LLMGen
 python -m pip install -r requirements/vllm-cu124.txt
-```
 
-启动 OpenAI-compatible Embedding 服务：
-
-```bash
 MODEL=/models/Qwen3-Embedding-8B \
 SERVED_MODEL_NAME=/models/Qwen3-Embedding-8B \
 TENSOR_PARALLEL_SIZE=2 \
@@ -159,262 +97,185 @@ VLLM="$(which vllm)" \
 bash scripts/serve_qwen3_embedding.sh
 ```
 
-如果单卡显存足够，可以将 `TENSOR_PARALLEL_SIZE` 改成 `1`。
-
-在另一个终端检查服务：
-
-```bash
-curl http://127.0.0.1:8000/v1/models
-```
-
-## 5. 预处理 ClawHub 数据
-
-回到训练环境：
+在训练环境的另一个终端执行：
 
 ```bash
 conda activate llmgen
-cd /path/to/LLMGen
-
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=EMPTY
+
+bash scripts/router_pipeline.sh "$DATASET" prepare
 ```
 
-重新执行第 3 节中的环境变量配置，然后运行：
+预处理完成后可关闭 Embedding 服务，释放 GPU。已有匹配的 `processed/` 和
+`embeddings/` 时无需重复执行。
+
+## 训练与评估
+
+从 Stage 1 开始执行完整流程：
 
 ```bash
-bash scripts/router_pipeline.sh clawhub prepare
+SKIP_PREPARE=1 bash scripts/router_pipeline.sh "$DATASET" full
 ```
 
-完成后关闭 vLLM Embedding 服务，释放 GPU。Embedding 模型只用于预处理，不参与
-后续 Router 训练。
+完整流程依次执行层级 Tokenizer、code 导出与质量门禁、Router 数据构造、
+Memorization、单 Skill Retrieval Alignment、多 Skill Retrieval 和闭集评估。
 
-## 6. 开始全参数训练
-
-一次执行剩余完整流程：
+分阶段调试：
 
 ```bash
-SKIP_PREPARE=1 bash scripts/router_pipeline.sh clawhub full
+bash scripts/router_pipeline.sh "$DATASET" train-tokenizer
+bash scripts/router_pipeline.sh "$DATASET" export-codes
+bash scripts/router_pipeline.sh "$DATASET" build-router-data
+bash scripts/router_pipeline.sh "$DATASET" train-memorization
+bash scripts/router_pipeline.sh "$DATASET" train-retrieval
+bash scripts/router_pipeline.sh "$DATASET" evaluate
 ```
 
-脚本依次执行：
-
-1. 训练两层层级 Skill Tokenizer；
-2. 为唯一候选集中的 1000 个 Skills 导出固定 code，并执行碰撞、利用率和熵质量门禁；
-3. 构造单 Skill 能力对齐与多 Skill 自回归 SFT 数据；
-4. 全参数训练 Memorization 阶段；
-5. 从 Memorization 模型先训练 `retrieval_alignment` 单 Skill 课程，再继续训练多
-   Skill Retrieval；
-6. 在同一个 1000 Skill 候选集上评估。
-
-每一步也可以单独运行，便于调试和恢复：
+Stage 参数可以直接追加到统一入口，例如：
 
 ```bash
-bash scripts/router_pipeline.sh clawhub train-tokenizer
-bash scripts/router_pipeline.sh clawhub export-codes
-bash scripts/router_pipeline.sh clawhub build-router-data
-bash scripts/router_pipeline.sh clawhub train-memorization
-bash scripts/router_pipeline.sh clawhub train-retrieval
-bash scripts/router_pipeline.sh clawhub evaluate
+bash scripts/router_pipeline.sh "$DATASET" train-tokenizer \
+  --no-edge-aware-batches
 ```
 
-旧版 `64×64 / clawhub-v2`、568-Skill checkpoint，以及任何不是基于当前
-`manifest.json` 候选集生成的 Stage 1 和 Router checkpoint，均与当前数据不兼容。
-必须使用新的 `RUN_DIR`，从第 5 节预处理和 Stage 1 开始重新训练；不能对旧运行目录
-设置 `SKIP_PREPARE=1`。导出成功后可快速确认
-code 质量：
+`export-codes` 会在 Router 训练前检查碰撞率、码本利用率和熵；质量门禁失败时不应
+直接放宽阈值继续训练。
+
+查看全部命令：
 
 ```bash
-python -c 'import json,os; x=json.load(open(os.path.join(os.environ["RUN_DIR"],"index/manifest.json"))); print(json.dumps(x["splits"]["train"]["quality_gate"], indent=2))'
+bash scripts/router_pipeline.sh --help
 ```
 
-`passed` 必须为 `true`；否则脚本会在训练 Router 前直接退出。
-默认 raw-nearest 利用率门槛按层为 `75% / 65%`，最终平衡 code 的每层利用率和
-归一化熵仍必须达到 90%。
+## Checkpoint 恢复
 
-## 7. 输出目录
+以下示例假设 `RUN_DIR` 已设置为当前运行目录。Stage 1 只能在训练配置兼容时恢复：
 
-主要产物为：
+```bash
+export TOKENIZER_RESUME="$RUN_DIR/stage1/last.pt"
+bash scripts/router_pipeline.sh "$DATASET" train-tokenizer
+```
+
+恢复 Router：
+
+```bash
+export ROUTER_RESUME_MEMORIZATION=latest
+bash scripts/router_pipeline.sh "$DATASET" train-memorization
+
+export ROUTER_RESUME_ALIGNMENT=latest       # 仅恢复单 Skill Alignment
+export ROUTER_RESUME_RETRIEVAL=latest       # 恢复多 Skill Retrieval
+bash scripts/router_pipeline.sh "$DATASET" train-retrieval
+```
+
+## 主要产物
 
 ```text
-runs/clawhub-top1000-qwen3-1.7b-full-v1/
+<RUN_DIR>/
 ├── processed/
 ├── embeddings/
 ├── stage1/
-│   └── best.pt
+│   ├── best.pt
+│   ├── last.pt
+│   └── summary.json
 ├── index/
+│   ├── manifest.json
 │   ├── train_codes.jsonl
 │   ├── train_registry.json
 │   └── virtual_tokens.txt
+├── router_data/
 ├── router/
 │   ├── memorization/
 │   ├── retrieval_alignment/
 │   └── retrieval/
-└── evaluation/
-    ├── predictions.jsonl
-    └── metrics.json
+├── evaluation/
+└── diagnostics/
 ```
 
-确认两个 Router 阶段均使用全参数训练：
+Router 模型目录同步保存 `skill_decode_map.json` 和 `virtual_tokens.txt`，用于将生成
+token 解码回原始 Skill。
+
+## 诊断
+
+分析数据覆盖、code 分布、训练记录和现有预测：
 
 ```bash
-grep -n '"finetune_mode"' \
-  "$RUN_DIR/router/memorization/router_manifest.json" \
-  "$RUN_DIR/router/retrieval/router_manifest.json"
+bash scripts/router_pipeline.sh "$DATASET" diagnose
 ```
 
-应输出：
-
-```text
-"finetune_mode": "full"
-```
-
-## 8. Checkpoint 恢复
-
-恢复 Stage 1 Tokenizer：
-
-```bash
-export TOKENIZER_RESUME="$RUN_DIR/stage1/last.pt"
-bash scripts/router_pipeline.sh clawhub train-tokenizer
-```
-
-恢复 Memorization：
-
-```bash
-export ROUTER_RESUME_MEMORIZATION=latest
-bash scripts/router_pipeline.sh clawhub train-memorization
-```
-
-恢复 Retrieval：
-
-```bash
-export ROUTER_RESUME_RETRIEVAL=latest
-bash scripts/router_pipeline.sh clawhub train-retrieval
-```
-
-若只恢复单 Skill 课程阶段，设置 `ROUTER_RESUME_ALIGNMENT=latest`；多 Skill 阶段仍使用
-`ROUTER_RESUME_RETRIEVAL=latest`。
-
-## 9. 显存不足
-
-默认 `Qwen3-1.7B + 4 GPU + ZeRO-3` 通常比较宽裕。若更换为 Qwen3-4B/8B 后发生
-OOM，优先启用 CPU parameter offload：
-
-```bash
-export ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3_offload.json
-SKIP_PREPARE=1 bash scripts/router_pipeline.sh clawhub full
-```
-
-单卡 micro batch 已经是 `1`，继续降低 gradient accumulation 不会减少单步 activation
-显存。必要时可以缩短上下文：
-
-```bash
-export ROUTER_MAX_LENGTH=768
-```
-
-缩短上下文可能截断较长 query，因此应优先使用 ZeRO-3 offload。
-
-## 10. 低召回诊断
-
-先分析数据、code 分布、训练日志和现有预测：
-
-```bash
-bash scripts/router_pipeline.sh clawhub diagnose
-```
-
-再加载最终 checkpoint，对训练集和测试集各抽样 128 条计算 teacher-forced token
-准确率：
+加载模型计算 teacher-forced code 准确率：
 
 ```bash
 DIAG_WITH_MODEL=1 DEVICE=cuda:0 \
-  bash scripts/router_pipeline.sh clawhub diagnose
+  bash scripts/router_pipeline.sh "$DATASET" diagnose
 ```
 
-报告写入 `$RUN_DIR/diagnostics/test.json`。如需判断是否只记住训练数据，再生成训练集预测：
-
-```bash
-QUERY_SET=train EVAL_DIR="$RUN_DIR/evaluation-train" \
-  bash scripts/router_pipeline.sh clawhub evaluate
-
-DIAG_SPLIT=train \
-DIAG_PREDICTIONS="$RUN_DIR/evaluation-train/predictions.jsonl" \
-DIAG_OUTPUT="$RUN_DIR/diagnostics/train.json" \
-  bash scripts/router_pipeline.sh clawhub diagnose
-```
-
-分别检查 Memorization checkpoint 是否学会 code，以及 Retrieval 后是否遗忘：
+比较 Memorization 与 Retrieval checkpoint，检查是否发生遗忘：
 
 ```bash
 DIAG_SAMPLE_SIZE=256 DEVICE=cuda:0 \
-  bash scripts/router_pipeline.sh clawhub diagnose-memorization
+  bash scripts/router_pipeline.sh "$DATASET" diagnose-memorization
 ```
 
-查看两个报告中的 `teacher_forcing.train.categories.code.constrained_accuracy`：
-Memorization checkpoint 应达到 95% 左右，Retrieval checkpoint 不应显著下降。
+报告默认写入 `$RUN_DIR/diagnostics/`。
 
-## 11. Web 人工测试
+## 导出与 Web 调试
 
-新训练的 `memorization/` 和 `retrieval/` 模型目录会自动包含：
-
-```text
-skill_decode_map.json  # token/path -> 原始 Skill ID、名称和元数据
-virtual_tokens.txt     # 完整虚拟 token 命名空间
-```
-
-Retrieval 模型的解码映射覆盖且只覆盖这 1000 个候选。导出时会校验每个候选都有训练
-正样本；Web 候选检索、约束生成 Trie 和 token 解码映射使用同一组 Skill ID。
-
-仅当旧 checkpoint 本身就是基于当前 1000 个候选训练时，才能补齐这两个文件：
+导出最终 Retrieval 模型：
 
 ```bash
-bash scripts/router_pipeline.sh clawhub export-web \
-  "$RUN_DIR/router/retrieval"
+bash scripts/router_pipeline.sh "$DATASET" export-web
 ```
 
-其他候选快照的 checkpoint 会因 catalog、registry 和训练目标集合不一致而被拒绝，
-不能通过重新导出 bundle 转换为当前 1000-Skill 模型。
-
-06b 仍在训练时，可以直接物化一个已经保存完成的中途 checkpoint：
+也可直接导出训练中的 Retrieval checkpoint：
 
 ```bash
-bash scripts/router_pipeline.sh clawhub export-web \
+bash scripts/router_pipeline.sh "$DATASET" export-web \
   "$RUN_DIR/router/retrieval/checkpoint-500"
 ```
 
-默认输出到 `$RUN_DIR/exports/retrieval-checkpoint-500`。如需指定目录：
+启动人工测试界面：
 
 ```bash
-ROUTER_CHECKPOINT_EXPORT_DIR="$RUN_DIR/exports/router-step-500" \
-  bash scripts/router_pipeline.sh clawhub export-web \
-  "$RUN_DIR/router/retrieval/checkpoint-500"
-```
-
-导出目录独立于训练 checkpoint，可以在后续 checkpoint 轮转删除后继续使用。
-测试中途模型时，将下面的 `--model-dir` 改成该导出目录即可。
-
-启动本地调试界面：
-
-```bash
-bash scripts/router_pipeline.sh clawhub web \
+bash scripts/router_pipeline.sh "$DATASET" web \
   --device cuda:0 \
   --dtype bfloat16
 ```
 
-浏览器打开 `http://127.0.0.1:8080`。LoRA checkpoint 会从
-`adapter_config.json` 自动读取 base model；若原路径在新机器上无效，额外传入
-`--base-model-name-or-path /models/Qwen3-1.7B`。远程机器建议通过 SSH 转发端口：
+默认地址为 `http://127.0.0.1:8080`。远程机器可使用：
 
 ```bash
 ssh -L 8080:127.0.0.1:8080 user@server
 ```
 
-## 12. 测试
+## 显存不足
+
+优先启用 ZeRO-3 CPU parameter offload：
+
+```bash
+export ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3_offload.json
+```
+
+仍然 OOM 时再缩短 Router 上下文：
+
+```bash
+export ROUTER_MAX_LENGTH=768
+```
+
+## 数据生成
+
+训练仓库内数据不需要重新调用生成模型。重新构建数据时分别使用：
+
+```bash
+bash scripts/run_clawhub_data.sh
+bash scripts/run_light_data.sh
+```
+
+具体数据格式、统计、质量门禁和生成依赖见各数据目录的 README。
+
+## 测试
 
 ```bash
 python -m pytest
-```
-
-CPU 端到端 smoke：
-
-```bash
 bash scripts/run_skillret_smoke.sh
 ```

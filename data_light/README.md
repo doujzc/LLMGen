@@ -53,7 +53,7 @@ SKIP_PREPARE=1 bash scripts/router_pipeline.sh light full
 
 ## 分阶段执行
 
-调试或恢复时使用同一个入口选择阶段：
+调试时使用同一个入口选择阶段：
 
 ```bash
 bash scripts/router_pipeline.sh light prepare
