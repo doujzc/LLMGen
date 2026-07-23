@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.prepare_clawhub import validate_dataset
+from scripts.prepare_closedset import validate_dataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

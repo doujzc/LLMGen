@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export SKILLRET_CONFIG="${SKILLRET_CONFIG:-configs/clawhub.env}"
 # shellcheck source=scripts/skillret/common.sh
-source "$ROOT/scripts/skillret/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 DIAG_SPLIT="${DIAG_SPLIT:-test}"
 case "$DIAG_SPLIT" in

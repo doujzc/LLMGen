@@ -1,6 +1,11 @@
-# LLMGen：ClawHub 全参数训练
+# LLMGen：层级 Agent Skill 路由训练
 
-本仓库提供基于 1000 个 ClawHub Agent Skills 的完整生成式路由训练流程。默认配置为：
+本仓库为两套闭集数据提供同一套生成式路由训练、评估、导出和 Web 调试流程：
+
+- `clawhub`：1000 个 ClawHub Agent Skills，配置为 `configs/clawhub.env`；
+- `light`：301 个轻量候选，配置为 `configs/light.env`。
+
+下文以 1000-candidate ClawHub 全参数训练为主，默认配置为：
 
 - `Qwen3-Embedding-8B` 生成 Skill embeddings；
 - `Qwen3-1.7B` 作为 Router；
@@ -9,14 +14,25 @@
 - 单机 4 卡 DeepSpeed ZeRO-3 全参数训练；
 - catalog、训练、验证、测试、code registry、解码空间和 Web 服务共享同一套 1000 Skill 候选集。
 
-另提供独立的 301-candidate 轻量数据集；配置好模型和 Embedding 服务后可直接运行：
+轻量数据配置好模型和 Embedding 服务后可直接运行：
 
 ```bash
-bash scripts/run_light_full.sh
+bash scripts/router_pipeline.sh light full
 ```
 
 数据说明和分阶段命令见
 [`data_light/README.md`](data_light/README.md)。
+
+两套数据使用同一个训练、诊断、导出和 Web 入口，首个参数只负责选择配置：
+
+```bash
+bash scripts/router_pipeline.sh clawhub paths
+bash scripts/router_pipeline.sh light paths
+bash scripts/router_pipeline.sh --help
+```
+
+通用默认参数位于 `configs/closedset.env`；`configs/clawhub.env` 与
+`configs/light.env` 只覆盖各自的数据/运行路径、codebook 容量和少量训练门槛。
 
 模型输出示例：
 
@@ -166,7 +182,7 @@ export OPENAI_API_KEY=EMPTY
 重新执行第 3 节中的环境变量配置，然后运行：
 
 ```bash
-bash scripts/clawhub_train/01_prepare.sh
+bash scripts/router_pipeline.sh clawhub prepare
 ```
 
 完成后关闭 vLLM Embedding 服务，释放 GPU。Embedding 模型只用于预处理，不参与
@@ -177,7 +193,7 @@ bash scripts/clawhub_train/01_prepare.sh
 一次执行剩余完整流程：
 
 ```bash
-SKIP_PREPARE=1 bash scripts/run_clawhub_full.sh
+SKIP_PREPARE=1 bash scripts/router_pipeline.sh clawhub full
 ```
 
 脚本依次执行：
@@ -193,12 +209,12 @@ SKIP_PREPARE=1 bash scripts/run_clawhub_full.sh
 每一步也可以单独运行，便于调试和恢复：
 
 ```bash
-bash scripts/clawhub_train/02_train_tokenizer.sh
-bash scripts/clawhub_train/03_export_codes.sh
-bash scripts/clawhub_train/04_build_router_data.sh
-bash scripts/clawhub_train/05_train_memorization.sh
-bash scripts/clawhub_train/06_train_retrieval.sh
-bash scripts/clawhub_train/07_evaluate.sh
+bash scripts/router_pipeline.sh clawhub train-tokenizer
+bash scripts/router_pipeline.sh clawhub export-codes
+bash scripts/router_pipeline.sh clawhub build-router-data
+bash scripts/router_pipeline.sh clawhub train-memorization
+bash scripts/router_pipeline.sh clawhub train-retrieval
+bash scripts/router_pipeline.sh clawhub evaluate
 ```
 
 旧版 `64×64 / clawhub-v2`、568-Skill checkpoint，以及任何不是基于当前
@@ -258,21 +274,21 @@ grep -n '"finetune_mode"' \
 
 ```bash
 export TOKENIZER_RESUME="$RUN_DIR/stage1/last.pt"
-bash scripts/clawhub_train/02_train_tokenizer.sh
+bash scripts/router_pipeline.sh clawhub train-tokenizer
 ```
 
 恢复 Memorization：
 
 ```bash
 export ROUTER_RESUME_MEMORIZATION=latest
-bash scripts/clawhub_train/05_train_memorization.sh
+bash scripts/router_pipeline.sh clawhub train-memorization
 ```
 
 恢复 Retrieval：
 
 ```bash
 export ROUTER_RESUME_RETRIEVAL=latest
-bash scripts/clawhub_train/06_train_retrieval.sh
+bash scripts/router_pipeline.sh clawhub train-retrieval
 ```
 
 若只恢复单 Skill 课程阶段，设置 `ROUTER_RESUME_ALIGNMENT=latest`；多 Skill 阶段仍使用
@@ -285,7 +301,7 @@ OOM，优先启用 CPU parameter offload：
 
 ```bash
 export ROUTER_DEEPSPEED_CONFIG=configs/deepspeed_zero3_offload.json
-SKIP_PREPARE=1 bash scripts/run_clawhub_full.sh
+SKIP_PREPARE=1 bash scripts/router_pipeline.sh clawhub full
 ```
 
 单卡 micro batch 已经是 `1`，继续降低 gradient accumulation 不会减少单步 activation
@@ -302,7 +318,7 @@ export ROUTER_MAX_LENGTH=768
 先分析数据、code 分布、训练日志和现有预测：
 
 ```bash
-bash scripts/clawhub_train/08_diagnose.sh
+bash scripts/router_pipeline.sh clawhub diagnose
 ```
 
 再加载最终 checkpoint，对训练集和测试集各抽样 128 条计算 teacher-forced token
@@ -310,26 +326,26 @@ bash scripts/clawhub_train/08_diagnose.sh
 
 ```bash
 DIAG_WITH_MODEL=1 DEVICE=cuda:0 \
-  bash scripts/clawhub_train/08_diagnose.sh
+  bash scripts/router_pipeline.sh clawhub diagnose
 ```
 
 报告写入 `$RUN_DIR/diagnostics/test.json`。如需判断是否只记住训练数据，再生成训练集预测：
 
 ```bash
 QUERY_SET=train EVAL_DIR="$RUN_DIR/evaluation-train" \
-  bash scripts/clawhub_train/07_evaluate.sh
+  bash scripts/router_pipeline.sh clawhub evaluate
 
 DIAG_SPLIT=train \
 DIAG_PREDICTIONS="$RUN_DIR/evaluation-train/predictions.jsonl" \
 DIAG_OUTPUT="$RUN_DIR/diagnostics/train.json" \
-  bash scripts/clawhub_train/08_diagnose.sh
+  bash scripts/router_pipeline.sh clawhub diagnose
 ```
 
 分别检查 Memorization checkpoint 是否学会 code，以及 Retrieval 后是否遗忘：
 
 ```bash
 DIAG_SAMPLE_SIZE=256 DEVICE=cuda:0 \
-  bash scripts/clawhub_train/09_diagnose_memorization.sh
+  bash scripts/router_pipeline.sh clawhub diagnose-memorization
 ```
 
 查看两个报告中的 `teacher_forcing.train.categories.code.constrained_accuracy`：
@@ -350,7 +366,7 @@ Retrieval 模型的解码映射覆盖且只覆盖这 1000 个候选。导出时�
 仅当旧 checkpoint 本身就是基于当前 1000 个候选训练时，才能补齐这两个文件：
 
 ```bash
-bash scripts/clawhub_train/10_export_web_bundle.sh \
+bash scripts/router_pipeline.sh clawhub export-web \
   "$RUN_DIR/router/retrieval"
 ```
 
@@ -360,7 +376,7 @@ bash scripts/clawhub_train/10_export_web_bundle.sh \
 06b 仍在训练时，可以直接物化一个已经保存完成的中途 checkpoint：
 
 ```bash
-bash scripts/clawhub_train/10_export_web_bundle.sh \
+bash scripts/router_pipeline.sh clawhub export-web \
   "$RUN_DIR/router/retrieval/checkpoint-500"
 ```
 
@@ -368,7 +384,7 @@ bash scripts/clawhub_train/10_export_web_bundle.sh \
 
 ```bash
 ROUTER_CHECKPOINT_EXPORT_DIR="$RUN_DIR/exports/router-step-500" \
-  bash scripts/clawhub_train/10_export_web_bundle.sh \
+  bash scripts/router_pipeline.sh clawhub export-web \
   "$RUN_DIR/router/retrieval/checkpoint-500"
 ```
 
@@ -378,8 +394,7 @@ ROUTER_CHECKPOINT_EXPORT_DIR="$RUN_DIR/exports/router-step-500" \
 启动本地调试界面：
 
 ```bash
-python -m web_server.server \
-  --model-dir "$RUN_DIR/router/retrieval" \
+bash scripts/router_pipeline.sh clawhub web \
   --device cuda:0 \
   --dtype bfloat16
 ```

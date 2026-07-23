@@ -38,7 +38,7 @@ export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=EMPTY
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-bash scripts/run_light_full.sh
+bash scripts/router_pipeline.sh light full
 ```
 
 该入口固定使用 `configs/light.env` 和 `data_light/final/`，依次执行预处理、
@@ -48,20 +48,26 @@ bash scripts/run_light_full.sh
 如果已经完成预处理并关闭了 Embedding 服务：
 
 ```bash
-SKIP_PREPARE=1 bash scripts/run_light_full.sh
+SKIP_PREPARE=1 bash scripts/router_pipeline.sh light full
 ```
 
 ## 分阶段执行
 
-调试或恢复时，先切换到独立配置：
+调试或恢复时使用同一个入口选择阶段：
 
 ```bash
-export SKILLRET_CONFIG=configs/light.env
-bash scripts/clawhub_train/01_prepare.sh
-bash scripts/clawhub_train/02_train_tokenizer.sh
-bash scripts/clawhub_train/03_export_codes.sh
-bash scripts/clawhub_train/04_build_router_data.sh
-bash scripts/clawhub_train/05_train_memorization.sh
-bash scripts/clawhub_train/06_train_retrieval.sh
-bash scripts/clawhub_train/07_evaluate.sh
+bash scripts/router_pipeline.sh light prepare
+bash scripts/router_pipeline.sh light train-tokenizer
+bash scripts/router_pipeline.sh light export-codes
+bash scripts/router_pipeline.sh light build-router-data
+bash scripts/router_pipeline.sh light train-memorization
+bash scripts/router_pipeline.sh light train-retrieval
+bash scripts/router_pipeline.sh light evaluate
+```
+
+导出 Web bundle 并启动人工测试界面：
+
+```bash
+bash scripts/router_pipeline.sh light export-web
+bash scripts/router_pipeline.sh light web
 ```

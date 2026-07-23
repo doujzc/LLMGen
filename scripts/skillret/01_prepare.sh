@@ -10,6 +10,9 @@ ARGS=(
   --embedding-model "$EMBEDDING_MODEL"
   --batch-size "$EMBEDDING_BATCH_SIZE"
 )
+if [[ -n "${DATASET_NAME:-}" ]]; then
+  ARGS+=(--dataset-name "$DATASET_NAME")
+fi
 if [[ "$EMBEDDING_PROVIDER" == "openai" ]]; then
   export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
   ARGS+=(

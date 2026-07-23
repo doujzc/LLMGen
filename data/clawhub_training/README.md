@@ -143,7 +143,7 @@ export EMBEDDING_MODEL=/models/Qwen3-Embedding-8B
 export ROUTER_MODEL=/models/Qwen3-1.7B
 export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
 export OPENAI_API_KEY=EMPTY
-bash scripts/run_clawhub_full.sh
+bash scripts/router_pipeline.sh clawhub full
 ```
 
 默认参数位于 `configs/clawhub.env`；环境安装、Embedding 服务、四卡 ZeRO-3 训练和

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and prepare the versioned ClawHub closed-set routing dataset."""
+"""Validate and prepare a versioned closed-set Agent Skill routing dataset."""
 
 from __future__ import annotations
 
@@ -33,20 +33,21 @@ SPLITS = ("train", "validation", "test")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset-name", default="closedset-router-v1")
     parser.add_argument(
         "--dataset-dir",
         type=Path,
-        default=Path("data/clawhub_training/final"),
+        required=True,
     )
     parser.add_argument(
         "--processed-dir",
         type=Path,
-        default=Path("data/clawhub_training/final/processed"),
+        required=True,
     )
     parser.add_argument(
         "--embedding-dir",
         type=Path,
-        default=Path("data/clawhub_training/final/embeddings"),
+        required=True,
     )
     parser.add_argument("--embedding-provider", choices=("openai",), default="openai")
     parser.add_argument("--embedding-model", default=DEFAULT_OPENAI_EMBEDDING_MODEL)
@@ -71,7 +72,7 @@ def parse_args() -> argparse.Namespace:
 
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     if not path.is_file():
-        raise FileNotFoundError(f"required ClawHub training file is missing: {path}")
+        raise FileNotFoundError(f"required closed-set training file is missing: {path}")
     return list(read_jsonl(path))
 
 
@@ -516,7 +517,7 @@ def main() -> None:
     manifest = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "dataset": "clawhub-router-v1",
+        "dataset": args.dataset_name,
         "candidate_policy": "shared closed set across train/validation/test queries",
         "source": {
             "path": str(args.dataset_dir),

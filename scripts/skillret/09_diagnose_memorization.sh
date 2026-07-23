@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export SKILLRET_CONFIG="${SKILLRET_CONFIG:-configs/clawhub.env}"
 # shellcheck source=scripts/skillret/common.sh
-source "$ROOT/scripts/skillret/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
 skillret_require_dir "$ROUTER_OUTPUT_DIR/memorization"
@@ -23,7 +21,7 @@ run_check() {
   DIAG_OUTPUT="$RUN_DIR/diagnostics/${label}-on-memorization.json" \
   DIAG_SYSTEM_PROMPT="$MEMORIZATION_PROMPT" \
   DIAG_MIN_TRAIN_CODE_ACCURACY=0.95 \
-    bash "$ROOT/scripts/clawhub_train/08_diagnose.sh"
+    bash "$SKILLRET_ROOT/scripts/skillret/08_diagnose.sh"
 }
 
 run_check memorization-checkpoint "$ROUTER_OUTPUT_DIR/memorization"

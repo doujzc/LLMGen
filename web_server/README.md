@@ -4,13 +4,18 @@
 训练时自动生成的 `skill_decode_map.json` 和 `virtual_tokens.txt`。
 
 ```bash
-python -m web_server.server \
-  --model-dir runs/clawhub/router/retrieval \
-  --device cuda:0 \
-  --dtype bfloat16
+bash scripts/router_pipeline.sh clawhub web
+bash scripts/router_pipeline.sh light web
 ```
 
-打开 `http://127.0.0.1:8080`。常用参数：
+入口根据数据集配置自动定位最终 Retrieval 模型。也可以指定导出的 checkpoint bundle：
+
+```bash
+bash scripts/router_pipeline.sh light web \
+  runs/light301-qwen3-1.7b-full-v1/exports/retrieval-checkpoint-500
+```
+
+打开 `http://127.0.0.1:8080`。额外参数会原样传递给 Web 服务，常用参数：
 
 ```text
 --base-model-name-or-path PATH  LoRA 的 base model 路径覆盖
@@ -28,17 +33,11 @@ JSON API：
 - `POST /api/infer`，body 为
   `{"query":"...","max_code_paths":4,"top_k":10}`
 
-为旧模型生成自包含解码文件：
+为已训练模型生成自包含解码文件：
 
 重新导出也会将唯一训练候选集及其文本写入解码文件，供约束解码和 Skill 详情弹窗共同使用。
 
 ```bash
-python scripts/export_router_bundle.py \
-  --model-dir runs/clawhub/router/retrieval \
-  --catalog runs/clawhub/processed/catalog_train.jsonl \
-  --codes runs/clawhub/index/train_codes.jsonl \
-  --registry runs/clawhub/index/train_registry.json \
-  --virtual-tokens runs/clawhub/index/virtual_tokens.txt \
-  --training-data runs/clawhub/router_data/retrieval_train.jsonl \
-  --phase retrieval
+bash scripts/router_pipeline.sh clawhub export-web
+bash scripts/router_pipeline.sh light export-web
 ```
