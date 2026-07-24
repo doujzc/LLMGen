@@ -58,7 +58,7 @@ def test_pipeline_selects_only_dataset_specific_config_and_paths() -> None:
     assert clawhub["dataset_dir"] == "data/clawhub_training/final"
     assert light["dataset_dir"] == "data_light/final"
     assert clawhub["dataset_name"] == "clawhub-top1000-router-v1"
-    assert light["dataset_name"] == "light301-router-v1"
+    assert light["dataset_name"] == "light301-router-v2"
     assert clawhub["run_dir"].startswith("runs/clawhub-top1000-")
     assert light["run_dir"].startswith("runs/light301-")
     assert clawhub["branching_factors"] == "128 128"

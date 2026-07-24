@@ -1,51 +1,51 @@
 {
-  "accepted_before_dedup": 1773,
+  "accepted_before_dedup": 13973,
   "alignment_positive_skill_count": 301,
   "artifacts": {
     "qrels_alignment.jsonl": {
-      "bytes": 135039,
+      "bytes": 487609,
       "path": "qrels_alignment.jsonl",
-      "sha256": "8660d0c014d70cf7557d9142c6299f1511b057a5ffecd6d0ada24e82d83a1557"
+      "sha256": "51676fa0a50b4ed9253b25923df2ea61170673f9f0b48dbc331aeee97a991135"
     },
     "qrels_test.jsonl": {
-      "bytes": 18186,
+      "bytes": 162889,
       "path": "qrels_test.jsonl",
-      "sha256": "43bb2f5d7a30198c6b314a71cef492cde112d9ae995bc0c82b2f97fea81eccfc"
+      "sha256": "8818afbf7e66186c0f05d04478740ce55dd225c3fa0f0a182810786e3d14819d"
     },
     "qrels_train.jsonl": {
-      "bytes": 1115603,
+      "bytes": 8963488,
       "path": "qrels_train.jsonl",
-      "sha256": "cb44b1bcf1ae1c4fd18bcbf093ce61b3ddd1f42e8ae01139086b58761394e97b"
+      "sha256": "65aee341f3a8d1fca9b102aff5dde39b2eab0c8c6637b119f4e9f49258005794"
     },
     "qrels_validation.jsonl": {
-      "bytes": 21567,
+      "bytes": 135448,
       "path": "qrels_validation.jsonl",
-      "sha256": "ba8ef501d9421b41eb78f6612b7aa34c35f02c49badcd51b3f054e5c4555df45"
+      "sha256": "fac9e6debddfb9c83b6bde61bc06d5929a0c03cdf32e817f963059617126b9ec"
     },
     "queries.jsonl": {
-      "bytes": 6763127,
+      "bytes": 54019654,
       "path": "queries.jsonl",
-      "sha256": "c6d31d7e55beed821ce60251540f9c574b2551e1e07c7565340ab3a0cdbca0fa"
+      "sha256": "ed3d0acd66a15c508f15163ceee5c8133375ace6518ac01e732b08290e445617"
     },
     "queries_alignment.jsonl": {
-      "bytes": 780862,
+      "bytes": 2727053,
       "path": "queries_alignment.jsonl",
-      "sha256": "2a7d38d07cea86c520c29246eebc5e35a9910a0554c05f95de4b7dd543e68040"
+      "sha256": "fc1e20181f986a5fe4a3555a1b6bd43c2315383e0eb1f0d75b6bb6f5891f16e6"
     },
     "queries_test.jsonl": {
-      "bytes": 79323,
+      "bytes": 704314,
       "path": "queries_test.jsonl",
-      "sha256": "27ed7a3b217674119cabe0651ef752a3d69cfec16402cba05d287e068ef8bbaf"
+      "sha256": "40f9a525feb92c1f6cc89dae4b51891ea0494d099b5420000b5beafd605c3d5e"
     },
     "queries_train.jsonl": {
-      "bytes": 4900355,
+      "bytes": 39254190,
       "path": "queries_train.jsonl",
-      "sha256": "e27163f5c28debaffe69726913fe74b10d413eae477a0297a404119fe4ae0104"
+      "sha256": "5559b5bf6c31208064321931e76243ae7c22feea854bb65c7b4eb02deecd2051"
     },
     "queries_validation.jsonl": {
-      "bytes": 98335,
+      "bytes": 584420,
       "path": "queries_validation.jsonl",
-      "sha256": "95d797bce706312769b4c37e811415c6673f40273419415ca6fbfae873c67c1c"
+      "sha256": "4dd031d966bd9e0df31aa95de887e6694b2555f28ae965912c831d4d1574290d"
     },
     "rejected_near_duplicates.jsonl": {
       "bytes": 0,
@@ -53,9 +53,9 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "skills.jsonl": {
-      "bytes": 215490,
+      "bytes": 215340,
       "path": "skills.jsonl",
-      "sha256": "bce9b0e7553ecf92ebf1f108706054f96274d9ce9052133224ef18dbbac77104"
+      "sha256": "8f7f1919504811b04b3169aea47cb78952b9067f7667c5dea5efd6bb45f8e99b"
     }
   },
   "candidate_count": 301,
@@ -65,31 +65,32 @@
   "coverage_repair_skill_count": 0,
   "coverage_repair_workflow_count": 0,
   "coverage_repair_workflow_ids": [],
-  "created_at": "2026-07-24T02:50:21.343942Z",
-  "cross_domain_query_count": 3734,
-  "final_query_count": 4284,
+  "created_at": "2026-07-24T07:09:38.527137Z",
+  "cross_domain_query_count": 30954,
+  "final_query_count": 34259,
   "format_version": 1,
-  "generated_query_count": 3090,
-  "mean_train_positives_per_covered_skill": 19.92691029900332,
-  "min_train_positives_per_covered_skill": 10,
-  "min_train_positives_per_skill_required": 10,
+  "generated_query_count": 26265,
+  "mean_train_positives_per_covered_skill": 136.9435215946844,
+  "min_augmented_train_queries_required": 26653,
+  "min_train_positives_per_covered_skill": 100,
+  "min_train_positives_per_skill_required": 100,
   "multiskill_train_positive_skill_count": 301,
   "near_duplicate_rejection_count": 0,
-  "reviewed_query_count": 3090,
+  "reviewed_query_count": 26265,
   "seed": 20260720,
   "semantic_split_query_counts": {
-    "test": 73,
-    "train": 1607,
-    "validation": 93
+    "test": 631,
+    "train": 12812,
+    "validation": 530
   },
   "single_skill_alignment": {
     "accepted_candidate_count": 301,
-    "accepted_query_count": 1524,
+    "accepted_query_count": 5456,
     "candidate_count": 301,
-    "generated_query_count": 1535,
-    "mean_queries_per_skill": 5.06312292358804,
-    "min_queries_per_skill": 5,
-    "min_queries_per_skill_required": 5
+    "generated_query_count": 5568,
+    "mean_queries_per_skill": 18.12624584717608,
+    "min_queries_per_skill": 15,
+    "min_queries_per_skill_required": 15
   },
   "skills_below_min_train_positives": {},
   "skills_below_min_train_positives_count": 0,
@@ -99,109 +100,113 @@
   "skills_without_train_positive_ids": [],
   "split_domain_counts": {
     "test": {
-      "agent_system_automation": 3,
-      "business_operations": 3,
-      "communication": 9,
-      "data_analysis": 7,
-      "documents_office": 21,
-      "education_knowledge": 5,
-      "files_knowledge_memory": 11,
-      "finance_investment": 8,
-      "health_fitness": 16,
-      "media_audio_video": 9,
-      "media_image_design": 14,
-      "news_research": 8,
-      "productivity_planning": 7,
-      "security_privacy": 6,
-      "shopping_food": 14,
-      "social_content": 9,
-      "software_development": 17,
-      "travel_local": 3
+      "agent_system_automation": 58,
+      "business_operations": 96,
+      "communication": 79,
+      "data_analysis": 64,
+      "documents_office": 172,
+      "education_knowledge": 82,
+      "files_knowledge_memory": 90,
+      "finance_investment": 70,
+      "health_fitness": 37,
+      "media_audio_video": 118,
+      "media_image_design": 129,
+      "news_research": 127,
+      "productivity_planning": 73,
+      "security_privacy": 30,
+      "shopping_food": 28,
+      "smart_home_iot": 12,
+      "social_content": 109,
+      "software_development": 80,
+      "travel_local": 35,
+      "weather_environment": 3
     },
     "train": {
-      "agent_system_automation": 367,
-      "business_operations": 483,
-      "communication": 619,
-      "data_analysis": 225,
-      "documents_office": 1240,
-      "education_knowledge": 459,
-      "files_knowledge_memory": 745,
-      "finance_investment": 355,
-      "health_fitness": 390,
-      "media_audio_video": 367,
-      "media_image_design": 637,
-      "news_research": 789,
-      "productivity_planning": 570,
-      "security_privacy": 133,
-      "shopping_food": 227,
-      "smart_home_iot": 122,
-      "social_content": 397,
-      "software_development": 503,
-      "travel_local": 227,
-      "weather_environment": 53
+      "agent_system_automation": 2817,
+      "business_operations": 3910,
+      "communication": 3753,
+      "data_analysis": 2747,
+      "documents_office": 8302,
+      "education_knowledge": 4045,
+      "files_knowledge_memory": 5417,
+      "finance_investment": 3862,
+      "health_fitness": 2096,
+      "media_audio_video": 4792,
+      "media_image_design": 7340,
+      "news_research": 5892,
+      "productivity_planning": 3710,
+      "security_privacy": 1336,
+      "shopping_food": 2168,
+      "smart_home_iot": 671,
+      "social_content": 4448,
+      "software_development": 5185,
+      "travel_local": 2944,
+      "weather_environment": 744
     },
     "validation": {
-      "agent_system_automation": 11,
-      "business_operations": 9,
-      "communication": 23,
-      "data_analysis": 9,
-      "documents_office": 28,
-      "education_knowledge": 6,
-      "files_knowledge_memory": 6,
-      "finance_investment": 11,
-      "health_fitness": 9,
-      "media_audio_video": 7,
-      "media_image_design": 12,
-      "news_research": 13,
-      "productivity_planning": 19,
-      "shopping_food": 5,
-      "smart_home_iot": 4,
-      "social_content": 7,
-      "software_development": 4,
-      "travel_local": 12
+      "agent_system_automation": 34,
+      "business_operations": 77,
+      "communication": 73,
+      "data_analysis": 57,
+      "documents_office": 178,
+      "education_knowledge": 51,
+      "files_knowledge_memory": 107,
+      "finance_investment": 62,
+      "health_fitness": 43,
+      "media_audio_video": 71,
+      "media_image_design": 97,
+      "news_research": 84,
+      "productivity_planning": 71,
+      "security_privacy": 7,
+      "shopping_food": 32,
+      "smart_home_iot": 1,
+      "social_content": 89,
+      "software_development": 81,
+      "travel_local": 25,
+      "weather_environment": 13
     }
   },
   "split_qrel_counts": {
-    "test": 209,
-    "train": 12016,
-    "validation": 246
+    "test": 1850,
+    "train": 96616,
+    "validation": 1533
   },
   "split_query_counts": {
-    "test": 73,
-    "train": 4118,
-    "validation": 93
+    "test": 631,
+    "train": 33098,
+    "validation": 530
   },
   "split_target_count_distribution": {
     "test": {
-      "2": 20,
-      "3": 43,
-      "4": 10
+      "2": 225,
+      "3": 224,
+      "4": 182
     },
     "train": {
-      "2": 1406,
-      "3": 1644,
-      "4": 1068
+      "2": 10676,
+      "3": 14424,
+      "4": 7998
     },
     "validation": {
-      "2": 55,
-      "3": 16,
-      "4": 22
+      "2": 206,
+      "3": 175,
+      "4": 149
     }
   },
   "target_count_distribution": {
-    "2": 1481,
-    "3": 1703,
-    "4": 1100
+    "2": 11107,
+    "3": 14823,
+    "4": 8329
   },
   "target_order_augmentation": {
     "actual_variants_distribution": {
-      "2": 703,
-      "3": 904
+      "2": 5338,
+      "3": 7474
     },
-    "augmentation_factor": 2.5625388923459864,
-    "augmented_train_query_count": 4118,
+    "augmentation_factor": 2.5833593506088044,
+    "augmented_train_query_count": 33098,
     "requested_variants_per_query": 3,
-    "semantic_train_query_count": 1607
+    "semantic_train_query_count": 12812
   },
   "train_positive_skill_count": 301
 }

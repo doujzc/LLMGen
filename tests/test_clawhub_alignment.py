@@ -52,6 +52,20 @@ def test_single_skill_variant_allows_short_mobile_query_and_file_format() -> Non
     assert document["query"] == "把这个 DOCX 转成 PDF"
 
 
+def test_single_skill_variant_ignores_numeric_payload_in_language_ratio() -> None:
+    query = (
+        "帮我精确计算 "
+        "1234567890123456789012345678901234567890 "
+        "乘以 9876543210987654321098765432109876543210"
+    )
+    row = _validate_variant(
+        {"query": query, "evidence": "精确计算"},
+        _profile("large-number-calculation"),
+        0,
+    )
+    assert row["query"] == query
+
+
 def test_single_skill_variant_rejects_opaque_slug() -> None:
     with pytest.raises(DatasetBuildError, match="leaks a candidate identifier"):
         _validate_variant(

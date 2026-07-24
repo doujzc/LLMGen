@@ -28,19 +28,22 @@ export REVIEW_MODEL="${REVIEW_MODEL:-GLM-5.2}"
 export API_WORKERS="${API_WORKERS:-12}"
 
 export CATALOG_PATH="${CATALOG_PATH:-data_light/catalog.jsonl}"
-export DATA_WORK_DIR="${DATA_WORK_DIR:-data_light/work/qwen37-plus-glm52-v2}"
+export DATA_WORK_DIR="${DATA_WORK_DIR:-data_light/work/qwen37-plus-glm52-v3-one-epoch}"
 export FINAL_DIR="${FINAL_DIR:-data_light/final}"
 export EXPECTED_CANDIDATES="${EXPECTED_CANDIDATES:-$(wc -l < "$CATALOG_PATH")}"
 
-# Qwen-generated, independently reviewed curriculum: first teach every
-# candidate directly, then learn diverse explicit/implicit 2-4-skill routing.
-export WORKFLOWS_PER_SKILL="${WORKFLOWS_PER_SKILL:-3}"
+# One epoch exposes each light candidate to approximately as many ordered
+# retrieval sequences as the historical 568-candidate ClawHub run did in
+# fifteen epochs. Recompute the floor if the light catalog size changes.
+ONE_EPOCH_TRAIN_FLOOR=$(( (3353 * 15 * EXPECTED_CANDIDATES + 567) / 568 ))
+export WORKFLOWS_PER_SKILL="${WORKFLOWS_PER_SKILL:-24}"
 export QUERY_VARIANTS="${QUERY_VARIANTS:-3}"
 export IMPLICIT_VARIANTS="${IMPLICIT_VARIANTS:-1}"
 export TARGET_ORDER_VARIANTS="${TARGET_ORDER_VARIANTS:-3}"
-export ALIGNMENT_VARIANTS="${ALIGNMENT_VARIANTS:-5}"
-export MIN_ALIGNMENT_QUERIES_PER_SKILL="${MIN_ALIGNMENT_QUERIES_PER_SKILL:-5}"
-export MIN_TRAIN_POSITIVES_PER_SKILL="${MIN_TRAIN_POSITIVES_PER_SKILL:-10}"
+export ALIGNMENT_VARIANTS="${ALIGNMENT_VARIANTS:-16}"
+export MIN_ALIGNMENT_QUERIES_PER_SKILL="${MIN_ALIGNMENT_QUERIES_PER_SKILL:-15}"
+export MIN_TRAIN_POSITIVES_PER_SKILL="${MIN_TRAIN_POSITIVES_PER_SKILL:-100}"
+export MIN_AUGMENTED_TRAIN_QUERIES="${MIN_AUGMENTED_TRAIN_QUERIES:-$ONE_EPOCH_TRAIN_FLOOR}"
 export COVERAGE_ROUNDS="${COVERAGE_ROUNDS:-5}"
 export ALIGNMENT_COVERAGE_ROUNDS="${ALIGNMENT_COVERAGE_ROUNDS:-5}"
 export FINAL_ALIGNMENT_COVERAGE_ROUNDS="${FINAL_ALIGNMENT_COVERAGE_ROUNDS:-5}"

@@ -85,8 +85,8 @@ def _validate_variant(
     if any(value in lowered for value in ("调用工具", "使用skill", "目标候选", "路由训练", "用户希望")):
         raise DatasetBuildError("single-skill query contains dataset language")
     chinese = len(re.findall(r"[\u3400-\u9fff]", query))
-    meaningful = len(re.findall(r"[A-Za-z0-9\u3400-\u9fff]", query))
-    if chinese < 4 or chinese / max(1, meaningful) < 0.20:
+    linguistic = len(re.findall(r"[A-Za-z\u3400-\u9fff]", query))
+    if chinese < 4 or chinese / max(1, linguistic) < 0.20:
         raise DatasetBuildError("single-skill query is not natural Chinese")
     evidence = " ".join(str(raw.get("evidence") or "").split())
     if evidence not in query and ("..." in evidence or "…" in evidence):

@@ -18,11 +18,18 @@ bash scripts/run_light_data.sh
 当前 Qwen 版数据的质量门禁结果为 `pass`：
 
 - 候选：301，全部保留；
-- 单 Skill 对齐样本：1524，每个候选至少 5 条；
-- 多 Skill 语义样本：1773 条；目标顺序增强后为 train 4118、
-  validation 93、test 73；
-- 每个候选的 train 正例至少 10 条，平均 19.93 条；
-- 隐式意图样本占 37.5%，训练语义样本平均扩展为 2.56 个目标顺序变体。
+- 单 Skill 对齐样本：5456，每个候选至少 15 条；
+- 多 Skill 语义训练样本：12812 条；目标顺序增强后为 train 33098、
+  validation 530、test 631；
+- 每个候选的未增强 train 正例至少 100 条，平均 136.94 条；
+- 隐式意图样本占 38.1%，训练语义样本平均扩展为 2.58 个目标顺序变体。
+
+数据规模按历史 568-candidate ClawHub 配置折算：原配置为 3353 条 train
+序列训练 15 epochs；301 个候选的一轮等效下限为
+`ceil(3353 × 15 × 301 / 568) = 26653` 条。当前 33098 条 train
+序列超过该下限，因此 `configs/light.env` 默认将单 Skill Alignment 和多
+Skill Retrieval 都设为 1 epoch。Memorization 只学习固定 Skill code，
+仍沿用 10 epochs。
 
 两个候选 ID `hithink-iwencai` 与 `hithink-wencai-suite` 共用显示名
 “同花顺问财”；训练和解码均使用唯一 ID，因此不会合并标签。

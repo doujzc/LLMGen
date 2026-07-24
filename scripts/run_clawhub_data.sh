@@ -17,6 +17,7 @@ REVIEW_MODEL="${REVIEW_MODEL:-GLM-5.1}"
 API_WORKERS="${API_WORKERS:-16}"
 WORKFLOWS_PER_SKILL="${WORKFLOWS_PER_SKILL:-3}"
 MIN_TRAIN_POSITIVES_PER_SKILL="${MIN_TRAIN_POSITIVES_PER_SKILL:-10}"
+MIN_AUGMENTED_TRAIN_QUERIES="${MIN_AUGMENTED_TRAIN_QUERIES:-0}"
 COVERAGE_ROUNDS="${COVERAGE_ROUNDS:-5}"
 COVERAGE_OVERSAMPLE_FACTOR="${COVERAGE_OVERSAMPLE_FACTOR:-3.0}"
 SKIP_BASE_WORKFLOWS="${SKIP_BASE_WORKFLOWS:-0}"
@@ -139,6 +140,7 @@ stage "Stage 04: enforce coverage gate and export target-order variants"
   --alignment-queries "$ALIGNMENT_QUERIES_PATH" \
   --alignment-reviews "$ALIGNMENT_REVIEWS_PATH" \
   --min-train-positives-per-skill "$MIN_TRAIN_POSITIVES_PER_SKILL" \
+  --min-augmented-train-queries "$MIN_AUGMENTED_TRAIN_QUERIES" \
   --target-order-variants "$TARGET_ORDER_VARIANTS"
 stage "Stage 04a: export single-skill curriculum data"
 "$PYTHON" scripts/clawhub_data/04a_export_alignment.py \

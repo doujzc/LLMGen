@@ -148,6 +148,32 @@ def test_generated_variant_requires_exact_evidence_for_every_target() -> None:
         )
 
 
+def test_generated_variant_ignores_numeric_payload_in_language_ratio() -> None:
+    first_number = "1234567890" * 8
+    second_number = "9876543210" * 8
+    query = (
+        f"帮我查一下编号{first_number}对应的活动明天会不会下雨，"
+        f"再把订单号{second_number}写进下午三点的日历提醒里。"
+    )
+    row = _validate_generated_variant(
+        {
+            "intent_mode": "explicit",
+            "query": query,
+            "evidence": {
+                "@owner/weather": "明天会不会下雨",
+                "@owner/calendar": "写进下午三点的日历提醒里",
+            },
+            "implicit_skill_ids": [],
+            "implicit_rationales": {},
+        },
+        _workflow(),
+        0,
+        variants=3,
+        implicit_variants=1,
+    )
+    assert row["query"] == query
+
+
 def test_generated_variant_supports_strong_implicit_intent() -> None:
     raw = {
         "intent_mode": "implicit",
@@ -351,6 +377,27 @@ def test_export_does_not_replace_dataset_when_training_coverage_is_low(tmp_path:
     assert (output / "skills.jsonl").read_text() == sentinel
     report = json.loads((output / "coverage_failure.json").read_text())
     assert report["skills_below_min_train_positives_count"] == 2
+
+
+def test_export_does_not_replace_dataset_below_training_scale_gate(
+    tmp_path: Path,
+) -> None:
+    paths = _export_fixture(tmp_path)
+    output = tmp_path / "final"
+    output.mkdir()
+    sentinel = '{"skill_id":"existing"}\n'
+    (output / "skills.jsonl").write_text(sentinel)
+    with pytest.raises(DatasetBuildError, match="fewer than the required 5"):
+        export_training_dataset(
+            *paths,
+            output,
+            min_train_positives_per_skill=1,
+            min_augmented_train_queries=5,
+        )
+    assert (output / "skills.jsonl").read_text() == sentinel
+    report = json.loads((output / "training_scale_failure.json").read_text())
+    assert report["augmented_train_query_count"] == 4
+    assert report["min_augmented_train_queries_required"] == 5
 
 
 def test_coverage_backfill_targets_undercovered_candidates_idempotently(tmp_path: Path) -> None:

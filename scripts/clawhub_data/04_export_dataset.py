@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20260720)
     parser.add_argument("--min-train-positives-per-skill", type=int, default=10)
     parser.add_argument(
+        "--min-augmented-train-queries",
+        type=int,
+        default=0,
+        help="Fail before replacing the dataset when the augmented train split is smaller.",
+    )
+    parser.add_argument(
         "--target-order-variants",
         type=int,
         default=3,
@@ -42,6 +48,7 @@ def main() -> None:
         args.output_dir,
         seed=args.seed,
         min_train_positives_per_skill=args.min_train_positives_per_skill,
+        min_augmented_train_queries=args.min_augmented_train_queries,
         target_order_variants=args.target_order_variants,
         alignment_queries_path=args.alignment_queries,
         alignment_reviews_path=args.alignment_reviews,

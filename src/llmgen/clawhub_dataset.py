@@ -986,8 +986,8 @@ def _validate_generated_variant(
     if any(str(target["skill_id"]).casefold() in lowered for target in workflow["targets"]):
         raise DatasetBuildError("query leaks a target skill_id")
     chinese = len(re.findall(r"[\u3400-\u9fff]", query))
-    meaningful = len(re.findall(r"[A-Za-z0-9\u3400-\u9fff]", query))
-    if chinese < 12 or chinese / max(1, meaningful) < 0.45:
+    linguistic = len(re.findall(r"[A-Za-z\u3400-\u9fff]", query))
+    if chinese < 12 or chinese / max(1, linguistic) < 0.45:
         raise DatasetBuildError("query is not predominantly natural Chinese")
     if query.startswith(("用户", "该用户", "请求：", "Query")):
         raise DatasetBuildError("query is written as a dataset description")
@@ -2047,6 +2047,7 @@ def export_training_dataset(
     *,
     seed: int = 20260720,
     min_train_positives_per_skill: int = 10,
+    min_augmented_train_queries: int = 0,
     target_order_variants: int = 3,
     alignment_queries_path: Path | None = None,
     alignment_reviews_path: Path | None = None,
@@ -2068,6 +2069,8 @@ def export_training_dataset(
         raise DatasetBuildError("review/query counts disagree")
     if min_train_positives_per_skill < 1:
         raise DatasetBuildError("min_train_positives_per_skill must be positive")
+    if min_augmented_train_queries < 0:
+        raise DatasetBuildError("min_augmented_train_queries cannot be negative")
     if target_order_variants < 1:
         raise DatasetBuildError("target_order_variants must be positive")
     accepted = [row for row in queries if bool(reviews_by_id[str(row["query_id"])]["pass"])]
@@ -2236,6 +2239,27 @@ def export_training_dataset(
         variants=target_order_variants,
         seed=seed,
     )
+    training_scale_failure_path = output_dir / "training_scale_failure.json"
+    if len(split_rows["train"]) < min_augmented_train_queries:
+        atomic_json(
+            training_scale_failure_path,
+            {
+                "created_at": utc_now(),
+                "candidate_count": len(candidate_ids),
+                "min_augmented_train_queries_required": (
+                    min_augmented_train_queries
+                ),
+                "augmented_train_query_count": len(split_rows["train"]),
+                "semantic_train_query_count": len(semantic_train_rows),
+                "target_order_variants": target_order_variants,
+            },
+        )
+        raise DatasetBuildError(
+            "augmented train data has "
+            f"{len(split_rows['train'])} queries, fewer than the required "
+            f"{min_augmented_train_queries}; see {training_scale_failure_path}"
+        )
+    training_scale_failure_path.unlink(missing_ok=True)
 
     atomic_jsonl(output_dir / "skills.jsonl", candidate_rows)
     audit_rows: list[dict[str, Any]] = []
@@ -2331,6 +2355,7 @@ def export_training_dataset(
             skills_without_multiskill_train_positives
         ),
         "min_train_positives_per_skill_required": min_train_positives_per_skill,
+        "min_augmented_train_queries_required": min_augmented_train_queries,
         "skills_below_min_train_positives_count": len(undercovered_skills),
         "skills_below_min_train_positives": undercovered_skills,
         "min_train_positives_per_covered_skill": min(combined_positive_counts.values(), default=0),

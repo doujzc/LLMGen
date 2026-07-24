@@ -122,6 +122,15 @@ def audit_training_dataset(
             position_coverages.append(len(observed) / denominator)
 
     required = int(manifest.get("min_train_positives_per_skill_required", 1))
+    required_augmented_train_queries = int(
+        manifest.get("min_augmented_train_queries_required", 0)
+    )
+    if len(split_rows["train"]) < required_augmented_train_queries:
+        raise DatasetBuildError(
+            "augmented train data has "
+            f"{len(split_rows['train'])} queries, fewer than the required "
+            f"{required_augmented_train_queries}"
+        )
     combined_positive_counts = semantic_positive_counts + alignment_counts
     undercovered = {
         skill_id: combined_positive_counts[skill_id]
@@ -157,6 +166,9 @@ def audit_training_dataset(
         },
         "target_order": {
             "augmented_train_query_count": len(split_rows["train"]),
+            "minimum_augmented_train_queries_required": (
+                required_augmented_train_queries
+            ),
             "augmentation_factor": len(split_rows["train"]) / len(groups) if groups else 0.0,
             "variant_count_distribution": dict(sorted(variant_count_distribution.items())),
             "mean_target_position_coverage": (
