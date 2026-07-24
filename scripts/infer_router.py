@@ -35,6 +35,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "Select every Agent Skill needed for the user request in execution order. "
     "Output one hierarchical skill code per line, with no other text."
 )
+DECODING_MODES = ("greedy", "beam_search")
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +70,21 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         help="Safety cap; EOS may stop generation after any complete path.",
+    )
+    parser.add_argument(
+        "--decoding-mode",
+        choices=DECODING_MODES,
+        default="greedy",
+        help=(
+            "Select the best token at each step (greedy) or search over complete "
+            "autoregressive multi-path sequences (beam_search)."
+        ),
+    )
+    parser.add_argument(
+        "--num-beams",
+        type=int,
+        default=4,
+        help="Beam width for --decoding-mode beam_search; ignored by greedy decoding.",
     )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--cutoffs", type=int, nargs="+", default=(1, 5, 10))
@@ -333,6 +349,28 @@ def _chunks(rows: list[dict[str, Any]], size: int):
         yield rows[start : start + size]
 
 
+def _resolve_decoding(args: argparse.Namespace) -> tuple[str, int]:
+    """Return the normalized decoding mode and effective beam width."""
+
+    mode = getattr(args, "decoding_mode", "greedy")
+    if mode not in DECODING_MODES:
+        raise RouterDataError(
+            f"decoding_mode must be one of {', '.join(DECODING_MODES)}"
+        )
+    raw_num_beams = getattr(args, "num_beams", 1)
+    if isinstance(raw_num_beams, bool):
+        raise RouterDataError("num_beams must be an integer")
+    try:
+        num_beams = int(raw_num_beams)
+    except (TypeError, ValueError) as exc:
+        raise RouterDataError("num_beams must be an integer") from exc
+    if num_beams < 1:
+        raise RouterDataError("num_beams must be positive")
+    if mode == "beam_search" and num_beams < 2:
+        raise RouterDataError("beam_search requires num_beams >= 2")
+    return mode, num_beams if mode == "beam_search" else 1
+
+
 def _generate_batch(
     *,
     batch: list[dict[str, Any]],
@@ -367,28 +405,46 @@ def _generate_batch(
         + (trie.max_paths - 1) * len(trie.separator_token_ids)
         + 1
     )
+    decoding_mode, num_beams = _resolve_decoding(args)
+    generation_kwargs: dict[str, Any] = {
+        "do_sample": False,
+        "num_beams": num_beams,
+        # Beam search ranks complete newline-delimited multi-path sequences.
+        # Candidate Top K remains a separate post-decoding bucket expansion.
+        "num_return_sequences": 1,
+        "max_new_tokens": max_new_tokens,
+        "min_new_tokens": trie.num_levels,
+        "eos_token_id": trie.eos_token_id,
+        "pad_token_id": int(tokenizer.pad_token_id),
+        "logits_processor": LogitsProcessorList([processor]),
+        # Training checkpoints may persist use_cache=False from gradient
+        # checkpointing; decoding should use the KV cache, especially for beams.
+        "use_cache": True,
+        "renormalize_logits": True,
+        "return_dict_in_generate": True,
+        "output_scores": True,
+    }
+    if decoding_mode == "beam_search":
+        generation_kwargs["early_stopping"] = True
     with torch.inference_mode():
         generated = model.generate(
             **encoded,
-            do_sample=False,
-            num_beams=1,
-            num_return_sequences=1,
-            max_new_tokens=max_new_tokens,
-            min_new_tokens=trie.num_levels,
-            eos_token_id=trie.eos_token_id,
-            pad_token_id=int(tokenizer.pad_token_id),
-            logits_processor=LogitsProcessorList([processor]),
-            return_dict_in_generate=True,
-            output_scores=True,
+            **generation_kwargs,
         )
 
     transition_scores = None
     compute_transition_scores = getattr(model, "compute_transition_scores", None)
     if callable(compute_transition_scores):
+        transition_kwargs: dict[str, Any] = {"normalize_logits": True}
+        beam_indices = getattr(generated, "beam_indices", None)
+        if beam_indices is not None:
+            # Beam rows are reordered at every step. Passing the ancestry map is
+            # required to recover scores for the selected final sequence.
+            transition_kwargs["beam_indices"] = beam_indices
         transition_scores = compute_transition_scores(
             generated.sequences,
             generated.scores,
-            normalize_logits=True,
+            **transition_kwargs,
         )
     results: list[dict[str, Any]] = []
     for batch_index, query_row in enumerate(batch):
@@ -429,6 +485,10 @@ def _generate_batch(
                 "generated_text": CODE_PATH_SEPARATOR.join(
                     path["code_text"] for path in path_payloads
                 ),
+                "decoding": {
+                    "mode": decoding_mode,
+                    "num_beams": num_beams,
+                },
                 "paths": path_payloads,
                 "candidates": candidates,
             }
@@ -442,6 +502,7 @@ def main() -> None:
         raise RouterDataError("batch_size and max_code_paths must be positive")
     if args.top_k < 1:
         raise RouterDataError("top_k must be positive")
+    decoding_mode, num_beams = _resolve_decoding(args)
     if any(cutoff < 1 for cutoff in args.cutoffs):
         raise RouterDataError("metric cutoffs must be positive")
     if args.qrels and args.top_k < max(args.cutoffs):
@@ -534,6 +595,8 @@ def main() -> None:
                 "mode": "autoregressive_multi_path",
                 "separator": CODE_PATH_SEPARATOR,
                 "max_code_paths": trie.max_paths,
+                "decoding_mode": decoding_mode,
+                "num_beams": num_beams,
             },
             "cutoffs": sorted(set(args.cutoffs)),
             "metrics": aggregate_retrieval_metrics(per_query),

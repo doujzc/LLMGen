@@ -4,8 +4,8 @@
 `data/clawhub_training/final/` 中原有的 1000-candidate 数据。
 
 `candidates.jsonl` 是唯一候选来源，每行必须包含非空的 `id`、`name` 和
-`desc`。生成脚本使用 `~/deepseek_api_key.txt` 中的单行密钥，通过
-`deepseek-v4-flash` 完成能力画像、样本生成和复核：
+`desc`。生成脚本默认读取 `~/llm_api.txt` 中的 OpenAI-compatible 接口配置，
+使用 `Qwen3.7-Plus` 完成能力画像和样本生成，再由独立的 `GLM-5.2` 复核：
 
 ```bash
 bash scripts/run_light_data.sh
@@ -15,13 +15,14 @@ bash scripts/run_light_data.sh
 样本，并对训练集目标顺序做自回归顺序增强。断点保存在 `data_light/work/`，
 最终可训练文件写入 `data_light/final/`；重复执行会从断点续跑。
 
-当前数据由 DeepSeek V4 Flash 生成并复核，质量门禁结果为 `pass`：
+当前 Qwen 版数据的质量门禁结果为 `pass`：
 
 - 候选：301，全部保留；
-- 单 Skill 对齐样本：941，每个候选至少 3 条；
-- 多 Skill 样本：train 1838、validation 66、test 48；
-- 每个候选的 train 正例至少 4 条，隐式意图样本占 52.0%；
-- train 中每条语义样本包含 2 个目标顺序变体。
+- 单 Skill 对齐样本：1524，每个候选至少 5 条；
+- 多 Skill 语义样本：1773 条；目标顺序增强后为 train 4118、
+  validation 93、test 73；
+- 每个候选的 train 正例至少 10 条，平均 19.93 条；
+- 隐式意图样本占 37.5%，训练语义样本平均扩展为 2.56 个目标顺序变体。
 
 两个候选 ID `hithink-iwencai` 与 `hithink-wencai-suite` 共用显示名
 “同花顺问财”；训练和解码均使用唯一 ID，因此不会合并标签。

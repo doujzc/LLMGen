@@ -30,7 +30,7 @@
             <h1>输入真实请求，查看模型选择的 Skills。</h1>
             <p class="hero-copy">
               输入个人手机 Agent 风格的复杂请求。模型将以完整自回归方式生成多条两层 code，
-              再解码为原始候选 Skill。
+              可在 Greedy 与 Beam Search 间切换，再解码为原始候选 Skill。
             </p>
           </div>
           <dl id="model-stats" class="stats" aria-label="模型信息">
@@ -77,6 +77,21 @@
                   <option value="50">50</option>
                 </select>
               </label>
+              <label>
+                <span>解码方式</span>
+                <select id="decoding-mode" name="decoding_mode">
+                  <option value="greedy" selected>Greedy</option>
+                  <option value="beam_search">Beam Search</option>
+                </select>
+              </label>
+              <label id="beam-control" class="disabled">
+                <span>Beam 宽度</span>
+                <select id="num-beams" name="num_beams" disabled>
+                  <option value="2">2</option>
+                  <option value="4" selected>4</option>
+                  <option value="8">8</option>
+                </select>
+              </label>
               <span class="shortcut">⌘ / Ctrl + Enter</span>
               <button id="submit-button" class="primary-button" type="submit">
                 <span class="button-label">运行路由</span>
@@ -105,7 +120,10 @@
                   <span class="step">02</span>
                   <h2>模型输出</h2>
                 </div>
-                <div class="latency"><span>端到端时延</span><strong id="latency">—</strong></div>
+                <div class="result-meta">
+                  <span id="decode-summary" class="decode-pill">Greedy</span>
+                  <div class="latency"><span>端到端时延</span><strong id="latency">—</strong></div>
+                </div>
               </div>
 
               <div class="output-block">
@@ -165,7 +183,7 @@
 
       <footer>
         <span>LLMGen</span>
-        <span>Constrained autoregressive decoding · Local debugging only</span>
+        <span>Constrained Greedy / Beam Search decoding · Local debugging only</span>
       </footer>
     </div>
 

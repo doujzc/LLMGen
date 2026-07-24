@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from http.server import ThreadingHTTPServer
 import json
 import threading
 from urllib.request import Request, urlopen
 
+import pytest
+
+from llmgen.router import RouterDataError
 from web_server.server import handler_class
 from web_server.runtime import RouterRuntime
 
@@ -16,6 +20,8 @@ class StubRuntime:
             "num_skills": 2,
             "num_paths": 2,
             "num_levels": 2,
+            "max_code_paths": 8,
+            "max_num_beams": 8,
         }
 
     def catalog(self, query, limit):
@@ -33,13 +39,26 @@ class StubRuntime:
             "code_text": "<L1_0><L2_0>",
         }
 
-    def infer(self, query, *, max_code_paths, top_k):
+    def infer(
+        self,
+        query,
+        *,
+        max_code_paths,
+        top_k,
+        decoding_mode,
+        num_beams,
+    ):
         return {
             "query": query,
             "generated_text": "<L1_0><L2_0>",
             "paths": [],
             "candidates": [],
-            "request": {"max_code_paths": max_code_paths, "top_k": top_k},
+            "request": {
+                "max_code_paths": max_code_paths,
+                "top_k": top_k,
+                "decoding_mode": decoding_mode,
+                "num_beams": num_beams,
+            },
         }
 
 
@@ -73,6 +92,20 @@ def test_runtime_catalog_uses_the_only_candidate_set() -> None:
     assert {row["skill_id"] for row in result["skills"]} == {"s1", "s2"}
 
 
+def test_runtime_rejects_beam_width_above_server_limit() -> None:
+    runtime = RouterRuntime.__new__(RouterRuntime)
+    runtime.max_code_paths = 8
+    runtime.max_num_beams = 8
+    runtime.args = Namespace()
+
+    with pytest.raises(RouterDataError, match="between 2 and 8"):
+        runtime.infer(
+            "帮我查天气",
+            decoding_mode="beam_search",
+            num_beams=16,
+        )
+
+
 def test_web_api_health_catalog_and_inference() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class(StubRuntime()))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -91,10 +124,28 @@ def test_web_api_health_catalog_and_inference() -> None:
 
         _, result = _request(
             base + "/api/infer",
-            payload={"query": "帮我查天气", "max_code_paths": 3, "top_k": 7},
+            payload={
+                "query": "帮我查天气",
+                "max_code_paths": 3,
+                "top_k": 7,
+                "decoding_mode": "beam_search",
+                "num_beams": 4,
+            },
         )
         assert result["query"] == "帮我查天气"
-        assert result["request"] == {"max_code_paths": 3, "top_k": 7}
+        assert result["request"] == {
+            "max_code_paths": 3,
+            "top_k": 7,
+            "decoding_mode": "beam_search",
+            "num_beams": 4,
+        }
+
+        _, greedy = _request(
+            base + "/api/infer",
+            payload={"query": "帮我查天气"},
+        )
+        assert greedy["request"]["decoding_mode"] == "greedy"
+        assert greedy["request"]["num_beams"] == 1
     finally:
         server.shutdown()
         server.server_close()

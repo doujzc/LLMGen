@@ -22,6 +22,7 @@ bash scripts/router_pipeline.sh light web \
 --host 127.0.0.1               监听地址
 --port 8080                    监听端口
 --max-code-paths 8             单次生成路径的服务端上限
+--max-num-beams 8              Web 请求允许的最大 Beam 宽度
 --max-input-length N           可选 prompt token 上限
 ```
 
@@ -31,7 +32,12 @@ JSON API：
 - `GET /api/catalog?q=weather&limit=20`
 - `GET /api/skill?id=@owner/skill-name`
 - `POST /api/infer`，body 为
-  `{"query":"...","max_code_paths":4,"top_k":10}`
+  `{"query":"...","max_code_paths":4,"top_k":10,"decoding_mode":"greedy"}`
+
+Beam Search 会搜索完整的多 Skill 自回归输出序列，而不是把不同 beam 当作多个
+Skill。启用方式为
+`{"query":"...","decoding_mode":"beam_search","num_beams":4}`；Beam 宽度越大，
+时延和显存开销越高。默认仍为 Greedy。
 
 为已训练模型生成自包含解码文件：
 

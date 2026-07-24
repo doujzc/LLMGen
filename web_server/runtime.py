@@ -20,7 +20,11 @@ from llmgen.router_bundle import (
     DECODE_MAP_FILENAME,
     load_skill_decode_map,
 )
-from scripts.infer_router import _generate_batch, _load_model_and_tokenizer
+from scripts.infer_router import (
+    _generate_batch,
+    _load_model_and_tokenizer,
+    _resolve_decoding,
+)
 
 
 class RouterRuntime:
@@ -36,9 +40,12 @@ class RouterRuntime:
         max_code_paths: int,
         max_input_length: int | None,
         trust_remote_code: bool,
+        max_num_beams: int = 8,
     ) -> None:
         if max_code_paths < 1:
             raise RouterDataError("max_code_paths must be positive")
+        if max_num_beams < 2:
+            raise RouterDataError("max_num_beams must be at least 2")
         self.model_dir = Path(model_dir).expanduser().resolve()
         if not self.model_dir.is_dir():
             raise RouterDataError(f"model directory does not exist: {self.model_dir}")
@@ -58,6 +65,7 @@ class RouterRuntime:
             for path in self.decode_map["paths"]
         }
         self.max_code_paths = max_code_paths
+        self.max_num_beams = max_num_beams
         self._lock = threading.Lock()
         self.args = Namespace(
             model_name_or_path=str(self.model_dir),
@@ -73,6 +81,8 @@ class RouterRuntime:
                 "Select every Agent Skill needed for the user request in execution "
                 "order. Output one hierarchical skill code per line, with no other text."
             ),
+            decoding_mode="greedy",
+            num_beams=1,
             top_k=20,
             _num_levels=int(self.decode_map["num_levels"]),
         )
@@ -117,6 +127,7 @@ class RouterRuntime:
             "num_paths": int(self.decode_map["num_paths"]),
             "num_levels": int(self.decode_map["num_levels"]),
             "max_code_paths": self.max_code_paths,
+            "max_num_beams": self.max_num_beams,
         }
 
     def catalog(
@@ -161,6 +172,8 @@ class RouterRuntime:
         *,
         max_code_paths: int = 4,
         top_k: int = 10,
+        decoding_mode: str = "greedy",
+        num_beams: int = 4,
     ) -> dict[str, Any]:
         query = query.strip()
         if not query:
@@ -176,6 +189,13 @@ class RouterRuntime:
         request_args = Namespace(**vars(self.args))
         request_args.max_code_paths = max_code_paths
         request_args.top_k = top_k
+        request_args.decoding_mode = decoding_mode
+        request_args.num_beams = num_beams
+        effective_mode, effective_num_beams = _resolve_decoding(request_args)
+        if effective_num_beams > self.max_num_beams:
+            raise RouterDataError(
+                f"num_beams must be between 2 and {self.max_num_beams}"
+            )
         started = time.perf_counter()
         with self._lock:
             result = _generate_batch(
@@ -200,5 +220,7 @@ class RouterRuntime:
         result["request"] = {
             "max_code_paths": max_code_paths,
             "top_k": top_k,
+            "decoding_mode": effective_mode,
+            "num_beams": effective_num_beams,
         }
         return result

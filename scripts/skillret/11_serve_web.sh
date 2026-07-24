@@ -22,6 +22,7 @@ ARGS=(
   --device "$WEB_DEVICE"
   --dtype "${WEB_DTYPE:-$EVAL_DTYPE}"
   --max-code-paths "${WEB_MAX_CODE_PATHS:-$EVAL_MAX_CODE_PATHS}"
+  --max-num-beams "${WEB_MAX_NUM_BEAMS:-8}"
 )
 if [[ -n "${WEB_BASE_MODEL:-}" ]]; then
   ARGS+=(--base-model-name-or-path "$WEB_BASE_MODEL")

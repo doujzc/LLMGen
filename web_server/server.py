@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
         default="bfloat16",
     )
     parser.add_argument("--max-code-paths", type=int, default=8)
+    parser.add_argument(
+        "--max-num-beams",
+        type=int,
+        default=8,
+        help="Maximum Beam Search width accepted by the Web API.",
+    )
     parser.add_argument("--max-input-length", type=int)
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
@@ -119,10 +125,14 @@ def handler_class(runtime: RouterRuntime):
                 payload = json.loads(self.rfile.read(content_length))
                 if not isinstance(payload, dict):
                     raise ValueError("JSON body must be an object")
+                decoding_mode = str(payload.get("decoding_mode", "greedy"))
+                default_num_beams = 4 if decoding_mode == "beam_search" else 1
                 result = runtime.infer(
                     str(payload.get("query", "")),
                     max_code_paths=int(payload.get("max_code_paths", 4)),
                     top_k=int(payload.get("top_k", 10)),
+                    decoding_mode=decoding_mode,
+                    num_beams=int(payload.get("num_beams", default_num_beams)),
                 )
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -155,6 +165,7 @@ def main() -> None:
         max_code_paths=args.max_code_paths,
         max_input_length=args.max_input_length,
         trust_remote_code=args.trust_remote_code,
+        max_num_beams=args.max_num_beams,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler_class(runtime))
     print(

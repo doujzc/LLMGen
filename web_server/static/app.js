@@ -13,6 +13,9 @@ const queryInput = $("#query");
 const submitButton = $("#submit-button");
 const errorBox = $("#form-error");
 const skillDialog = $("#skill-dialog");
+const decodingMode = $("#decoding-mode");
+const numBeams = $("#num-beams");
+const beamControl = $("#beam-control");
 
 const exampleQuery =
   "我周五晚上到杭州，周日返程。帮我根据天气安排一条适合拍照的两日路线，订高铁和离景点近的酒店，把行程写进日历；如果下雨就调整成室内活动，并在每天出发前提醒我带对应物品。";
@@ -22,6 +25,12 @@ function textNode(tag, className, value) {
   if (className) node.className = className;
   node.textContent = value ?? "";
   return node;
+}
+
+function updateDecodingControls() {
+  const beamEnabled = decodingMode.value === "beam_search";
+  numBeams.disabled = !beamEnabled;
+  beamControl.classList.toggle("disabled", !beamEnabled);
 }
 
 async function jsonRequest(url, options = {}) {
@@ -62,6 +71,21 @@ async function loadHealth() {
       option.selected = value === Math.min(4, health.max_code_paths);
       maxPaths.append(option);
     }
+    const maxNumBeams = Math.max(2, Number(health.max_num_beams || 8));
+    const beamValues = [2, 4, 8, 16, 32, 64].filter(
+      (value) => value <= maxNumBeams,
+    );
+    if (!beamValues.includes(maxNumBeams)) beamValues.push(maxNumBeams);
+    beamValues.sort((left, right) => left - right);
+    numBeams.replaceChildren();
+    beamValues.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = String(value);
+      option.selected = value === (beamValues.includes(4) ? 4 : beamValues[0]);
+      numBeams.append(option);
+    });
+    updateDecodingControls();
   } catch (error) {
     status.className = "status failed";
     statusText.textContent = "模型连接失败";
@@ -135,6 +159,10 @@ function renderResult(result) {
   $("#result-panel").classList.remove("empty");
   state.hasResult = true;
   $("#latency").textContent = `${Number(result.latency_ms).toLocaleString()} ms`;
+  const mode = result.request?.decoding_mode || result.decoding?.mode || "greedy";
+  const beamWidth = result.request?.num_beams || result.decoding?.num_beams || 1;
+  $("#decode-summary").textContent =
+    mode === "beam_search" ? `Beam Search · ${beamWidth}` : "Greedy";
   $("#generated-text").textContent = result.generated_text || "(empty)";
   renderPaths(result.paths);
   renderCandidates(result.candidates);
@@ -156,6 +184,7 @@ async function runInference(event) {
   submitButton.disabled = true;
   $(".button-label").textContent = "推理中…";
   try {
+    const mode = decodingMode.value;
     const result = await jsonRequest("/api/infer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -163,6 +192,8 @@ async function runInference(event) {
         query,
         max_code_paths: Number($("#max-paths").value),
         top_k: Number($("#top-k").value),
+        decoding_mode: mode,
+        num_beams: mode === "beam_search" ? Number(numBeams.value) : 1,
       }),
     });
     renderResult(result);
@@ -257,6 +288,7 @@ $("#example-button").addEventListener("click", () => {
   queryInput.focus();
 });
 form.addEventListener("submit", runInference);
+decodingMode.addEventListener("change", updateDecodingControls);
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") form.requestSubmit();
 });

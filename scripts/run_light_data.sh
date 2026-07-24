@@ -21,31 +21,30 @@ stage "Light Stage 00: validate and import the self-contained candidate catalog"
   --output "${CATALOG_PATH:-data_light/catalog.jsonl}" \
   --report "${CATALOG_REPORT:-data_light/catalog_report.json}"
 
-export API_CONFIG="${API_CONFIG:-$HOME/deepseek_api_key.txt}"
-export API_BASE_URL="${API_BASE_URL:-https://api.deepseek.com}"
-export PROFILE_MODEL="${PROFILE_MODEL:-deepseek-v4-flash}"
-export GENERATION_MODEL="${GENERATION_MODEL:-deepseek-v4-flash}"
-export REVIEW_MODEL="${REVIEW_MODEL:-deepseek-v4-flash}"
+export API_CONFIG="${API_CONFIG:-$HOME/llm_api.txt}"
+export PROFILE_MODEL="${PROFILE_MODEL:-Qwen3.7-Plus}"
+export GENERATION_MODEL="${GENERATION_MODEL:-Qwen3.7-Plus}"
+export REVIEW_MODEL="${REVIEW_MODEL:-GLM-5.2}"
 export API_WORKERS="${API_WORKERS:-12}"
 
 export CATALOG_PATH="${CATALOG_PATH:-data_light/catalog.jsonl}"
-export DATA_WORK_DIR="${DATA_WORK_DIR:-data_light/work}"
+export DATA_WORK_DIR="${DATA_WORK_DIR:-data_light/work/qwen37-plus-glm52-v2}"
 export FINAL_DIR="${FINAL_DIR:-data_light/final}"
 export EXPECTED_CANDIDATES="${EXPECTED_CANDIDATES:-$(wc -l < "$CATALOG_PATH")}"
 
-# Lightweight, but still complete: three direct examples per candidate plus
-# reviewed 2/3-skill explicit/implicit workflows and deterministic order swaps.
-export WORKFLOWS_PER_SKILL="${WORKFLOWS_PER_SKILL:-2}"
-export QUERY_VARIANTS="${QUERY_VARIANTS:-2}"
+# Qwen-generated, independently reviewed curriculum: first teach every
+# candidate directly, then learn diverse explicit/implicit 2-4-skill routing.
+export WORKFLOWS_PER_SKILL="${WORKFLOWS_PER_SKILL:-3}"
+export QUERY_VARIANTS="${QUERY_VARIANTS:-3}"
 export IMPLICIT_VARIANTS="${IMPLICIT_VARIANTS:-1}"
-export TARGET_ORDER_VARIANTS="${TARGET_ORDER_VARIANTS:-2}"
-export ALIGNMENT_VARIANTS="${ALIGNMENT_VARIANTS:-3}"
-export MIN_ALIGNMENT_QUERIES_PER_SKILL="${MIN_ALIGNMENT_QUERIES_PER_SKILL:-3}"
-export MIN_TRAIN_POSITIVES_PER_SKILL="${MIN_TRAIN_POSITIVES_PER_SKILL:-4}"
-export COVERAGE_ROUNDS="${COVERAGE_ROUNDS:-3}"
-export ALIGNMENT_COVERAGE_ROUNDS="${ALIGNMENT_COVERAGE_ROUNDS:-3}"
-export FINAL_ALIGNMENT_COVERAGE_ROUNDS="${FINAL_ALIGNMENT_COVERAGE_ROUNDS:-3}"
-export COVERAGE_OVERSAMPLE_FACTOR="${COVERAGE_OVERSAMPLE_FACTOR:-2.0}"
+export TARGET_ORDER_VARIANTS="${TARGET_ORDER_VARIANTS:-3}"
+export ALIGNMENT_VARIANTS="${ALIGNMENT_VARIANTS:-5}"
+export MIN_ALIGNMENT_QUERIES_PER_SKILL="${MIN_ALIGNMENT_QUERIES_PER_SKILL:-5}"
+export MIN_TRAIN_POSITIVES_PER_SKILL="${MIN_TRAIN_POSITIVES_PER_SKILL:-10}"
+export COVERAGE_ROUNDS="${COVERAGE_ROUNDS:-5}"
+export ALIGNMENT_COVERAGE_ROUNDS="${ALIGNMENT_COVERAGE_ROUNDS:-5}"
+export FINAL_ALIGNMENT_COVERAGE_ROUNDS="${FINAL_ALIGNMENT_COVERAGE_ROUNDS:-5}"
+export COVERAGE_OVERSAMPLE_FACTOR="${COVERAGE_OVERSAMPLE_FACTOR:-3.0}"
 export APPLY_RECOVERY=0
 
 stage "Light Stages 01-05: generate, review, export, and validate"
