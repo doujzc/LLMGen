@@ -52,6 +52,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--registry", required=True, help="index/test_registry.json")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--queries", help="queries_test.jsonl")
+    source.add_argument(
+        "--query-txt",
+        help="UTF-8 text file containing one query per non-empty line.",
+    )
     source.add_argument("--query", help="One interactive query")
     parser.add_argument("--query-id", default="interactive")
     parser.add_argument("--qrels", help="qrels_test.jsonl; enables metrics")
@@ -107,6 +111,24 @@ def _load_registry(path: str | Path) -> dict[str, Any]:
 def _load_queries(args: argparse.Namespace) -> list[dict[str, Any]]:
     if args.query is not None:
         return [{"id": args.query_id, "query": args.query}]
+    query_txt = getattr(args, "query_txt", None)
+    if query_txt is not None:
+        rows = []
+        with Path(query_txt).open("r", encoding="utf-8-sig") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                query = raw_line.strip()
+                if not query:
+                    continue
+                rows.append(
+                    {
+                        "id": f"line-{line_number:06d}",
+                        "query": query,
+                        "source_line": line_number,
+                    }
+                )
+        if not rows:
+            raise RouterDataError("query TXT contains no non-empty lines")
+        return rows
     rows = read_jsonl(args.queries)
     normalized = []
     seen: set[str] = set()

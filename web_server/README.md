@@ -23,8 +23,14 @@ bash scripts/router_pipeline.sh light web \
 --port 8080                    监听端口
 --max-code-paths 8             单次生成路径的服务端上限
 --max-num-beams 8              Web 请求允许的最大 Beam 宽度
+--max-batch-queries 1000       单个 TXT 允许的最大 Query 数
+--max-batch-size 8             单次模型前向允许的最大 Query 数
 --max-input-length N           可选 prompt token 上限
 ```
+
+界面可切换到“批量 TXT”：文件中每个非空行作为一个 Query，空行会忽略，重复行
+和原始顺序会保留。运行期间按选择的模型 Batch Size 分批处理，完成后可逐条查看
+并下载 JSONL 结果。
 
 JSON API：
 
@@ -33,11 +39,17 @@ JSON API：
 - `GET /api/skill?id=@owner/skill-name`
 - `POST /api/infer`，body 为
   `{"query":"...","max_code_paths":4,"top_k":10,"decoding_mode":"greedy"}`
+- `POST /api/infer-batch`，body 为
+  `{"queries":["query 1","query 2"],"batch_size":2,"max_code_paths":4,"top_k":10}`
 
 Beam Search 会搜索完整的多 Skill 自回归输出序列，而不是把不同 beam 当作多个
 Skill。启用方式为
 `{"query":"...","decoding_mode":"beam_search","num_beams":4}`；Beam 宽度越大，
 时延和显存开销越高。默认仍为 Greedy。
+
+命令行批量推理也支持同一 TXT 格式，使用
+`python scripts/infer_router.py --query-txt queries.txt`；其余模型、索引及输出
+参数与 JSONL 推理相同。
 
 为已训练模型生成自包含解码文件：
 

@@ -3,6 +3,11 @@ const state = {
   catalogTimer: null,
   hasResult: false,
   skillCache: new Map(),
+  inputMode: "single",
+  batchRows: [],
+  batchFileName: "",
+  batchResults: [],
+  batchRun: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -16,6 +21,8 @@ const skillDialog = $("#skill-dialog");
 const decodingMode = $("#decoding-mode");
 const numBeams = $("#num-beams");
 const beamControl = $("#beam-control");
+const batchFile = $("#batch-file");
+const batchSize = $("#batch-size");
 
 const exampleQuery =
   "我周五晚上到杭州，周日返程。帮我根据天气安排一条适合拍照的两日路线，订高铁和离景点近的酒店，把行程写进日历；如果下雨就调整成室内活动，并在每天出发前提醒我带对应物品。";
@@ -31,6 +38,29 @@ function updateDecodingControls() {
   const beamEnabled = decodingMode.value === "beam_search";
   numBeams.disabled = !beamEnabled;
   beamControl.classList.toggle("disabled", !beamEnabled);
+}
+
+function setInputMode(mode) {
+  state.inputMode = mode;
+  const isBatch = mode === "batch";
+  $("#single-query-input").hidden = isBatch;
+  $("#batch-query-input").hidden = !isBatch;
+  $("#single-mode-button").classList.toggle("active", !isBatch);
+  $("#batch-mode-button").classList.toggle("active", isBatch);
+  $("#single-mode-button").setAttribute("aria-selected", String(!isBatch));
+  $("#batch-mode-button").setAttribute("aria-selected", String(isBatch));
+  $("#example-button").hidden = isBatch;
+  queryInput.required = !isBatch;
+  $(".button-label").textContent = isBatch ? "批量路由" : "运行路由";
+  clearError();
+}
+
+function batchSizeOptions(maximum) {
+  const values = [1, 2, 4, 8, 16, 32, 64].filter(
+    (value) => value <= maximum,
+  );
+  if (!values.includes(maximum)) values.push(maximum);
+  return values.sort((left, right) => left - right);
 }
 
 async function jsonRequest(url, options = {}) {
@@ -85,6 +115,17 @@ async function loadHealth() {
       option.selected = value === (beamValues.includes(4) ? 4 : beamValues[0]);
       numBeams.append(option);
     });
+    const maxBatchSize = Math.max(1, Number(health.max_batch_size || 8));
+    const availableBatchSizes = batchSizeOptions(maxBatchSize);
+    batchSize.replaceChildren();
+    availableBatchSizes.forEach((value) => {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = String(value);
+      option.selected =
+        value === (availableBatchSizes.includes(2) ? 2 : availableBatchSizes[0]);
+      batchSize.append(option);
+    });
     updateDecodingControls();
   } catch (error) {
     status.className = "status failed";
@@ -101,6 +142,57 @@ function showError(message) {
 function clearError() {
   errorBox.hidden = true;
   errorBox.textContent = "";
+}
+
+function parseQueryText(text) {
+  const rows = [];
+  text.replace(/^\uFEFF/, "").split(/\r?\n/).forEach((rawLine, index) => {
+    const query = rawLine.trim();
+    if (!query) return;
+    if (query.length > 20000) {
+      throw new Error(`第 ${index + 1} 行超过 20,000 个字符。`);
+    }
+    rows.push({ query, source_line: index + 1 });
+  });
+  return rows;
+}
+
+function renderBatchFile() {
+  $("#batch-file-meta").hidden = false;
+  $("#batch-file-name").textContent = state.batchFileName;
+  $("#batch-query-count").textContent = `${state.batchRows.length} queries`;
+  const preview = $("#batch-preview");
+  preview.replaceChildren();
+  state.batchRows.slice(0, 5).forEach((row) => {
+    preview.append(textNode("li", "", `L${row.source_line} · ${row.query}`));
+  });
+  if (state.batchRows.length > 5) {
+    preview.append(
+      textNode("li", "", `… 其余 ${state.batchRows.length - 5} 条`),
+    );
+  }
+}
+
+async function loadBatchFile() {
+  clearError();
+  const file = batchFile.files?.[0];
+  if (!file) return;
+  try {
+    const rows = parseQueryText(await file.text());
+    if (!rows.length) throw new Error("TXT 中没有非空 Query。");
+    const maximum = Number(state.health?.max_batch_queries || 1000);
+    if (rows.length > maximum) {
+      throw new Error(`TXT 包含 ${rows.length} 条 Query，服务上限为 ${maximum} 条。`);
+    }
+    state.batchRows = rows;
+    state.batchFileName = file.name;
+    renderBatchFile();
+  } catch (error) {
+    state.batchRows = [];
+    state.batchFileName = "";
+    $("#batch-file-meta").hidden = true;
+    showError(error.message);
+  }
 }
 
 function skillButton(skill, className = "skill-link") {
@@ -152,52 +244,179 @@ function renderCandidates(candidates) {
   });
 }
 
-function renderResult(result) {
+function generationOptions() {
+  const mode = decodingMode.value;
+  return {
+    max_code_paths: Number($("#max-paths").value),
+    top_k: Number($("#top-k").value),
+    decoding_mode: mode,
+    num_beams: mode === "beam_search" ? Number(numBeams.value) : 1,
+  };
+}
+
+function renderResult(result, { batch = false } = {}) {
   $("#empty-state").hidden = true;
   $("#loading-state").hidden = true;
   $("#results").hidden = false;
   $("#result-panel").classList.remove("empty");
   state.hasResult = true;
-  $("#latency").textContent = `${Number(result.latency_ms).toLocaleString()} ms`;
-  const mode = result.request?.decoding_mode || result.decoding?.mode || "greedy";
-  const beamWidth = result.request?.num_beams || result.decoding?.num_beams || 1;
+  const request = batch ? state.batchRun?.request : result.request;
+  const latency = batch ? state.batchRun?.latency_ms : result.latency_ms;
+  $("#latency-label").textContent = batch ? "批量总时延" : "端到端时延";
+  $("#latency").textContent =
+    latency === undefined ? "—" : `${Number(latency).toLocaleString()} ms`;
+  const mode = request?.decoding_mode || result.decoding?.mode || "greedy";
+  const beamWidth = request?.num_beams || result.decoding?.num_beams || 1;
   $("#decode-summary").textContent =
     mode === "beam_search" ? `Beam Search · ${beamWidth}` : "Greedy";
+  $("#result-query").textContent = result.query;
   $("#generated-text").textContent = result.generated_text || "(empty)";
   renderPaths(result.paths);
   renderCandidates(result.candidates);
   $("#raw-json").textContent = JSON.stringify(result, null, 2);
 }
 
-async function runInference(event) {
-  event.preventDefault();
-  clearError();
+function renderSingleResult(result) {
+  state.batchResults = [];
+  state.batchRun = null;
+  $("#batch-toolbar").hidden = true;
+  renderResult(result);
+}
+
+function selectBatchResult(index) {
+  const result = state.batchResults[index];
+  if (!result) return;
+  $("#batch-result-select").value = String(index);
+  renderResult(result, { batch: true });
+}
+
+function renderBatchRun(run) {
+  state.batchRun = run;
+  state.batchResults = run.results;
+  const selector = $("#batch-result-select");
+  selector.replaceChildren();
+  run.results.forEach((result, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    const preview =
+      result.query.length > 52 ? `${result.query.slice(0, 52)}…` : result.query;
+    option.textContent =
+      `${String(index + 1).padStart(3, "0")} · ` +
+      `L${result.source_line ?? index + 1} · ${preview}`;
+    selector.append(option);
+  });
+  $("#batch-summary").textContent =
+    `${run.file_name} · ${run.num_queries} queries`;
+  $("#batch-throughput").textContent =
+    `${Number(run.latency_ms).toLocaleString()} ms · ` +
+    `${Number(run.queries_per_second).toLocaleString()} query/s · ` +
+    `batch size ${run.request.batch_size}`;
+  $("#batch-toolbar").hidden = false;
+  selectBatchResult(0);
+}
+
+function downloadBatchResults() {
+  if (!state.batchResults.length) return;
+  const jsonl = `${state.batchResults.map((row) => JSON.stringify(row)).join("\n")}\n`;
+  const blobUrl = URL.createObjectURL(
+    new Blob([jsonl], { type: "application/x-ndjson;charset=utf-8" }),
+  );
+  const fileStem = (state.batchRun?.file_name || "queries")
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^\w.-]+/g, "_");
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = `${fileStem}.results.jsonl`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+}
+
+function showLoading(message) {
+  $("#empty-state").hidden = true;
+  $("#results").hidden = true;
+  $("#loading-state").hidden = false;
+  $("#loading-copy").textContent = message;
+}
+
+async function runSingleInference(options) {
   const query = queryInput.value.trim();
   if (!query) {
     showError("请输入测试 Query。");
     queryInput.focus();
-    return;
+    return false;
   }
-  $("#empty-state").hidden = true;
-  $("#results").hidden = true;
-  $("#loading-state").hidden = false;
-  submitButton.disabled = true;
-  $(".button-label").textContent = "推理中…";
-  try {
-    const mode = decodingMode.value;
-    const result = await jsonRequest("/api/infer", {
+  showLoading("正在约束生成 Skill Code 并解码候选，请稍候。");
+  const result = await jsonRequest("/api/infer", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, ...options }),
+  });
+  renderSingleResult(result);
+  return true;
+}
+
+async function runBatchInference(options) {
+  if (!state.batchRows.length) {
+    showError("请选择包含 Query 的 TXT 文件。");
+    return false;
+  }
+  const rows = state.batchRows.map((row) => ({ ...row }));
+  const fileName = state.batchFileName;
+  const size = Number(batchSize.value);
+  const results = [];
+  let serverLatencyMs = 0;
+  const started = performance.now();
+  for (let start = 0; start < rows.length; start += size) {
+    const end = Math.min(start + size, rows.length);
+    showLoading(`正在处理 ${start + 1}–${end} / ${rows.length} 条 Query…`);
+    const response = await jsonRequest("/api/infer-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        query,
-        max_code_paths: Number($("#max-paths").value),
-        top_k: Number($("#top-k").value),
-        decoding_mode: mode,
-        num_beams: mode === "beam_search" ? Number(numBeams.value) : 1,
+        queries: rows.slice(start, end).map((row) => row.query),
+        batch_size: size,
+        ...options,
       }),
     });
-    renderResult(result);
-    if (window.innerWidth < 1000) $("#result-panel").scrollIntoView({ behavior: "smooth" });
+    serverLatencyMs += Number(response.latency_ms);
+    response.results.forEach((result, localIndex) => {
+      const globalIndex = start + localIndex;
+      result.query_id = `query-${String(globalIndex + 1).padStart(6, "0")}`;
+      result.batch_index = globalIndex;
+      result.source_line = rows[globalIndex].source_line;
+      results.push(result);
+    });
+  }
+  const latencyMs = Math.round((performance.now() - started) * 100) / 100;
+  renderBatchRun({
+    file_name: fileName,
+    num_queries: results.length,
+    latency_ms: latencyMs,
+    server_latency_ms: Math.round(serverLatencyMs * 100) / 100,
+    queries_per_second:
+      Math.round((results.length / Math.max(latencyMs / 1000, 1e-9)) * 1000) /
+      1000,
+    request: { ...options, batch_size: size },
+    results,
+  });
+  return true;
+}
+
+async function runInference(event) {
+  event.preventDefault();
+  clearError();
+  submitButton.disabled = true;
+  $(".button-label").textContent = "推理中…";
+  try {
+    const completed =
+      state.inputMode === "batch"
+        ? await runBatchInference(generationOptions())
+        : await runSingleInference(generationOptions());
+    if (completed && window.innerWidth < 1000) {
+      $("#result-panel").scrollIntoView({ behavior: "smooth" });
+    }
   } catch (error) {
     $("#loading-state").hidden = true;
     $("#results").hidden = !state.hasResult;
@@ -205,7 +424,8 @@ async function runInference(event) {
     showError(error.message);
   } finally {
     submitButton.disabled = false;
-    $(".button-label").textContent = "运行路由";
+    $(".button-label").textContent =
+      state.inputMode === "batch" ? "批量路由" : "运行路由";
   }
 }
 
@@ -287,8 +507,15 @@ $("#example-button").addEventListener("click", () => {
   queryInput.value = exampleQuery;
   queryInput.focus();
 });
+$("#single-mode-button").addEventListener("click", () => setInputMode("single"));
+$("#batch-mode-button").addEventListener("click", () => setInputMode("batch"));
+batchFile.addEventListener("change", loadBatchFile);
 form.addEventListener("submit", runInference);
 decodingMode.addEventListener("change", updateDecodingControls);
+$("#batch-result-select").addEventListener("change", (event) => {
+  selectBatchResult(Number(event.target.value));
+});
+$("#download-batch").addEventListener("click", downloadBatchResults);
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") form.requestSubmit();
 });

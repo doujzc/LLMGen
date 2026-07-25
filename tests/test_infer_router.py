@@ -10,10 +10,40 @@ pytest.importorskip("transformers")
 
 from scripts.infer_router import (
     _generate_batch,
+    _load_queries,
     _logits_processor_class,
     _resolve_decoding,
 )
 from llmgen.router import MultiPathTokenTrie, RouterDataError
+
+
+def test_query_txt_uses_each_nonempty_line_in_original_order(tmp_path) -> None:
+    query_txt = tmp_path / "queries.txt"
+    query_txt.write_text(
+        "\ufeff第一个 Query\n\n重复 Query\r\n  重复 Query  \n",
+        encoding="utf-8",
+    )
+
+    rows = _load_queries(
+        Namespace(
+            query=None,
+            query_id="interactive",
+            query_txt=str(query_txt),
+            queries=None,
+        )
+    )
+
+    assert [row["query"] for row in rows] == [
+        "第一个 Query",
+        "重复 Query",
+        "重复 Query",
+    ]
+    assert [row["source_line"] for row in rows] == [1, 3, 4]
+    assert [row["id"] for row in rows] == [
+        "line-000001",
+        "line-000003",
+        "line-000004",
+    ]
 
 
 def test_logits_processor_keeps_finished_batch_rows_padded_with_eos() -> None:

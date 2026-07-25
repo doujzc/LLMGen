@@ -22,6 +22,8 @@ class StubRuntime:
             "num_levels": 2,
             "max_code_paths": 8,
             "max_num_beams": 8,
+            "max_batch_queries": 1000,
+            "max_batch_size": 8,
         }
 
     def catalog(self, query, limit):
@@ -59,6 +61,38 @@ class StubRuntime:
                 "decoding_mode": decoding_mode,
                 "num_beams": num_beams,
             },
+        }
+
+    def infer_batch(
+        self,
+        queries,
+        *,
+        batch_size,
+        max_code_paths,
+        top_k,
+        decoding_mode,
+        num_beams,
+    ):
+        return {
+            "num_queries": len(queries),
+            "latency_ms": 12.5,
+            "queries_per_second": 160.0,
+            "request": {
+                "batch_size": batch_size,
+                "max_code_paths": max_code_paths,
+                "top_k": top_k,
+                "decoding_mode": decoding_mode,
+                "num_beams": num_beams,
+            },
+            "results": [
+                {
+                    "query_id": f"query-{index:06d}",
+                    "query": query,
+                    "paths": [],
+                    "candidates": [],
+                }
+                for index, query in enumerate(queries, start=1)
+            ],
         }
 
 
@@ -106,6 +140,58 @@ def test_runtime_rejects_beam_width_above_server_limit() -> None:
         )
 
 
+def test_runtime_batch_preserves_order_and_splits_model_batches(monkeypatch) -> None:
+    runtime = RouterRuntime.__new__(RouterRuntime)
+    runtime.max_code_paths = 8
+    runtime.max_num_beams = 8
+    runtime.max_batch_queries = 10
+    runtime.max_batch_size = 4
+    runtime.args = Namespace()
+    runtime._lock = threading.Lock()
+    runtime.tokenizer = object()
+    runtime.model = object()
+    runtime.torch = object()
+    runtime.id_to_token = {}
+    runtime.buckets = {}
+    runtime.skills = {}
+    runtime.decode_map = {"skill_to_code": {}}
+    runtime._trie = lambda max_code_paths: object()
+    model_batch_sizes = []
+
+    def fake_generate_batch(**kwargs):
+        batch = kwargs["batch"]
+        model_batch_sizes.append(len(batch))
+        return [
+            {
+                "query_id": row["id"],
+                "query": row["query"],
+                "generated_text": "",
+                "decoding": {"mode": "greedy", "num_beams": 1},
+                "paths": [],
+                "candidates": [],
+            }
+            for row in batch
+        ]
+
+    monkeypatch.setattr("web_server.runtime._generate_batch", fake_generate_batch)
+
+    result = runtime.infer_batch(
+        ["第一个", "重复", "重复", "第四个", "第五个"],
+        batch_size=2,
+    )
+
+    assert model_batch_sizes == [2, 2, 1]
+    assert [row["query"] for row in result["results"]] == [
+        "第一个",
+        "重复",
+        "重复",
+        "第四个",
+        "第五个",
+    ]
+    assert [row["batch_index"] for row in result["results"]] == list(range(5))
+    assert result["request"]["batch_size"] == 2
+
+
 def test_web_api_health_catalog_and_inference() -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class(StubRuntime()))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -146,6 +232,22 @@ def test_web_api_health_catalog_and_inference() -> None:
         )
         assert greedy["request"]["decoding_mode"] == "greedy"
         assert greedy["request"]["num_beams"] == 1
+
+        _, batch = _request(
+            base + "/api/infer-batch",
+            payload={
+                "queries": ["查天气", "设置明天的提醒"],
+                "batch_size": 2,
+                "max_code_paths": 3,
+                "top_k": 7,
+            },
+        )
+        assert batch["num_queries"] == 2
+        assert [row["query"] for row in batch["results"]] == [
+            "查天气",
+            "设置明天的提醒",
+        ]
+        assert batch["request"]["batch_size"] == 2
     finally:
         server.shutdown()
         server.server_close()

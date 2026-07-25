@@ -49,15 +49,61 @@
               </div>
               <button id="example-button" class="text-button" type="button">填入示例</button>
             </div>
-            <label class="sr-only" for="query">用户请求</label>
-            <textarea
-              id="query"
-              name="query"
-              rows="7"
-              maxlength="20000"
-              placeholder="例如：下周要去上海出差，帮我查天气和高铁，选一个靠近会场的酒店，把行程加入日历并提醒我提前带伞……"
-              required
-            ></textarea>
+            <div class="input-mode-tabs" role="tablist" aria-label="Query 输入方式">
+              <button
+                id="single-mode-button"
+                class="active"
+                type="button"
+                role="tab"
+                aria-selected="true"
+              >单条 Query</button>
+              <button
+                id="batch-mode-button"
+                type="button"
+                role="tab"
+                aria-selected="false"
+              >批量 TXT</button>
+            </div>
+            <div id="single-query-input">
+              <label class="sr-only" for="query">用户请求</label>
+              <textarea
+                id="query"
+                name="query"
+                rows="7"
+                maxlength="20000"
+                placeholder="例如：下周要去上海出差，帮我查天气和高铁，选一个靠近会场的酒店，把行程加入日历并提醒我提前带伞……"
+                required
+              ></textarea>
+            </div>
+            <div id="batch-query-input" class="batch-input" hidden>
+              <label class="file-drop" for="batch-file">
+                <input
+                  id="batch-file"
+                  class="sr-only"
+                  type="file"
+                  accept=".txt,text/plain"
+                />
+                <span class="file-mark">TXT</span>
+                <strong>选择 Query 文件</strong>
+                <small>UTF-8 编码；每个非空行作为一个 Query</small>
+              </label>
+              <div id="batch-file-meta" class="batch-file-meta" hidden>
+                <div>
+                  <strong id="batch-file-name"></strong>
+                  <span id="batch-query-count"></span>
+                </div>
+                <label>
+                  <span>模型 Batch Size</span>
+                  <select id="batch-size">
+                    <option value="1">1</option>
+                    <option value="2" selected>2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                  </select>
+                </label>
+                <ol id="batch-preview"></ol>
+              </div>
+            </div>
             <div class="controls">
               <label>
                 <span>最多生成路径</span>
@@ -111,7 +157,7 @@
             <div id="loading-state" class="loading-state" hidden>
               <div class="route-loader" aria-hidden="true"><span></span><span></span><span></span></div>
               <h2>模型正在路由</h2>
-              <p>正在约束生成 Skill Code 并解码候选，请稍候。</p>
+              <p id="loading-copy">正在约束生成 Skill Code 并解码候选，请稍候。</p>
             </div>
 
             <div id="results" hidden>
@@ -122,8 +168,27 @@
                 </div>
                 <div class="result-meta">
                   <span id="decode-summary" class="decode-pill">Greedy</span>
-                  <div class="latency"><span>端到端时延</span><strong id="latency">—</strong></div>
+                  <div class="latency"><span id="latency-label">端到端时延</span><strong id="latency">—</strong></div>
                 </div>
+              </div>
+
+              <div id="batch-toolbar" class="batch-toolbar" hidden>
+                <div>
+                  <strong id="batch-summary"></strong>
+                  <span id="batch-throughput"></span>
+                </div>
+                <div class="batch-result-actions">
+                  <label class="sr-only" for="batch-result-select">查看批量结果</label>
+                  <select id="batch-result-select"></select>
+                  <button id="download-batch" class="download-button" type="button">
+                    下载 JSONL
+                  </button>
+                </div>
+              </div>
+
+              <div class="query-output">
+                <span class="block-label">QUERY</span>
+                <p id="result-query"></p>
               </div>
 
               <div class="output-block">

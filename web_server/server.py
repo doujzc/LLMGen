@@ -44,6 +44,18 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Maximum Beam Search width accepted by the Web API.",
     )
+    parser.add_argument(
+        "--max-batch-queries",
+        type=int,
+        default=1000,
+        help="Maximum number of queries accepted by one batch API request.",
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=8,
+        help="Maximum number of queries evaluated in one model forward batch.",
+    )
     parser.add_argument("--max-input-length", type=int)
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
@@ -110,7 +122,8 @@ def handler_class(runtime: RouterRuntime):
             self.wfile.write(body)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-            if urlparse(self.path).path != "/api/infer":
+            request_path = urlparse(self.path).path
+            if request_path not in ("/api/infer", "/api/infer-batch"):
                 self._error(HTTPStatus.NOT_FOUND, "not found")
                 return
             try:
@@ -118,7 +131,7 @@ def handler_class(runtime: RouterRuntime):
             except ValueError:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
                 return
-            if content_length < 1 or content_length > 1_000_000:
+            if content_length < 1 or content_length > 4_000_000:
                 self._error(HTTPStatus.BAD_REQUEST, "invalid request body size")
                 return
             try:
@@ -127,13 +140,28 @@ def handler_class(runtime: RouterRuntime):
                     raise ValueError("JSON body must be an object")
                 decoding_mode = str(payload.get("decoding_mode", "greedy"))
                 default_num_beams = 4 if decoding_mode == "beam_search" else 1
-                result = runtime.infer(
-                    str(payload.get("query", "")),
-                    max_code_paths=int(payload.get("max_code_paths", 4)),
-                    top_k=int(payload.get("top_k", 10)),
-                    decoding_mode=decoding_mode,
-                    num_beams=int(payload.get("num_beams", default_num_beams)),
-                )
+                generation_options = {
+                    "max_code_paths": int(payload.get("max_code_paths", 4)),
+                    "top_k": int(payload.get("top_k", 10)),
+                    "decoding_mode": decoding_mode,
+                    "num_beams": int(
+                        payload.get("num_beams", default_num_beams)
+                    ),
+                }
+                if request_path == "/api/infer":
+                    result = runtime.infer(
+                        str(payload.get("query", "")),
+                        **generation_options,
+                    )
+                else:
+                    queries = payload.get("queries")
+                    if not isinstance(queries, list):
+                        raise ValueError("queries must be a list")
+                    result = runtime.infer_batch(
+                        queries,
+                        batch_size=int(payload.get("batch_size", 1)),
+                        **generation_options,
+                    )
             except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -166,6 +194,8 @@ def main() -> None:
         max_input_length=args.max_input_length,
         trust_remote_code=args.trust_remote_code,
         max_num_beams=args.max_num_beams,
+        max_batch_queries=args.max_batch_queries,
+        max_batch_size=args.max_batch_size,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler_class(runtime))
     print(
