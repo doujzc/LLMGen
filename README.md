@@ -120,6 +120,8 @@ SKIP_PREPARE=1 bash scripts/router_pipeline.sh "$DATASET" full
 
 完整流程依次执行层级 Tokenizer、code 导出与质量门禁、Router 数据构造、
 Memorization、单 Skill Retrieval Alignment、多 Skill Retrieval 和闭集评估。
+`light` 的扩充版数据默认使用 10 个 Memorization epochs、1 个 Alignment epoch
+和 1 个 Retrieval epoch；`clawhub` 的默认值由对应配置文件定义。
 
 分阶段调试：
 
@@ -269,14 +271,41 @@ export ROUTER_MAX_LENGTH=768
 
 ## 数据生成
 
-训练仓库内数据不需要重新调用生成模型。重新构建数据时分别使用：
+各数据目录 README 只描述数据本身；下载、生成和校验操作统一记录在这里。
+
+获取或更新原始 ClawHub Top-1,000 快照：
+
+```bash
+python scripts/download_clawhub_skills.py
+```
+
+下载并校验固定版本的官方 SkillRet 快照：
+
+```bash
+python scripts/download_skillret.py
+```
+
+仓库已经包含可训练的最终数据，不需要重新调用生成模型。需要重新构建时分别使用：
 
 ```bash
 bash scripts/run_clawhub_data.sh
 bash scripts/run_light_data.sh
 ```
 
-具体数据格式、统计、质量门禁和生成依赖见各数据目录的 README。
+生成接口默认从 `~/llm_api.txt` 读取 OpenAI-compatible 配置。独立校验当前最终
+数据：
+
+```bash
+python scripts/clawhub_data/05_validate_dataset.py \
+  --dataset-dir data/clawhub_training/final \
+  --expected-candidates 1000
+
+python scripts/clawhub_data/05_validate_dataset.py \
+  --dataset-dir data_light/final \
+  --expected-candidates 301
+```
+
+数据格式、统计、来源和限制见各数据目录 README。
 
 ## 测试
 

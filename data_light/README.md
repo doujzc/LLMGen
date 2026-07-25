@@ -1,81 +1,153 @@
-# 轻量候选训练集
+# Light-301 Skill 路由数据集
 
-该目录是一套独立的 301-candidate 闭集路由数据，不会读取或覆盖
-`data/clawhub_training/final/` 中原有的 1000-candidate 数据。
+## 概览
 
-`candidates.jsonl` 是唯一候选来源，每行必须包含非空的 `id`、`name` 和
-`desc`。生成脚本默认读取 `~/llm_api.txt` 中的 OpenAI-compatible 接口配置，
-使用 `Qwen3.7-Plus` 完成能力画像和样本生成，再由独立的 `GLM-5.2` 复核：
+Light-301 是面向个人手机 Agent 的中文闭集 Skill 路由数据集。给定一条自然语言
+query，目标是在固定的 301 个候选中识别一个或多个相关 Skill。候选、训练集、
+验证集和测试集共享同一份 `skills.jsonl`，不包含 unseen-skill 评估。
 
-```bash
-bash scripts/run_light_data.sh
-```
+候选由 `candidates.jsonl` 提供，共 301 个非空且唯一的 ID、300 个唯一显示名。
+`Qwen3.7-Plus` 用于生成能力画像和合成 query，`GLM-5.2` 用于独立质量复核。
+当前快照生成于 2026-07-24，格式版本为 1，随机种子为 `20260720`。
 
-脚本会构造每个候选的单 Skill 对齐样本，以及含显式/隐式意图的多 Skill
-样本，并对训练集目标顺序做自回归顺序增强。断点保存在 `data_light/work/`，
-最终可训练文件写入 `data_light/final/`；重复执行会从断点续跑。
+## 数据规模
 
-当前 Qwen 版数据的质量门禁结果为 `pass`：
+| 子集 | Query 数 | 正例关系数 | 每条 Query 的目标数 |
+| --- | ---: | ---: | ---: |
+| 单 Skill 对齐集 | 5,456 | 5,456 | 1 |
+| 多 Skill 训练集 | 33,098 | 96,616 | 2–4 |
+| 多 Skill 验证集 | 530 | 1,533 | 2–4 |
+| 多 Skill 测试集 | 631 | 1,850 | 2–4 |
 
-- 候选：301，全部保留；
-- 单 Skill 对齐样本：5456，每个候选至少 15 条；
-- 多 Skill 语义训练样本：12812 条；目标顺序增强后为 train 33098、
-  validation 530、test 631；
-- 每个候选的未增强 train 正例至少 100 条，平均 136.94 条；
-- 隐式意图样本占 38.1%，训练语义样本平均扩展为 2.58 个目标顺序变体。
+多 Skill 训练集包含 12,812 条不同的语义样本；目标顺序增广后得到 33,098 条
+训练序列，平均每条语义样本对应 2.583 个目标排列。验证集和测试集没有顺序增广。
 
-数据规模按历史 568-candidate ClawHub 配置折算：原配置为 3353 条 train
-序列训练 15 epochs；301 个候选的一轮等效下限为
-`ceil(3353 × 15 × 301 / 568) = 26653` 条。当前 33098 条 train
-序列超过该下限，因此 `configs/light.env` 默认将单 Skill Alignment 和多
-Skill Retrieval 都设为 1 epoch。Memorization 只学习固定 Skill code，
-仍沿用 10 epochs。
+其他统计如下：
 
-两个候选 ID `hithink-iwencai` 与 `hithink-wencai-suite` 共用显示名
-“同花顺问财”；训练和解码均使用唯一 ID，因此不会合并标签。
+- 导出的多 Skill query 共 34,259 条，其中双目标 11,107 条、三目标 14,823
+  条、四目标 8,329 条；
+- 跨领域 query 共 30,954 条；
+- 隐式意图 query 共 13,038 条，占 38.06%；显式意图 query 共 21,221 条；
+- 单 Skill 对齐集覆盖 301/301 个候选，每个候选至少 15 条，平均 18.126 条；
+- 多 Skill 训练集覆盖 301/301 个候选；
+- 按“单 Skill 对齐样本 + 未增广的多 Skill 训练样本”统计，每个候选至少有
+  100 条正监督，平均 136.944 条；
+- 质量审计状态为 `pass`，目标位置覆盖率为 1.0，未发现近重复样本。
 
-## 一键训练
+隐式/显式意图数量以及目标数量分布按最终导出序列统计，因此训练集的目标顺序变体
+会分别计数。
 
-先启动 README 主文档所述的 OpenAI-compatible Qwen3 Embedding 服务，然后设置
-目标机器上的模型路径：
+## 候选文件
 
-```bash
-export EMBEDDING_MODEL=/models/Qwen3-Embedding-8B
-export ROUTER_MODEL=/models/Qwen3-1.7B
-export OPENAI_BASE_URL=http://127.0.0.1:8000/v1
-export OPENAI_API_KEY=EMPTY
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+| 文件 | 说明 |
+| --- | --- |
+| `candidates.jsonl` | 原始候选表，字段为 `id`、`name`、`desc` |
+| `catalog.jsonl` | 规范化候选表，保留描述来源、稳定 ID、显示名和排名 |
+| `catalog_report.json` | 候选数量、ID/名称唯一性和重复显示名报告 |
 
-bash scripts/router_pipeline.sh light full
-```
+`hithink-iwencai` 和 `hithink-wencai-suite` 的显示名均为“同花顺问财”，但
+`skill_id` 不同，因此它们是两个独立候选。
 
-该入口固定使用 `configs/light.env` 和 `data_light/final/`，依次执行预处理、
-层级 Tokenizer、Skill code 导出、Router 数据构造、Memorization、Retrieval
-和闭集评估。默认是 4 卡 ZeRO-3 全参数训练。
+## 最终数据文件
 
-如果已经完成预处理并关闭了 Embedding 服务：
+可消费的数据位于 `final/`：
 
-```bash
-SKIP_PREPARE=1 bash scripts/router_pipeline.sh light full
-```
+| 文件 | 说明 |
+| --- | --- |
+| `skills.jsonl` | 唯一的 301-Skill 候选注册表 |
+| `queries_alignment.jsonl` | 单 Skill 能力对齐 query |
+| `qrels_alignment.jsonl` | 单 Skill query 与正例 Skill 的关系 |
+| `queries_train.jsonl` | 经过目标顺序增广的多 Skill 训练集 |
+| `queries_validation.jsonl` | 未增广的多 Skill 验证集 |
+| `queries_test.jsonl` | 未增广的多 Skill 测试集 |
+| `qrels_train.jsonl` | 训练 query 与正例 Skill 的关系 |
+| `qrels_validation.jsonl` | 验证 query 与正例 Skill 的关系 |
+| `qrels_test.jsonl` | 测试 query 与正例 Skill 的关系 |
+| `queries.jsonl` | 多 Skill 数据的聚合审计视图，含划分和复核信息 |
+| `manifest.json` | 数据规模、覆盖率、分布、增广信息及文件 SHA-256 |
+| `quality_report.json` | 隐式意图、顺序增广和候选覆盖质量报告 |
+| `rejected_near_duplicates.jsonl` | 近重复拒绝记录；当前为空 |
 
-## 分阶段执行
+`queries.jsonl` 是审计视图，不是额外训练集；不能再与三个 split 文件拼接，否则
+会重复计入相同样本。`work/` 保存画像、工作流、生成结果、复核结果和错误记录等
+中间数据，不属于最终训练/评估划分。
 
-调试时使用同一个入口选择阶段：
+## 样本语义
 
-```bash
-bash scripts/router_pipeline.sh light prepare
-bash scripts/router_pipeline.sh light train-tokenizer
-bash scripts/router_pipeline.sh light export-codes
-bash scripts/router_pipeline.sh light build-router-data
-bash scripts/router_pipeline.sh light train-memorization
-bash scripts/router_pipeline.sh light train-retrieval
-bash scripts/router_pipeline.sh light evaluate
-```
+### 单 Skill 对齐
 
-导出 Web bundle 并启动人工测试界面：
+每条对齐 query 只对应一个 Skill，用于直接表达该候选的典型用户意图。样本均为
+显式意图，并带有 query 内的证据片段。
 
-```bash
-bash scripts/router_pipeline.sh light export-web
-bash scripts/router_pipeline.sh light web
-```
+### 多 Skill 协作
+
+每条多 Skill query 需要 2–4 个候选协作完成，覆盖办公文档、通信、知识管理、
+金融、媒体、出行、天气等 20 个领域。样本强调有上下文关系的完整任务，而不是
+互不相关请求的简单拼接。
+
+`intent_mode="implicit"` 表示至少一个目标能力没有被直接点名，但被认为是完成
+请求所必需的。例如，行程规划请求可能隐式需要天气查询。每个隐式目标都在
+`implicit_skill_ids` 和 `implicit_rationales` 中显式记录。
+
+### 目标顺序增广
+
+训练集中同一语义 query 可具有 2 或 3 个不同的 `skill_ids` 排列。
+`source_query_id` 将这些变体关联起来，`target_order_variant` 标识排列编号。
+排列只表示自回归监督顺序，不表示 Skill 的实际执行依赖。属于同一工作流的样本
+不会跨训练、验证和测试划分。
+
+## 字段
+
+### `skills.jsonl`
+
+| 字段 | 含义 |
+| --- | --- |
+| `skill_id` | 唯一且稳定的候选标识 |
+| `name` | Skill 显示名 |
+| `description` | 原始能力描述 |
+| `capability_zh` | 中文能力摘要 |
+| `domain` | 领域标签 |
+| `roles` | 能力角色，如检索、规划、创建或执行 |
+| `mobile_fit` | 手机 Agent 适配度元数据 |
+| `rank` | 候选输入顺序 |
+| `canonical_url` | 原始候选记录的定位地址 |
+
+### Query 文件
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 当前样本的唯一标识 |
+| `query` | 中文用户请求 |
+| `skill_ids` | 有序目标 Skill 列表 |
+| `workflow_id` | 多 Skill 样本所属的语义工作流 |
+| `anchor_skill_id` | 构造工作流时的锚点 Skill |
+| `domains` | 样本覆盖的领域 |
+| `intent_mode` | `explicit` 或 `implicit` |
+| `target_intents` | 每个目标 Skill 的显式/隐式属性 |
+| `evidence` | query 中支持每个目标的原文片段 |
+| `implicit_skill_ids` | 隐式目标 Skill |
+| `implicit_rationales` | 选择各隐式目标的理由 |
+| `quality_scores` | 连贯性、复杂度、手机风格、具体性和目标必要性评分 |
+| `source_query_id` | 顺序增广前的语义样本 ID |
+| `target_order_variant` | 当前目标排列编号 |
+
+单 Skill 文件还包含 `curriculum_phase="single_skill_alignment"`，且没有多
+Skill 工作流字段。验证集和测试集没有 `source_query_id` 与
+`target_order_variant`。
+
+### Qrels 文件
+
+每行包含 `query_id`、`skill_id` 和 `relevance`。当前所有已列出的关系均为
+`relevance=1`；未列出的候选只是未标注为正例，并非人工确认的困难负例。
+
+## 数据限制
+
+- Query、标签和质量评分均包含模型生成或模型复核成分，不等同于真实用户日志或
+  人工金标；
+- 数据只覆盖固定的 301 个候选，不包含候选集外请求、未知 Skill 或无可用
+  Skill 的拒识样本；
+- 候选及 query 的领域和表达分布受原始候选表与生成模型影响；
+- qrels 只提供正例关系，不提供人工标注的困难负例；
+- `canonical_url` 使用本地 `jsonl://` 定位方式，不代表公开下载地址；
+- 候选描述的权利和使用条件仍由其原始来源决定，本数据集不统一授予第三方内容
+  的许可。
