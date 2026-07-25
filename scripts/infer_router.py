@@ -80,15 +80,18 @@ def parse_args() -> argparse.Namespace:
         choices=DECODING_MODES,
         default="greedy",
         help=(
-            "Select the best token at each step (greedy) or search over complete "
-            "autoregressive multi-path sequences (beam_search)."
+            "Generate an ordered multi-path sequence (greedy) or return the top "
+            "single-path codes from constrained beam search (beam_search)."
         ),
     )
     parser.add_argument(
         "--num-beams",
         type=int,
         default=4,
-        help="Beam width for --decoding-mode beam_search; ignored by greedy decoding.",
+        help=(
+            "Beam width and number of single-path codes returned by "
+            "--decoding-mode beam_search; ignored by greedy decoding."
+        ),
     )
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--cutoffs", type=int, nargs="+", default=(1, 5, 10))
@@ -418,25 +421,47 @@ def _generate_batch(
     )
     encoded = {name: value.to(args.device) for name, value in encoded.items()}
     prompt_width = int(encoded["input_ids"].shape[1])
+    decoding_mode, num_beams = _resolve_decoding(args)
+    if decoding_mode == "beam_search":
+        # Beam Search is a retrieval mode: every beam represents exactly one
+        # fixed-length code. It does not search for alternative full multi-line
+        # outputs produced by Greedy decoding.
+        decoding_trie = MultiPathTokenTrie(
+            trie.paths,
+            eos_token_id=trie.eos_token_id,
+            separator_token_ids=trie.separator_token_ids,
+            max_paths=1,
+        )
+        num_return_sequences = num_beams
+        decoding_scope = "single_code_top_k"
+    else:
+        decoding_trie = trie
+        num_return_sequences = 1
+        decoding_scope = "autoregressive_multi_path"
+
     MultiPathTrieLogitsProcessor = _logits_processor_class(torch)
-    processor = MultiPathTrieLogitsProcessor(trie, prompt_width)
+    processor = MultiPathTrieLogitsProcessor(decoding_trie, prompt_width)
     from transformers import LogitsProcessorList
 
-    max_new_tokens = (
-        trie.max_paths * trie.num_levels
-        + (trie.max_paths - 1) * len(trie.separator_token_ids)
-        + 1
-    )
-    decoding_mode, num_beams = _resolve_decoding(args)
+    if decoding_mode == "beam_search":
+        # Stop immediately after the fixed-length code. Generating EOS here
+        # would mix the model's "stop vs. another line" probability into code
+        # retrieval scores.
+        max_new_tokens = decoding_trie.num_levels
+    else:
+        max_new_tokens = (
+            decoding_trie.max_paths * decoding_trie.num_levels
+            + (decoding_trie.max_paths - 1)
+            * len(decoding_trie.separator_token_ids)
+            + 1
+        )
     generation_kwargs: dict[str, Any] = {
         "do_sample": False,
         "num_beams": num_beams,
-        # Beam search ranks complete newline-delimited multi-path sequences.
-        # Candidate Top K remains a separate post-decoding bucket expansion.
-        "num_return_sequences": 1,
+        "num_return_sequences": num_return_sequences,
         "max_new_tokens": max_new_tokens,
-        "min_new_tokens": trie.num_levels,
-        "eos_token_id": trie.eos_token_id,
+        "min_new_tokens": decoding_trie.num_levels,
+        "eos_token_id": decoding_trie.eos_token_id,
         "pad_token_id": int(tokenizer.pad_token_id),
         "logits_processor": LogitsProcessorList([processor]),
         # Training checkpoints may persist use_cache=False from gradient
@@ -468,37 +493,73 @@ def _generate_batch(
             generated.scores,
             **transition_kwargs,
         )
+    expected_sequences = len(batch) * num_return_sequences
+    if int(generated.sequences.shape[0]) != expected_sequences:
+        raise RuntimeError(
+            "generation returned an unexpected number of sequences: "
+            f"expected {expected_sequences}, got {generated.sequences.shape[0]}"
+        )
+
     results: list[dict[str, Any]] = []
     for batch_index, query_row in enumerate(batch):
-        suffix = generated.sequences[batch_index, prompt_width:].tolist()
-        try:
-            eos_position = suffix.index(trie.eos_token_id)
-        except ValueError as exc:
-            raise RuntimeError("constrained generation did not emit EOS") from exc
-        sequence_ids = tuple(int(value) for value in suffix[:eos_position])
-        path_id_sequence = trie.parse_complete(sequence_ids)
         paths: list[GeneratedPath] = []
         path_payloads: list[dict[str, Any]] = []
-        cursor = 0
-        for path_ids in path_id_sequence:
-            path_tokens = tuple(id_to_token[token_id] for token_id in path_ids)
-            score = 0.0
-            if transition_scores is not None:
-                score = float(
-                    transition_scores[
-                        batch_index, cursor : cursor + trie.num_levels
-                    ].sum().item()
+        seen_paths: set[tuple[int, ...]] = set()
+        first_sequence = batch_index * num_return_sequences
+        for sequence_index in range(
+            first_sequence,
+            first_sequence + num_return_sequences,
+        ):
+            suffix = generated.sequences[sequence_index, prompt_width:].tolist()
+            if decoding_mode == "beam_search":
+                if len(suffix) != decoding_trie.num_levels:
+                    raise RuntimeError(
+                        "beam search did not return one fixed-length code"
+                    )
+                sequence_ids = tuple(int(value) for value in suffix)
+            else:
+                try:
+                    eos_position = suffix.index(decoding_trie.eos_token_id)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "constrained generation did not emit EOS"
+                    ) from exc
+                sequence_ids = tuple(int(value) for value in suffix[:eos_position])
+            path_id_sequence = decoding_trie.parse_complete(sequence_ids)
+            if decoding_mode == "beam_search" and len(path_id_sequence) != 1:
+                raise RuntimeError("beam search returned a multi-path sequence")
+
+            cursor = 0
+            for path_ids in path_id_sequence:
+                if path_ids in seen_paths:
+                    cursor += decoding_trie.num_levels + len(
+                        decoding_trie.separator_token_ids
+                    )
+                    continue
+                seen_paths.add(path_ids)
+                path_tokens = tuple(id_to_token[token_id] for token_id in path_ids)
+                score = 0.0
+                if transition_scores is not None:
+                    score = float(
+                        transition_scores[
+                            sequence_index,
+                            cursor : cursor + decoding_trie.num_levels,
+                        ]
+                        .sum()
+                        .item()
+                    )
+                paths.append(GeneratedPath(path_tokens, score))
+                path_payloads.append(
+                    {
+                        "code_tokens": list(path_tokens),
+                        "code_text": "".join(path_tokens),
+                        "score": score,
+                        "skill_ids": list(buckets[path_tokens]),
+                    }
                 )
-            paths.append(GeneratedPath(path_tokens, score))
-            path_payloads.append(
-                {
-                    "code_tokens": list(path_tokens),
-                    "code_text": "".join(path_tokens),
-                    "score": score,
-                    "skill_ids": list(buckets[path_tokens]),
-                }
-            )
-            cursor += trie.num_levels + len(trie.separator_token_ids)
+                cursor += decoding_trie.num_levels + len(
+                    decoding_trie.separator_token_ids
+                )
         candidates = rank_bucket_candidates(paths, buckets, limit=args.top_k)
         results.append(
             {
@@ -510,6 +571,8 @@ def _generate_batch(
                 "decoding": {
                     "mode": decoding_mode,
                     "num_beams": num_beams,
+                    "scope": decoding_scope,
+                    "num_return_sequences": num_return_sequences,
                 },
                 "paths": path_payloads,
                 "candidates": candidates,
@@ -614,11 +677,20 @@ def main() -> None:
             "num_active_paths": len(buckets),
             "num_levels": num_levels,
             "generation": {
-                "mode": "autoregressive_multi_path",
+                "mode": (
+                    "single_code_top_k"
+                    if decoding_mode == "beam_search"
+                    else "autoregressive_multi_path"
+                ),
                 "separator": CODE_PATH_SEPARATOR,
-                "max_code_paths": trie.max_paths,
+                "max_code_paths": (
+                    1 if decoding_mode == "beam_search" else trie.max_paths
+                ),
                 "decoding_mode": decoding_mode,
                 "num_beams": num_beams,
+                "num_return_sequences": (
+                    num_beams if decoding_mode == "beam_search" else 1
+                ),
             },
             "cutoffs": sorted(set(args.cutoffs)),
             "metrics": aggregate_retrieval_metrics(per_query),

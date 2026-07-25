@@ -140,6 +140,56 @@ def test_runtime_rejects_beam_width_above_server_limit() -> None:
         )
 
 
+def test_runtime_beam_search_forces_one_code_per_beam(monkeypatch) -> None:
+    runtime = RouterRuntime.__new__(RouterRuntime)
+    runtime.max_code_paths = 8
+    runtime.max_num_beams = 8
+    runtime.args = Namespace()
+    runtime._lock = threading.Lock()
+    runtime.tokenizer = object()
+    runtime.model = object()
+    runtime.torch = object()
+    runtime.id_to_token = {}
+    runtime.buckets = {}
+    runtime.skills = {}
+    runtime.decode_map = {"skill_to_code": {}}
+    trie_requests = []
+    runtime._trie = (
+        lambda max_code_paths: trie_requests.append(max_code_paths) or object()
+    )
+
+    def fake_generate_batch(**kwargs):
+        assert kwargs["args"].max_code_paths == 1
+        return [
+            {
+                "query_id": "interactive",
+                "query": "帮我查天气",
+                "generated_text": "",
+                "decoding": {
+                    "mode": "beam_search",
+                    "num_beams": 4,
+                    "scope": "single_code_top_k",
+                    "num_return_sequences": 4,
+                },
+                "paths": [],
+                "candidates": [],
+            }
+        ]
+
+    monkeypatch.setattr("web_server.runtime._generate_batch", fake_generate_batch)
+
+    result = runtime.infer(
+        "帮我查天气",
+        max_code_paths=6,
+        decoding_mode="beam_search",
+        num_beams=4,
+    )
+
+    assert trie_requests == [1]
+    assert result["request"]["max_code_paths"] == 1
+    assert result["request"]["num_beams"] == 4
+
+
 def test_runtime_batch_preserves_order_and_splits_model_batches(monkeypatch) -> None:
     runtime = RouterRuntime.__new__(RouterRuntime)
     runtime.max_code_paths = 8

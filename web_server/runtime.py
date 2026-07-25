@@ -223,6 +223,10 @@ class RouterRuntime:
         request_args.decoding_mode = decoding_mode
         request_args.num_beams = num_beams
         effective_mode, effective_num_beams = _resolve_decoding(request_args)
+        if effective_mode == "beam_search":
+            # A Web Beam represents one code candidate, never a multi-line
+            # autoregressive output. max_code_paths only applies to Greedy.
+            request_args.max_code_paths = 1
         if effective_num_beams > self.max_num_beams:
             raise RouterDataError(
                 f"num_beams must be between 2 and {self.max_num_beams}"
@@ -278,7 +282,7 @@ class RouterRuntime:
                 tokenizer=self.tokenizer,
                 model=self.model,
                 torch=self.torch,
-                trie=self._trie(max_code_paths),
+                trie=self._trie(request_args.max_code_paths),
                 id_to_token=self.id_to_token,
                 buckets=self.buckets,
                 args=request_args,
@@ -286,7 +290,7 @@ class RouterRuntime:
         result["latency_ms"] = round((time.perf_counter() - started) * 1000, 2)
         self._enrich_result(result)
         result["request"] = self._request_payload(
-            max_code_paths=max_code_paths,
+            max_code_paths=request_args.max_code_paths,
             top_k=top_k,
             decoding_mode=effective_mode,
             num_beams=effective_num_beams,
@@ -334,7 +338,7 @@ class RouterRuntime:
                         tokenizer=self.tokenizer,
                         model=self.model,
                         torch=self.torch,
-                        trie=self._trie(max_code_paths),
+                        trie=self._trie(request_args.max_code_paths),
                         id_to_token=self.id_to_token,
                         buckets=self.buckets,
                         args=request_args,
@@ -345,7 +349,7 @@ class RouterRuntime:
             result["batch_index"] = index
             self._enrich_result(result)
         request_payload = self._request_payload(
-            max_code_paths=max_code_paths,
+            max_code_paths=request_args.max_code_paths,
             top_k=top_k,
             decoding_mode=effective_mode,
             num_beams=effective_num_beams,

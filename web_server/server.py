@@ -42,7 +42,9 @@ def parse_args() -> argparse.Namespace:
         "--max-num-beams",
         type=int,
         default=8,
-        help="Maximum Beam Search width accepted by the Web API.",
+        help=(
+            "Maximum number of single-code Beam candidates accepted by the Web API."
+        ),
     )
     parser.add_argument(
         "--max-batch-queries",

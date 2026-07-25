@@ -250,8 +250,9 @@ bash scripts/router_pipeline.sh "$DATASET" web \
 ssh -L 8080:127.0.0.1:8080 user@server
 ```
 
-界面默认使用 Greedy 解码，也可切换为 Beam Search 并选择 Beam 宽度；后者搜索
-完整的多 Skill 输出序列，会增加推理时延和显存占用。
+界面默认使用 Greedy 自回归生成多条 Skill code。切换为 Beam Search 后只生成
+一条固定长度 code，并将 Beam 宽度 K 对应的前 K 个 code 作为检索候选；
+`Skill 候选 Top K` 再限制 code 碰撞桶展开后的 Skill 数量。
 切换到“批量 TXT”后，每个非空行会作为一个 Query 分批推理，结果可以逐条检查
 并下载为 JSONL。
 

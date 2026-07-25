@@ -8,6 +8,7 @@ const state = {
   batchFileName: "",
   batchResults: [],
   batchRun: null,
+  greedyMaxPaths: "4",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -21,6 +22,8 @@ const skillDialog = $("#skill-dialog");
 const decodingMode = $("#decoding-mode");
 const numBeams = $("#num-beams");
 const beamControl = $("#beam-control");
+const maxPaths = $("#max-paths");
+const maxPathsControl = $("#max-paths-control");
 const batchFile = $("#batch-file");
 const batchSize = $("#batch-size");
 
@@ -36,6 +39,17 @@ function textNode(tag, className, value) {
 
 function updateDecodingControls() {
   const beamEnabled = decodingMode.value === "beam_search";
+  if (beamEnabled) {
+    if (!maxPaths.disabled) state.greedyMaxPaths = maxPaths.value;
+    maxPaths.value = "1";
+  } else if (maxPaths.disabled) {
+    const available = Array.from(maxPaths.options, (option) => option.value);
+    maxPaths.value = available.includes(state.greedyMaxPaths)
+      ? state.greedyMaxPaths
+      : available[0];
+  }
+  maxPaths.disabled = beamEnabled;
+  maxPathsControl.classList.toggle("disabled", beamEnabled);
   numBeams.disabled = !beamEnabled;
   beamControl.classList.toggle("disabled", !beamEnabled);
 }
@@ -92,7 +106,6 @@ async function loadHealth() {
           ? "未记录"
           : Number(values[index]).toLocaleString();
     });
-    const maxPaths = $("#max-paths");
     maxPaths.replaceChildren();
     for (let value = 1; value <= health.max_code_paths; value += 1) {
       const option = document.createElement("option");
@@ -203,14 +216,18 @@ function skillButton(skill, className = "skill-link") {
   return button;
 }
 
-function renderPaths(paths) {
+function renderPaths(paths, beamMode = false) {
   const container = $("#paths");
   container.replaceChildren();
   paths.forEach((path, index) => {
     const card = textNode("article", "path-card");
     const top = textNode("div", "path-top");
     top.append(
-      textNode("span", "path-number", `PATH ${String(index + 1).padStart(2, "0")}`),
+      textNode(
+        "span",
+        "path-number",
+        `${beamMode ? "CODE" : "PATH"} ${String(index + 1).padStart(2, "0")}`,
+      ),
       textNode("span", "path-score", Number(path.score).toFixed(4)),
     );
     const tokens = textNode("div", "tokens");
@@ -220,7 +237,9 @@ function renderPaths(paths) {
     card.append(top, tokens, names);
     container.append(card);
   });
-  $("#path-count").textContent = `${paths.length} path${paths.length === 1 ? "" : "s"}`;
+  const unit = beamMode ? "code" : "path";
+  $("#path-count").textContent =
+    `${paths.length} ${unit}${paths.length === 1 ? "" : "s"}`;
 }
 
 function renderCandidates(candidates) {
@@ -247,7 +266,7 @@ function renderCandidates(candidates) {
 function generationOptions() {
   const mode = decodingMode.value;
   return {
-    max_code_paths: Number($("#max-paths").value),
+    max_code_paths: mode === "beam_search" ? 1 : Number(maxPaths.value),
     top_k: Number($("#top-k").value),
     decoding_mode: mode,
     num_beams: mode === "beam_search" ? Number(numBeams.value) : 1,
@@ -267,11 +286,19 @@ function renderResult(result, { batch = false } = {}) {
     latency === undefined ? "—" : `${Number(latency).toLocaleString()} ms`;
   const mode = request?.decoding_mode || result.decoding?.mode || "greedy";
   const beamWidth = request?.num_beams || result.decoding?.num_beams || 1;
+  const beamMode = mode === "beam_search";
   $("#decode-summary").textContent =
-    mode === "beam_search" ? `Beam Search · ${beamWidth}` : "Greedy";
+    beamMode ? `Beam Search · Top ${beamWidth} codes` : "Greedy";
+  $("#raw-output-label").textContent = beamMode
+    ? "TOP-K SINGLE-LINE CODE ALTERNATIVES"
+    : "RAW AUTOREGRESSIVE OUTPUT";
+  $("#paths-heading").textContent = beamMode ? "Code 候选" : "生成路径";
+  $("#candidate-hint").textContent = beamMode
+    ? "按 Beam 的 Code 排名展开为 Skill"
+    : "同一路径内按候选原始顺序展开";
   $("#result-query").textContent = result.query;
   $("#generated-text").textContent = result.generated_text || "(empty)";
-  renderPaths(result.paths);
+  renderPaths(result.paths, beamMode);
   renderCandidates(result.candidates);
   $("#raw-json").textContent = JSON.stringify(result, null, 2);
 }
@@ -347,7 +374,11 @@ async function runSingleInference(options) {
     queryInput.focus();
     return false;
   }
-  showLoading("正在约束生成 Skill Code 并解码候选，请稍候。");
+  showLoading(
+    options.decoding_mode === "beam_search"
+      ? `正在搜索单行 Skill Code 的 Top ${options.num_beams} 候选…`
+      : "正在约束生成多条 Skill Code 并解码候选，请稍候。",
+  );
   const result = await jsonRequest("/api/infer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -370,7 +401,13 @@ async function runBatchInference(options) {
   const started = performance.now();
   for (let start = 0; start < rows.length; start += size) {
     const end = Math.min(start + size, rows.length);
-    showLoading(`正在处理 ${start + 1}–${end} / ${rows.length} 条 Query…`);
+    const decodingLabel =
+      options.decoding_mode === "beam_search"
+        ? `单行 Code Top ${options.num_beams}`
+        : "多路径 Greedy";
+    showLoading(
+      `正在处理 ${start + 1}–${end} / ${rows.length} 条 Query · ${decodingLabel}…`,
+    );
     const response = await jsonRequest("/api/infer-batch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

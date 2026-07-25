@@ -29,8 +29,8 @@
             <p class="eyebrow">GENERATIVE SKILL ROUTING</p>
             <h1>输入真实请求，查看模型选择的 Skills。</h1>
             <p class="hero-copy">
-              输入个人手机 Agent 风格的复杂请求。模型将以完整自回归方式生成多条两层 code，
-              可在 Greedy 与 Beam Search 间切换，再解码为原始候选 Skill。
+              Greedy 按执行顺序生成多条两层 code；Beam Search 只搜索一条 code，
+              返回概率最高的 K 个候选，再解码为原始 Skill。
             </p>
           </div>
           <dl id="model-stats" class="stats" aria-label="模型信息">
@@ -105,7 +105,7 @@
               </div>
             </div>
             <div class="controls">
-              <label>
+              <label id="max-paths-control">
                 <span>最多生成路径</span>
                 <select id="max-paths" name="max_paths">
                   <option value="2">2</option>
@@ -115,7 +115,7 @@
                 </select>
               </label>
               <label>
-                <span>候选 Top K</span>
+                <span>Skill 候选 Top K</span>
                 <select id="top-k" name="top_k">
                   <option value="5">5</option>
                   <option value="10" selected>10</option>
@@ -131,7 +131,7 @@
                 </select>
               </label>
               <label id="beam-control" class="disabled">
-                <span>Beam 宽度</span>
+                <span>Code Top K（Beam 宽度）</span>
                 <select id="num-beams" name="num_beams" disabled>
                   <option value="2">2</option>
                   <option value="4" selected>4</option>
@@ -151,7 +151,7 @@
             <div id="empty-state" class="empty-state">
               <div class="empty-glyph"><span></span><span></span><span></span></div>
               <h2>等待第一次路由</h2>
-              <p>结果会在这里展开：先看生成路径，再看解码后的 Skill 排序。</p>
+              <p>结果会在这里展开：先看生成或搜索到的 Code，再看解码后的 Skill 排序。</p>
             </div>
 
             <div id="loading-state" class="loading-state" hidden>
@@ -192,19 +192,19 @@
               </div>
 
               <div class="output-block">
-                <span class="block-label">RAW AUTOREGRESSIVE OUTPUT</span>
+                <span id="raw-output-label" class="block-label">RAW AUTOREGRESSIVE OUTPUT</span>
                 <pre id="generated-text"></pre>
               </div>
 
               <div class="section-title">
-                <h3>生成路径</h3>
+                <h3 id="paths-heading">生成路径</h3>
                 <span id="path-count" class="count-pill">0 paths</span>
               </div>
               <div id="paths" class="path-grid"></div>
 
               <div class="section-title candidates-title">
                 <h3>解码候选</h3>
-                <span class="hint">同一路径内按候选原始顺序展开</span>
+                <span id="candidate-hint" class="hint">同一路径内按候选原始顺序展开</span>
               </div>
               <div class="table-wrap">
                 <table>
@@ -248,7 +248,7 @@
 
       <footer>
         <span>LLMGen</span>
-        <span>Constrained Greedy / Beam Search decoding · Local debugging only</span>
+        <span>Multi-path Greedy / Single-code Top-K Beam · Local debugging only</span>
       </footer>
     </div>
 
