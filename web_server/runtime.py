@@ -165,7 +165,7 @@ class RouterRuntime:
         )
         return {
             "total": len(rows),
-            "skills": rows[: max(1, min(limit, 1000))],
+            "skills": rows[: max(1, min(limit, len(rows)))],
         }
 
     def skill_detail(self, skill_id: str) -> dict[str, Any]:

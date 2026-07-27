@@ -126,6 +126,28 @@ def test_runtime_catalog_uses_the_only_candidate_set() -> None:
     assert {row["skill_id"] for row in result["skills"]} == {"s1", "s2"}
 
 
+def test_runtime_catalog_can_return_the_complete_candidate_set() -> None:
+    runtime = RouterRuntime.__new__(RouterRuntime)
+    runtime.skills = {
+        f"s{index:04d}": {
+            "skill_id": f"s{index:04d}",
+            "name": f"候选 {index:04d}",
+        }
+        for index in range(1002)
+    }
+    runtime.decode_map = {
+        "skill_to_code": {
+            skill_id: {"code_text": f"<L1_{index % 32}><L2_{index}>"}
+            for index, skill_id in enumerate(runtime.skills)
+        }
+    }
+
+    result = runtime.catalog(limit=len(runtime.skills))
+
+    assert result["total"] == 1002
+    assert len(result["skills"]) == 1002
+
+
 def test_runtime_rejects_beam_width_above_server_limit() -> None:
     runtime = RouterRuntime.__new__(RouterRuntime)
     runtime.max_code_paths = 8

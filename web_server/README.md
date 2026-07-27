@@ -21,7 +21,7 @@ bash scripts/router_pipeline.sh light web \
 --base-model-name-or-path PATH  LoRA 的 base model 路径覆盖
 --host 127.0.0.1               监听地址
 --port 8080                    监听端口
---max-code-paths 8             Greedy 单次生成路径的服务端上限
+--max-code-paths 8             Greedy Autoregressive 单次生成路径的服务端上限
 --max-num-beams 8              Beam 单次返回 code 数量的服务端上限
 --max-batch-queries 1000       单个 TXT 允许的最大 Query 数
 --max-batch-size 8             单次模型前向允许的最大 Query 数
@@ -31,6 +31,9 @@ bash scripts/router_pipeline.sh light web \
 界面可切换到“批量 TXT”：文件中每个非空行作为一个 Query，空行会忽略，重复行
 和原始顺序会保留。运行期间按选择的模型 Batch Size 分批处理，完成后可逐条查看
 并下载 JSONL 结果。
+
+“Skill 目录 → 查看全部”会加载模型的完整唯一候选集；左侧 Code 树和中间候选
+列表使用同一份数据，可按任意层级 Token 筛选并查看 Skill 原始信息。
 
 JSON API：
 
@@ -42,9 +45,9 @@ JSON API：
 - `POST /api/infer-batch`，body 为
   `{"queries":["query 1","query 2"],"batch_size":2,"max_code_paths":4,"top_k":10}`
 
-Greedy 会自回归生成一条包含多个 Skill code 的换行分隔序列。Beam Search 则只
-生成一条固定长度 code：`num_beams=K` 时返回概率最高的 K 个单行 code，再按
-`top_k` 截断解码、碰撞桶展开后的 Skill 列表。Beam 模式忽略
+Greedy Autoregressive 会生成一条包含多个 Skill code 的换行分隔序列。
+Beam Search 则只生成一条固定长度 code：`num_beams=K` 时返回概率最高的 K 个
+单行 code，再按 `top_k` 截断解码、碰撞桶展开后的 Skill 列表。Beam 模式忽略
 `max_code_paths`（有效值固定为 1）：
 
 ```json
@@ -56,7 +59,7 @@ Greedy 会自回归生成一条包含多个 Skill code 的换行分隔序列。B
 }
 ```
 
-K 越大，时延和显存开销越高。默认仍为多路径 Greedy。
+K 越大，时延和显存开销越高。默认仍为多路径 Greedy Autoregressive。
 
 命令行批量推理也支持同一 TXT 格式，使用
 `python scripts/infer_router.py --query-txt queries.txt`；其余模型、索引及输出

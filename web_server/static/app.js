@@ -1,6 +1,7 @@
 const state = {
   health: null,
   catalogTimer: null,
+  fullCatalogTimer: null,
   hasResult: false,
   skillCache: new Map(),
   inputMode: "single",
@@ -9,6 +10,11 @@ const state = {
   batchResults: [],
   batchRun: null,
   greedyMaxPaths: "4",
+  allSkills: [],
+  allSkillsLoaded: false,
+  catalogCodePrefix: [],
+  selectedMainSkillId: "",
+  selectedCatalogSkillId: "",
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -18,7 +24,6 @@ const form = $("#query-form");
 const queryInput = $("#query");
 const submitButton = $("#submit-button");
 const errorBox = $("#form-error");
-const skillDialog = $("#skill-dialog");
 const decodingMode = $("#decoding-mode");
 const numBeams = $("#num-beams");
 const beamControl = $("#beam-control");
@@ -35,6 +40,16 @@ function textNode(tag, className, value) {
   if (className) node.className = className;
   node.textContent = value ?? "";
   return node;
+}
+
+function formatScore(value) {
+  const score = Number(value);
+  return Number.isFinite(score) ? score.toFixed(4) : "—";
+}
+
+function skillTokens(skill) {
+  if (Array.isArray(skill.tokens)) return skill.tokens.map(String);
+  return String(skill.code_text || "").match(/<[^>]+>/g) || [];
 }
 
 function updateDecodingControls() {
@@ -106,6 +121,7 @@ async function loadHealth() {
           ? "未记录"
           : Number(values[index]).toLocaleString();
     });
+
     maxPaths.replaceChildren();
     for (let value = 1; value <= health.max_code_paths; value += 1) {
       const option = document.createElement("option");
@@ -114,6 +130,7 @@ async function loadHealth() {
       option.selected = value === Math.min(4, health.max_code_paths);
       maxPaths.append(option);
     }
+
     const maxNumBeams = Math.max(2, Number(health.max_num_beams || 8));
     const beamValues = [2, 4, 8, 16, 32, 64].filter(
       (value) => value <= maxNumBeams,
@@ -128,6 +145,7 @@ async function loadHealth() {
       option.selected = value === (beamValues.includes(4) ? 4 : beamValues[0]);
       numBeams.append(option);
     });
+
     const maxBatchSize = Math.max(1, Number(health.max_batch_size || 8));
     const availableBatchSizes = batchSizeOptions(maxBatchSize);
     batchSize.replaceChildren();
@@ -208,34 +226,111 @@ async function loadBatchFile() {
   }
 }
 
-function skillButton(skill, className = "skill-link") {
-  const button = textNode("button", className, skill.name || skill.skill_id);
-  button.type = "button";
-  button.dataset.skillId = skill.skill_id;
-  button.addEventListener("click", () => openSkill(skill.skill_id));
-  return button;
+function detailTag(value) {
+  return textNode("span", "detail-tag", value);
+}
+
+function renderSkillDetail(skill, detailSelector, emptySelector) {
+  const detail = $(detailSelector);
+  const empty = $(emptySelector);
+  empty.hidden = true;
+  detail.hidden = false;
+  detail.querySelector('[data-detail="name"]').textContent =
+    skill.name || skill.skill_id;
+  detail.querySelector('[data-detail="id"]').textContent = skill.skill_id;
+  detail.querySelector('[data-detail="capability"]').textContent =
+    skill.capability_zh || skill.description || "暂无能力说明";
+  detail.querySelector('[data-detail="description"]').textContent =
+    skill.description || "暂无原始描述";
+  detail.querySelector('[data-detail="code"]').textContent =
+    skill.code_text || "";
+
+  const candidateText = detail.querySelector('[data-detail="text"]');
+  if (candidateText) {
+    candidateText.textContent =
+      skill.text || skill.description || skill.capability_zh || "暂无候选文本";
+  }
+
+  const tags = detail.querySelector('[data-detail="tags"]');
+  tags.replaceChildren();
+  if (skill.domain) tags.append(detailTag(`领域 · ${skill.domain}`));
+  if (skill.mobile_fit) tags.append(detailTag(`手机适配 · ${skill.mobile_fit}`));
+  if (skill.rank !== undefined && skill.rank !== null) {
+    tags.append(detailTag(`ClawHub 排名 · ${skill.rank}`));
+  }
+  (skill.roles || []).forEach((role) => tags.append(detailTag(`role · ${role}`)));
+
+  const source = detail.querySelector('[data-detail="source"]');
+  source.hidden = !skill.source_url;
+  if (skill.source_url) source.href = skill.source_url;
+}
+
+async function resolveSkill(skillOrId) {
+  if (typeof skillOrId === "object" && skillOrId !== null) {
+    state.skillCache.set(skillOrId.skill_id, skillOrId);
+    return skillOrId;
+  }
+  const skillId = String(skillOrId);
+  let skill = state.skillCache.get(skillId);
+  if (!skill) {
+    skill = await jsonRequest(`/api/skill?id=${encodeURIComponent(skillId)}`);
+    state.skillCache.set(skillId, skill);
+  }
+  return skill;
+}
+
+function updateSelectedSkillRows(skillId, context) {
+  const selector =
+    context === "catalog"
+      ? "#all-skill-results .all-skill-row"
+      : ".candidate-row, .catalog-item";
+  document.querySelectorAll(selector).forEach((node) => {
+    node.classList.toggle("selected", node.dataset.skillId === skillId);
+  });
+}
+
+async function showSkill(skillOrId, context = "main") {
+  try {
+    const skill = await resolveSkill(skillOrId);
+    if (context === "catalog") {
+      state.selectedCatalogSkillId = skill.skill_id;
+      renderSkillDetail(skill, "#catalog-detail", "#catalog-detail-empty");
+    } else {
+      state.selectedMainSkillId = skill.skill_id;
+      renderSkillDetail(skill, "#main-detail", "#main-detail-empty");
+    }
+    updateSelectedSkillRows(skill.skill_id, context);
+  } catch (error) {
+    showError(`无法加载 Skill 详情：${error.message}`);
+  }
 }
 
 function renderPaths(paths, beamMode = false) {
   const container = $("#paths");
   container.replaceChildren();
   paths.forEach((path, index) => {
-    const card = textNode("article", "path-card");
-    const top = textNode("div", "path-top");
-    top.append(
+    const row = textNode("article", "path-row");
+    row.append(
       textNode(
         "span",
         "path-number",
         `${beamMode ? "CODE" : "PATH"} ${String(index + 1).padStart(2, "0")}`,
       ),
-      textNode("span", "path-score", Number(path.score).toFixed(4)),
     );
     const tokens = textNode("div", "tokens");
-    path.code_tokens.forEach((token) => tokens.append(textNode("code", "token", token)));
-    const names = textNode("div", "decoded-names");
-    path.skills.forEach((skill) => names.append(skillButton(skill)));
-    card.append(top, tokens, names);
-    container.append(card);
+    (path.code_tokens || []).forEach((token) => {
+      tokens.append(textNode("code", "token", token));
+    });
+    row.append(
+      tokens,
+      textNode(
+        "span",
+        "path-skill-count",
+        `${(path.skills || []).length} decoded Skills`,
+      ),
+      textNode("span", "path-score", formatScore(path.score)),
+    );
+    container.append(row);
   });
   const unit = beamMode ? "code" : "path";
   $("#path-count").textContent =
@@ -243,24 +338,53 @@ function renderPaths(paths, beamMode = false) {
 }
 
 function renderCandidates(candidates) {
-  const body = $("#candidate-rows");
-  body.replaceChildren();
+  const container = $("#candidate-rows");
+  container.replaceChildren();
+  $("#candidate-count").textContent =
+    `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}`;
+
+  if (!candidates.length) {
+    container.append(textNode("p", "empty-list", "没有解码出候选 Skill。"));
+    return;
+  }
+
   candidates.forEach((candidate, index) => {
-    const row = document.createElement("tr");
-    row.append(textNode("td", "rank", String(index + 1).padStart(2, "0")));
-    const skill = document.createElement("td");
-    skill.append(skillButton(candidate, "skill-name skill-link"));
-    skill.append(textNode("span", "skill-id", candidate.skill_id));
-    const domain = document.createElement("td");
-    domain.append(textNode("span", "domain-tag", candidate.domain || "未分类"));
-    row.append(
-      skill,
-      domain,
-      textNode("td", "code-cell", candidate.code_text),
-      textNode("td", "score-cell", Number(candidate.score).toFixed(4)),
+    state.skillCache.set(candidate.skill_id, candidate);
+    const row = textNode("button", "candidate-row");
+    row.type = "button";
+    row.dataset.skillId = candidate.skill_id;
+    row.setAttribute(
+      "aria-label",
+      `查看 ${candidate.name || candidate.skill_id} 详情`,
     );
-    body.append(row);
+
+    const copy = textNode("span", "candidate-copy");
+    const nameLine = textNode("span", "candidate-name-line");
+    nameLine.append(
+      textNode("strong", "candidate-name", candidate.name || candidate.skill_id),
+      textNode("span", "domain-text", candidate.domain || "未分类"),
+    );
+    copy.append(
+      nameLine,
+      textNode(
+        "span",
+        "candidate-description",
+        candidate.capability_zh ||
+          candidate.description ||
+          candidate.skill_id,
+      ),
+    );
+    row.append(
+      textNode("span", "candidate-rank", String(index + 1).padStart(2, "0")),
+      copy,
+      textNode("code", "candidate-code", candidate.code_text),
+      textNode("span", "candidate-score", formatScore(candidate.score)),
+    );
+    row.addEventListener("click", () => showSkill(candidate, "main"));
+    container.append(row);
   });
+
+  showSkill(candidates[0], "main");
 }
 
 function generationOptions() {
@@ -279,27 +403,33 @@ function renderResult(result, { batch = false } = {}) {
   $("#results").hidden = false;
   $("#result-panel").classList.remove("empty");
   state.hasResult = true;
+
   const request = batch ? state.batchRun?.request : result.request;
   const latency = batch ? state.batchRun?.latency_ms : result.latency_ms;
   $("#latency-label").textContent = batch ? "批量总时延" : "端到端时延";
   $("#latency").textContent =
     latency === undefined ? "—" : `${Number(latency).toLocaleString()} ms`;
+
   const mode = request?.decoding_mode || result.decoding?.mode || "greedy";
   const beamWidth = request?.num_beams || result.decoding?.num_beams || 1;
   const beamMode = mode === "beam_search";
-  $("#decode-summary").textContent =
-    beamMode ? `Beam Search · Top ${beamWidth} codes` : "Greedy";
+  $("#decode-summary").textContent = beamMode
+    ? `Beam Search · Top ${beamWidth} codes`
+    : "Greedy Autoregressive";
   $("#raw-output-label").textContent = beamMode
-    ? "TOP-K SINGLE-LINE CODE ALTERNATIVES"
-    : "RAW AUTOREGRESSIVE OUTPUT";
-  $("#paths-heading").textContent = beamMode ? "Code 候选" : "生成路径";
+    ? "查看 Top-K 单行 Code 输出"
+    : "查看原始自回归输出";
+  $("#paths-heading").textContent = beamMode ? "Code 候选" : "生成 Code 路径";
   $("#candidate-hint").textContent = beamMode
     ? "按 Beam 的 Code 排名展开为 Skill"
     : "同一路径内按候选原始顺序展开";
+  $("#result-subtitle").textContent = beamMode
+    ? `单行 Code Top ${beamWidth} 解码后的候选`
+    : `多路径自回归解码后的候选`;
   $("#result-query").textContent = result.query;
   $("#generated-text").textContent = result.generated_text || "(empty)";
-  renderPaths(result.paths, beamMode);
-  renderCandidates(result.candidates);
+  renderCandidates(result.candidates || []);
+  renderPaths(result.paths || [], beamMode);
   $("#raw-json").textContent = JSON.stringify(result, null, 2);
 }
 
@@ -377,7 +507,7 @@ async function runSingleInference(options) {
   showLoading(
     options.decoding_mode === "beam_search"
       ? `正在搜索单行 Skill Code 的 Top ${options.num_beams} 候选…`
-      : "正在约束生成多条 Skill Code 并解码候选，请稍候。",
+      : "正在进行 Greedy Autoregressive 路由并解码候选 Skill…",
   );
   const result = await jsonRequest("/api/infer", {
     method: "POST",
@@ -404,7 +534,7 @@ async function runBatchInference(options) {
     const decodingLabel =
       options.decoding_mode === "beam_search"
         ? `单行 Code Top ${options.num_beams}`
-        : "多路径 Greedy";
+        : "Greedy Autoregressive";
     showLoading(
       `正在处理 ${start + 1}–${end} / ${rows.length} 条 Query · ${decodingLabel}…`,
     );
@@ -451,7 +581,7 @@ async function runInference(event) {
       state.inputMode === "batch"
         ? await runBatchInference(generationOptions())
         : await runSingleInference(generationOptions());
-    if (completed && window.innerWidth < 1000) {
+    if (completed && window.innerWidth < 720) {
       $("#result-panel").scrollIntoView({ behavior: "smooth" });
     }
   } catch (error) {
@@ -467,13 +597,15 @@ async function runInference(event) {
 }
 
 function renderCatalog(payload) {
-  $("#catalog-total").textContent = `${payload.total} results`;
+  $("#catalog-total").textContent = `${payload.total}`;
   const container = $("#catalog-results");
   container.replaceChildren();
-  payload.skills.slice(0, 12).forEach((skill) => {
+  payload.skills.slice(0, 8).forEach((skill) => {
+    state.skillCache.set(skill.skill_id, skill);
     const item = textNode("button", "catalog-item");
     item.type = "button";
-    item.addEventListener("click", () => openSkill(skill.skill_id));
+    item.dataset.skillId = skill.skill_id;
+    item.addEventListener("click", () => showSkill(skill, "main"));
     item.append(
       textNode("strong", "", skill.name || skill.skill_id),
       textNode("code", "", skill.code_text),
@@ -485,47 +617,11 @@ function renderCatalog(payload) {
     );
     container.append(item);
   });
-}
-
-function detailTag(value) {
-  return textNode("span", "detail-tag", value);
-}
-
-function renderSkillDetail(skill) {
-  $("#detail-name").textContent = skill.name || skill.skill_id;
-  $("#detail-id").textContent = skill.skill_id;
-  $("#detail-capability").textContent =
-    skill.capability_zh || skill.description || "暂无能力说明";
-  $("#detail-description").textContent = skill.description || "暂无原始描述";
-  $("#detail-text").textContent =
-    skill.text || skill.description || skill.capability_zh || "暂无候选文本";
-  $("#detail-code").textContent = skill.code_text || "";
-
-  const tags = $("#detail-tags");
-  tags.replaceChildren();
-  if (skill.domain) tags.append(detailTag(`领域 · ${skill.domain}`));
-  if (skill.mobile_fit) tags.append(detailTag(`手机适配 · ${skill.mobile_fit}`));
-  if (skill.rank !== undefined && skill.rank !== null) {
-    tags.append(detailTag(`ClawHub 排名 · ${skill.rank}`));
+  if (!payload.skills.length) {
+    container.append(textNode("p", "empty-list", "没有匹配的 Skill。"));
   }
-  (skill.roles || []).forEach((role) => tags.append(detailTag(`role · ${role}`)));
-
-  const source = $("#detail-source");
-  source.hidden = !skill.source_url;
-  if (skill.source_url) source.href = skill.source_url;
-}
-
-async function openSkill(skillId) {
-  try {
-    let skill = state.skillCache.get(skillId);
-    if (!skill) {
-      skill = await jsonRequest(`/api/skill?id=${encodeURIComponent(skillId)}`);
-      state.skillCache.set(skillId, skill);
-    }
-    renderSkillDetail(skill);
-    if (!skillDialog.open) skillDialog.showModal();
-  } catch (error) {
-    showError(`无法加载 Skill 详情：${error.message}`);
+  if (state.selectedMainSkillId) {
+    updateSelectedSkillRows(state.selectedMainSkillId, "main");
   }
 }
 
@@ -533,11 +629,222 @@ async function loadCatalog() {
   const query = $("#catalog-query").value.trim();
   try {
     renderCatalog(
-      await jsonRequest(`/api/catalog?q=${encodeURIComponent(query)}&limit=12`),
+      await jsonRequest(`/api/catalog?q=${encodeURIComponent(query)}&limit=8`),
     );
-  } catch (error) {
+  } catch {
     $("#catalog-total").textContent = "加载失败";
   }
+}
+
+function naturalTokenSort(left, right) {
+  return left.localeCompare(right, "zh-CN", {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function buildTree(skills) {
+  const root = { count: 0, children: new Map() };
+  skills.forEach((skill) => {
+    const tokens = skillTokens(skill);
+    root.count += 1;
+    let node = root;
+    tokens.forEach((token) => {
+      if (!node.children.has(token)) {
+        node.children.set(token, { count: 0, children: new Map() });
+      }
+      node = node.children.get(token);
+      node.count += 1;
+    });
+  });
+  return root;
+}
+
+function samePrefix(left, right) {
+  return left.length === right.length &&
+    left.every((token, index) => token === right[index]);
+}
+
+function selectedBranch(prefix) {
+  return prefix.every(
+    (token, index) => state.catalogCodePrefix[index] === token,
+  );
+}
+
+function setCatalogCodePrefix(prefix) {
+  state.catalogCodePrefix = [...prefix];
+  renderCodeTree();
+  renderAllSkills();
+}
+
+function appendTreeChildren(container, node, prefix, level = 0) {
+  const entries = [...node.children.entries()].sort(([left], [right]) =>
+    naturalTokenSort(left, right),
+  );
+  entries.forEach(([token, child], index) => {
+    const nextPrefix = [...prefix, token];
+    if (child.children.size) {
+      const details = document.createElement("details");
+      details.open =
+        selectedBranch(nextPrefix) &&
+        (state.catalogCodePrefix.length > nextPrefix.length || level === 0) ||
+        (state.catalogCodePrefix.length === 0 && level === 0 && index < 3);
+      const summary = document.createElement("summary");
+      summary.classList.toggle(
+        "selected",
+        samePrefix(state.catalogCodePrefix, nextPrefix),
+      );
+      summary.append(
+        textNode("code", "tree-token", token),
+        textNode("span", "tree-count", String(child.count)),
+      );
+      summary.addEventListener("click", () => {
+        window.setTimeout(() => setCatalogCodePrefix(nextPrefix), 0);
+      });
+      details.append(summary);
+      const children = textNode("div", "tree-children");
+      appendTreeChildren(children, child, nextPrefix, level + 1);
+      details.append(children);
+      container.append(details);
+      return;
+    }
+
+    const button = textNode("button", "tree-node-button");
+    button.type = "button";
+    button.classList.toggle(
+      "selected",
+      samePrefix(state.catalogCodePrefix, nextPrefix),
+    );
+    button.append(
+      textNode("code", "tree-token", token),
+      textNode("span", "tree-count", String(child.count)),
+    );
+    button.addEventListener("click", () => setCatalogCodePrefix(nextPrefix));
+    container.append(button);
+  });
+}
+
+function renderCodeTree() {
+  const container = $("#code-tree");
+  container.replaceChildren();
+  const tree = buildTree(state.allSkills);
+  const rootButton = textNode("button", "tree-root");
+  rootButton.type = "button";
+  rootButton.classList.toggle("selected", !state.catalogCodePrefix.length);
+  rootButton.append(
+    textNode("span", "", "全部 Code 路径"),
+    textNode("span", "tree-count", String(tree.count)),
+  );
+  rootButton.addEventListener("click", () => setCatalogCodePrefix([]));
+  container.append(rootButton);
+  appendTreeChildren(container, tree, []);
+  $("#clear-code-filter").hidden = !state.catalogCodePrefix.length;
+}
+
+function catalogSearchText(skill) {
+  return [
+    skill.skill_id,
+    skill.name,
+    skill.description,
+    skill.capability_zh,
+    skill.domain,
+    skill.code_text,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
+}
+
+function filteredCatalogSkills() {
+  const needle = $("#catalog-page-query").value.trim().toLocaleLowerCase();
+  return state.allSkills.filter((skill) => {
+    const tokens = skillTokens(skill);
+    const codeMatch = state.catalogCodePrefix.every(
+      (token, index) => tokens[index] === token,
+    );
+    const textMatch = !needle || catalogSearchText(skill).includes(needle);
+    return codeMatch && textMatch;
+  });
+}
+
+function renderAllSkills() {
+  const skills = filteredCatalogSkills();
+  const container = $("#all-skill-results");
+  container.replaceChildren();
+  $("#filtered-skill-count").textContent =
+    `${skills.length.toLocaleString()} Skills`;
+  $("#catalog-page-total").textContent =
+    `${skills.length.toLocaleString()} / ${state.allSkills.length.toLocaleString()}`;
+  $("#active-code-filter").textContent = state.catalogCodePrefix.length
+    ? state.catalogCodePrefix.join(" → ")
+    : "全部 Code 路径";
+
+  if (!skills.length) {
+    container.append(textNode("p", "empty-list", "没有匹配当前筛选的 Skill。"));
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  skills.forEach((skill) => {
+    state.skillCache.set(skill.skill_id, skill);
+    const row = textNode("button", "all-skill-row");
+    row.type = "button";
+    row.dataset.skillId = skill.skill_id;
+    row.classList.toggle(
+      "selected",
+      state.selectedCatalogSkillId === skill.skill_id,
+    );
+    const copy = textNode("span", "all-skill-copy");
+    copy.append(
+      textNode("strong", "", skill.name || skill.skill_id),
+      textNode(
+        "span",
+        "",
+        skill.capability_zh || skill.description || skill.skill_id,
+      ),
+    );
+    row.append(
+      copy,
+      textNode("span", "all-skill-domain", skill.domain || "未分类"),
+      textNode("code", "all-skill-code", skill.code_text),
+    );
+    row.addEventListener("click", () => showSkill(skill, "catalog"));
+    fragment.append(row);
+  });
+  container.append(fragment);
+}
+
+async function loadFullCatalog() {
+  if (state.allSkillsLoaded) return;
+  const expected = Math.max(1, Number(state.health?.num_skills || 1000));
+  const payload = await jsonRequest(`/api/catalog?q=&limit=${expected}`);
+  state.allSkills = payload.skills;
+  state.allSkillsLoaded = true;
+  payload.skills.forEach((skill) => state.skillCache.set(skill.skill_id, skill));
+}
+
+async function openCatalogPage() {
+  clearError();
+  const railQuery = $("#catalog-query").value.trim();
+  $("#catalog-page-query").value = railQuery;
+  $("#router-view").hidden = true;
+  $("#catalog-page").hidden = false;
+  window.scrollTo({ top: 0, behavior: "instant" });
+  try {
+    await loadFullCatalog();
+    renderCodeTree();
+    renderAllSkills();
+  } catch (error) {
+    $("#all-skill-results").replaceChildren(
+      textNode("p", "empty-list", `无法加载候选集：${error.message}`),
+    );
+  }
+}
+
+function closeCatalogPage() {
+  $("#catalog-page").hidden = true;
+  $("#router-view").hidden = false;
+  $("#open-catalog-page").focus();
 }
 
 $("#example-button").addEventListener("click", () => {
@@ -554,15 +861,28 @@ $("#batch-result-select").addEventListener("change", (event) => {
 });
 $("#download-batch").addEventListener("click", downloadBatchResults);
 document.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") form.requestSubmit();
+  if (event.key === "Escape" && !$("#catalog-page").hidden) {
+    closeCatalogPage();
+    return;
+  }
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    event.key === "Enter" &&
+    $("#catalog-page").hidden
+  ) {
+    form.requestSubmit();
+  }
 });
 $("#catalog-query").addEventListener("input", () => {
   window.clearTimeout(state.catalogTimer);
   state.catalogTimer = window.setTimeout(loadCatalog, 180);
 });
-$("#dialog-close").addEventListener("click", () => skillDialog.close());
-skillDialog.addEventListener("click", (event) => {
-  if (event.target === skillDialog) skillDialog.close();
+$("#open-catalog-page").addEventListener("click", openCatalogPage);
+$("#close-catalog-page").addEventListener("click", closeCatalogPage);
+$("#clear-code-filter").addEventListener("click", () => setCatalogCodePrefix([]));
+$("#catalog-page-query").addEventListener("input", () => {
+  window.clearTimeout(state.fullCatalogTimer);
+  state.fullCatalogTimer = window.setTimeout(renderAllSkills, 120);
 });
 
 async function initialize() {
