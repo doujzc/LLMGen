@@ -2,7 +2,7 @@
 
 本文档以论文 Method Section 的形式定义当前 LLMGen 的训练与推理算法。讨论范围仅包括问题建模、层级 Skill 编码、Router 课程学习、约束解码及其性质；不涉及数据文件、训练脚本、分布式框架、硬件或部署。
 
-当前默认协议是闭集路由：训练、验证、测试和推理共享同一个候选 Skill 集合。层数 \(L\) 可配置，当前主要实例均取 \(L=2\)。默认编码器是 ToolWeaver 风格的学习式平衡残差量化器；可解释 taxonomy 编码是可替换的非默认方案。
+当前默认协议是闭集路由：训练、验证、测试和推理共享同一个候选 Skill 集合。层数 $L$ 可配置，当前主要实例均取 $L=2$。默认编码器是 ToolWeaver 风格的学习式平衡残差量化器；可解释 taxonomy 编码是可替换的非默认方案。
 
 ## 1. 问题定义
 
@@ -12,13 +12,13 @@ $$
 \mathcal S=\{s_i\}_{i=1}^{N},
 $$
 
-其中 \(s_i\) 包含名称、能力说明和 Skill 文档 \(d_i\)。对于用户请求 \(q\)，目标是从同一候选集合中选出一个或多个 Skill：
+其中 $s_i$ 包含名称、能力说明和 Skill 文档 $d_i$。对于用户请求 $q$，目标是从同一候选集合中选出一个或多个 Skill：
 
 $$
 \mathcal Y_q=(s_{q,1},s_{q,2},\ldots,s_{q,m_q}),\qquad s_{q,j}\in\mathcal S.
 $$
 
-\(\mathcal Y_q\) 是有序序列，而不是无序标签集合。一个请求可以同时包含显式意图和隐式意图；只要某个 Skill 是完成请求所必需的，它就进入监督序列。
+$\mathcal Y_q$ 是有序序列，而不是无序标签集合。一个请求可以同时包含显式意图和隐式意图；只要某个 Skill 是完成请求所必需的，它就进入监督序列。
 
 直接让语言模型生成 Skill 名称或完整工具描述会产生较长输出。为此，为每个 Skill 分配一个固定长度的层级标识符：
 
@@ -28,29 +28,29 @@ c(s_i)=
 t^{(L)}_{a_i^{(L)}}\right),
 $$
 
-其中第 \(\ell\) 层有 \(K_\ell\) 个互斥的原子 token，
+其中第 $\ell$ 层有 $K_\ell$ 个互斥的原子 token，
 
 $$
 t^{(\ell)}_k=\texttt{<SK\_L}\ell\texttt{\_}k\texttt{>},
 \qquad 0\le k<K_\ell.
 $$
 
-层级码空间容量为 \(\prod_{\ell=1}^{L}K_\ell\)，但新增词表规模仅为
-\(\sum_{\ell=1}^{L}K_\ell\)。单个 Skill 始终只需生成 \(L\) 个 code token。
+层级码空间容量为 $\prod_{\ell=1}^{L}K_\ell$，但新增词表规模仅为
+$\sum_{\ell=1}^{L}K_\ell$。单个 Skill 始终只需生成 $L$ 个 code token。
 
 主要符号如下。
 
 | 符号 | 含义 |
 |---|---|
-| \(N\) | 候选 Skill 数 |
-| \(d_i,x_i\) | Skill 文档及其固定语义向量 |
-| \(L,K_\ell\) | 层数及第 \(\ell\) 层码本大小 |
-| \(E_\phi,D_\psi\) | RQ-VAE 编码器和解码器 |
-| \(\mathbf C^{(\ell)}\) | 第 \(\ell\) 层向量码本 |
-| \(c(s_i)\) | Skill \(s_i\) 的离散层级路径 |
-| \(\delta\) | 两条路径间的换行分隔 token 序列 |
-| \(P_\theta\) | 自回归 Router |
-| \(\mathcal B(c)\) | code \(c\) 对应的 Skill 碰撞桶 |
+| $N$ | 候选 Skill 数 |
+| $d_i,x_i$ | Skill 文档及其固定语义向量 |
+| $L,K_\ell$ | 层数及第 $\ell$ 层码本大小 |
+| $E_\phi,D_\psi$ | RQ-VAE 编码器和解码器 |
+| $\mathbf C^{(\ell)}$ | 第 $\ell$ 层向量码本 |
+| $c(s_i)$ | Skill $s_i$ 的离散层级路径 |
+| $\delta$ | 两条路径间的换行分隔 token 序列 |
+| $P_\theta$ | 自回归 Router |
+| $\mathcal B(c)$ | code $c$ 对应的 Skill 碰撞桶 |
 
 整体算法为：
 
@@ -69,7 +69,7 @@ Skill 文档/单 Skill query/多 Skill query ─> 三阶段 Router SFT ─> 约�
 
 ### 2.1 语义表征与协同图
 
-使用冻结的文本表征函数 \(f_{\mathrm{emb}}\) 将 Skill 文档映射为向量：
+使用冻结的文本表征函数 $f_{\mathrm{emb}}$ 将 Skill 文档映射为向量：
 
 $$
 x_i=\operatorname{Normalize}\!\left(f_{\mathrm{emb}}(d_i)\right)
@@ -79,7 +79,7 @@ $$
 Embedding 模型不参与后续梯度更新。它只用于离线学习 Skill code；在线 Router 推理不调用 Embedding 模型。
 
 为保留多 Skill 协作关系，从训练 query 的正例构造无向加权图
-\(\mathcal G=(\mathcal S,\mathcal E)\)。记 \(\mathcal T(q)\) 为 query \(q\) 的目标 Skill 集，定义
+$\mathcal G=(\mathcal S,\mathcal E)$。记 $\mathcal T(q)$ 为 query $q$ 的目标 Skill 集，定义
 
 $$
 f_i=\sum_q\mathbf 1[s_i\in\mathcal T(q)],
@@ -103,23 +103,23 @@ $$
 z_i=E_\phi(x_i)\in\mathbb R^{d_e}.
 $$
 
-当前 \(E_\phi\) 是带 ReLU 的多层感知机，\(D_\psi\) 使用反向层宽构成对称解码器；最后一层不施加激活。层宽和层数不影响后续离散算法的定义。
+当前 $E_\phi$ 是带 ReLU 的多层感知机，$D_\psi$ 使用反向层宽构成对称解码器；最后一层不施加激活。层宽和层数不影响后续离散算法的定义。
 
-第 \(\ell\) 层码本为
+第 $\ell$ 层码本为
 
 $$
 \mathbf C^{(\ell)}
 =\{e^{(\ell)}_k\in\mathbb R^{d_e}\}_{k=0}^{K_\ell-1}.
 $$
 
-令初始残差 \(r_i^{(0)}=z_i\)。在第 \(\ell\) 层，计算残差到所有 code 向量的平方距离：
+令初始残差 $r_i^{(0)}=z_i$。在第 $\ell$ 层，计算残差到所有 code 向量的平方距离：
 
 $$
 D_{ik}^{(\ell)}
 =\left\|r_i^{(\ell-1)}-e_k^{(\ell)}\right\|_2^2.
 $$
 
-训练时不直接使用逐样本最近邻，而是在每个 mini-batch 内执行熵正则最优传输。对经过仿射尺度归一化的距离 \(\bar D^{(\ell)}\)，Sinkhorn 迭代近似求解
+训练时不直接使用逐样本最近邻，而是在每个 mini-batch 内执行熵正则最优传输。对经过仿射尺度归一化的距离 $\bar D^{(\ell)}$，Sinkhorn 迭代近似求解
 
 $$
 \begin{aligned}
@@ -133,13 +133,13 @@ $$
 \end{aligned}
 $$
 
-其中 \(B\) 是 batch size，\(\epsilon_\ell\) 控制语义保真与均衡程度。硬索引取为
+其中 $B$ 是 batch size，$\epsilon_\ell$ 控制语义保真与均衡程度。硬索引取为
 
 $$
 a_i^{(\ell)}=\arg\max_k\Pi_{ik}^{(\ell)}.
 $$
 
-选中的码本向量为 \(e_i^{(\ell)}=e_{a_i^{(\ell)}}^{(\ell)}\)。采用 straight-through estimator：
+选中的码本向量为 $e_i^{(\ell)}=e_{a_i^{(\ell)}}^{(\ell)}$。采用 straight-through estimator：
 
 $$
 \tilde e_i^{(\ell)}
@@ -158,7 +158,7 @@ r_i^{(\ell)}
 \hat x_i=D_\psi(\hat z_i).
 $$
 
-\(\operatorname{sg}(\cdot)\) 表示停止梯度。每层码本在首次使用时由当前残差的 K-means 中心初始化。
+$\operatorname{sg}(\cdot)$ 表示停止梯度。每层码本在首次使用时由当前残差的 K-means 中心初始化。
 
 ### 2.3 训练目标
 
@@ -169,7 +169,7 @@ $$
 =\frac{1}{B}\sum_i\|\hat x_i-x_i\|_2^2.
 $$
 
-第 \(\ell\) 层的向量量化损失为
+第 $\ell$ 层的向量量化损失为
 
 $$
 \mathcal L_{\mathrm{vq}}^{(\ell)}
@@ -189,7 +189,7 @@ $$
 \mathbb E_i[\mathcal L_{\mathrm{vq}}^{(\ell)}].
 $$
 
-对于当前 batch 内诱导出的协同边 \(\mathcal E_B\)，图正则项直接约束每层选中的码本向量：
+对于当前 batch 内诱导出的协同边 $\mathcal E_B$，图正则项直接约束每层选中的码本向量：
 
 $$
 \mathcal L_{\mathrm{graph}}
@@ -216,7 +216,7 @@ $$
 }.
 $$
 
-训练 batch 采用 edge-aware sampling：先采样一组基础节点，再按 \(w_{ij}\) 为每个基础节点采一个邻居，最后随机补齐 batch。这样无需构造稠密邻接矩阵，也能让多数 batch 含有有效协同边。
+训练 batch 采用 edge-aware sampling：先采样一组基础节点，再按 $w_{ij}$ 为每个基础节点采一个邻居，最后随机补齐 batch。这样无需构造稠密邻接矩阵，也能让多数 batch 含有有效协同边。
 
 评估码本时关闭 Sinkhorn，使用普通残差最近邻得到 raw codes。当前模型选择准则按
 
@@ -231,9 +231,9 @@ $$
 
 ### 2.4 冻结码本上的层级平衡硬分配
 
-Sinkhorn 仅保证 mini-batch 内近似平衡，且逐行 \(\arg\max\) 后仍可能发生全局坍缩。因此，训练结束后冻结 \(E_\phi\) 与全部码本，在完整候选集合上执行一次确定性的层级硬分配。
+Sinkhorn 仅保证 mini-batch 内近似平衡，且逐行 $\arg\max$ 后仍可能发生全局坍缩。因此，训练结束后冻结 $E_\phi$ 与全部码本，在完整候选集合上执行一次确定性的层级硬分配。
 
-首先计算全部隐变量和冻结码本距离。第 \(\ell\) 层的目标是尽量最小化
+首先计算全部隐变量和冻结码本距离。第 $\ell$ 层的目标是尽量最小化
 
 $$
 \min_{\{a_i^{(\ell)}\}}
@@ -263,7 +263,7 @@ $$
 =\{i:(a_i^{(1)},\ldots,a_i^{(\ell-1)})=p\}
 $$
 
-内部，只要 \(|\mathcal G_p^{(\ell)}|\le K_\ell\)，就要求当前层索引互异：
+内部，只要 $|\mathcal G_p^{(\ell)}|\le K_\ell$，就要求当前层索引互异：
 
 $$
 a_i^{(\ell)}\ne a_j^{(\ell)},
@@ -285,7 +285,7 @@ K_1K_2\ge N,
 $$
 
 第一层平衡便给出
-\(\max_p|\mathcal G_p^{(2)}|\le K_2\)，第二层的前缀内唯一性因而可以产生无碰撞路径。
+$\max_p|\mathcal G_p^{(2)}|\le K_2$，第二层的前缀内唯一性因而可以产生无碰撞路径。
 
 最终离散标识符为
 
@@ -306,7 +306,7 @@ $$
 
 ### 2.5 Code 质量判据
 
-对第 \(\ell\) 层计数 \(n_k^{(\ell)}\)，定义利用率和归一化熵：
+对第 $\ell$ 层计数 $n_k^{(\ell)}$，定义利用率和归一化熵：
 
 $$
 U_\ell
@@ -333,7 +333,7 @@ Router 训练前同时检查 raw nearest codes 与最终 balanced codes 的层�
 
 ### 2.6 可解释层级编码
 
-当 Skill 自带长度至少为 \(L\) 的人工 taxonomy
+当 Skill 自带长度至少为 $L$ 的人工 taxonomy
 
 $$
 h_i=(h_i^{(1)},\ldots,h_i^{(L)}),
@@ -346,7 +346,7 @@ $$
 \{0,\ldots,K_\ell-1\}.
 $$
 
-对每个前缀 \(p\)，新标签占用第一个未使用的 child index；已有标签永远复用原索引。删除 Skill 不回收标签含义。分支耗尽时，默认拒绝编码；显式允许 overflow 时，使用 codebook version、前缀和标签的稳定哈希映射到共享槽位。
+对每个前缀 $p$，新标签占用第一个未使用的 child index；已有标签永远复用原索引。删除 Skill 不回收标签含义。分支耗尽时，默认拒绝编码；显式允许 overflow 时，使用 codebook version、前缀和标签的稳定哈希映射到共享槽位。
 
 这种方案的路径可直接解释为 taxonomy 标签链，但平衡性和碰撞率依赖人工 taxonomy。后续 Router 训练与推理算法对两种编码方式完全相同。当前默认训练链路采用上一节的学习式平衡编码。
 
@@ -367,7 +367,7 @@ $$
 
 ### 3.2 三类监督
 
-记 \(d_i\) 为 Skill 文档，\(q_i^{(1)}\) 为只需要一个 Skill 的自然语言请求，\(q_n\) 为多 Skill 请求。
+记 $d_i$ 为 Skill 文档，$q_i^{(1)}$ 为只需要一个 Skill 的自然语言请求，$q_n$ 为多 Skill 请求。
 
 Memorization 数据为
 
@@ -376,7 +376,7 @@ $$
 =\{(d_i,c(s_i))\}_{i=1}^{N}.
 $$
 
-它学习“Skill 能力描述 \(\rightarrow\) 固定 code”，使每个候选 Skill 在多 Skill 学习前都获得直接监督。
+它学习“Skill 能力描述 $\rightarrow$ 固定 code”，使每个候选 Skill 在多 Skill 学习前都获得直接监督。
 
 Single-skill retrieval alignment 数据为
 
@@ -403,7 +403,7 @@ X_n^{\mathrm{ret}}=\operatorname{Chat}(h_{\mathrm{ret}},q_n).
 $$
 
 若目标 Skill 顺序为
-\(\mathcal Y_n=(s_{n,1},\ldots,s_{n,m_n})\)，监督字符串为
+$\mathcal Y_n=(s_{n,1},\ldots,s_{n,m_n})$，监督字符串为
 
 $$
 y_n=
@@ -412,7 +412,7 @@ c(s_{n,2})\Vert\cdots\Vert\delta\Vert
 c(s_{n,m_n})\Vert\mathrm{EOS}.
 $$
 
-其中 \(\delta\) 是换行符在基础 tokenizer 下对应的一个或多个 token。若多个目标 Skill 共享相同 code，该 code 在目标字符串中只出现一次；精确 Skill 集仍由其碰撞桶表示。
+其中 $\delta$ 是换行符在基础 tokenizer 下对应的一个或多个 token。若多个目标 Skill 共享相同 code，该 code 在目标字符串中只出现一次；精确 Skill 集仍由其碰撞桶表示。
 
 在当前默认的两层设置中，目标形式为：
 
@@ -427,7 +427,7 @@ $$
 <SK_L1_c><SK_L2_d><EOS>
 ```
 
-含 \(m\) 条路径的目标 token 数为
+含 $m$ 条路径的目标 token 数为
 
 $$
 T_{\mathrm{out}}
@@ -438,10 +438,10 @@ $$
 
 ### 3.3 隐式意图与顺序增强
 
-隐式意图不引入独立分类头。对于没有被 query 直接点名、但完成任务所必需的 Skill，仍将其 code 放入 \(y_n\)，并通过同一自回归目标学习。
+隐式意图不引入独立分类头。对于没有被 query 直接点名、但完成任务所必需的 Skill，仍将其 code 放入 $y_n$，并通过同一自回归目标学习。
 
 对于同一个语义请求，可以构造多个允许的目标排列
-\(\Pi_n=\{\pi_1,\ldots,\pi_R\}\)。每个排列形成一个独立监督样本：
+$\Pi_n=\{\pi_1,\ldots,\pi_R\}$。每个排列形成一个独立监督样本：
 
 $$
 y_{n,\pi}
@@ -453,8 +453,8 @@ Router 因而不依赖唯一的标注顺序。训练阶段不会把多 Skill 标
 
 ### 3.4 Target-only 自回归目标
 
-对 prompt \(X_n\) 和目标 token
-\(y_n=(y_{n,1},\ldots,y_{n,T_n})\)，Router 定义
+对 prompt $X_n$ 和目标 token
+$y_n=(y_{n,1},\ldots,y_{n,T_n})$，Router 定义
 
 $$
 P_\theta(y_n\mid X_n)
@@ -477,7 +477,7 @@ Code token、换行边界和 EOS 使用相同的 token-level 权重。当前 Sta
 
 ## 4. 三阶段课程学习
 
-设 \(\theta_0\) 为扩展层级 token 词表后的预训练语言模型参数。
+设 $\theta_0$ 为扩展层级 token 词表后的预训练语言模型参数。
 
 第一阶段执行 Skill-code memorization：
 
@@ -488,7 +488,7 @@ $$
 \qquad \theta\leftarrow\theta_0.
 $$
 
-第二阶段从 \(\theta_{\mathrm{mem}}\) 初始化，执行单 Skill query 对齐：
+第二阶段从 $\theta_{\mathrm{mem}}$ 初始化，执行单 Skill query 对齐：
 
 $$
 \theta_{\mathrm{align}}
@@ -497,9 +497,9 @@ $$
 \qquad \theta\leftarrow\theta_{\mathrm{mem}}.
 $$
 
-第三阶段从 \(\theta_{\mathrm{align}}\) 初始化，执行完整多 Skill 自回归训练。为缓解对固定 code 的灾难性遗忘，从
-\(\mathcal D_{\mathrm{mem}}\) 中采样 replay 子集
-\(\mathcal R_\rho\)。目标 replay 比例为 \(\rho\)，对应请求样本数
+第三阶段从 $\theta_{\mathrm{align}}$ 初始化，执行完整多 Skill 自回归训练。为缓解对固定 code 的灾难性遗忘，从
+$\mathcal D_{\mathrm{mem}}$ 中采样 replay 子集
+$\mathcal R_\rho$。目标 replay 比例为 $\rho$，对应请求样本数
 
 $$
 R_{\mathrm{req}}
@@ -516,7 +516,7 @@ R_{\mathrm{req}}
 \end{cases}
 $$
 
-当前算法从 \(\mathcal D_{\mathrm{mem}}\) 中确定性打乱后无放回采样，因此
+当前算法从 $\mathcal D_{\mathrm{mem}}$ 中确定性打乱后无放回采样，因此
 
 $$
 |\mathcal R_\rho|
@@ -527,7 +527,7 @@ $$
 {|\mathcal D_{\mathrm{ret}}|+|\mathcal R_\rho|}.
 $$
 
-当 memorization 样本不足时，实际 replay 比例会低于请求的 \(\rho\)。
+当 memorization 样本不足时，实际 replay 比例会低于请求的 $\rho$。
 
 最终优化
 
@@ -545,7 +545,7 @@ $$
 }.
 $$
 
-Replay 样本保留 memorization 指令，多 Skill 样本使用 retrieval 指令。当前默认闭集配置请求 \(\rho=0.2\)。
+Replay 样本保留 memorization 指令，多 Skill 样本使用 retrieval 指令。当前默认闭集配置请求 $\rho=0.2$。
 
 查询划分以规范化后的 query 文本为组，完全相同的请求不会跨训练集和验证集。验证组的每个目标 Skill 在训练监督中至少保留一个正例，避免把闭集评估误变为 unseen-target 评估。
 
@@ -576,14 +576,14 @@ Output:
 
 ## 5. 约束解码空间
 
-令当前 active Skill 集为 \(\mathcal A\subseteq\mathcal S\)，其去重后的合法路径集合为
+令当前 active Skill 集为 $\mathcal A\subseteq\mathcal S$，其去重后的合法路径集合为
 
 $$
 \mathcal C_{\mathcal A}
 =\{c(s):s\in\mathcal A\}.
 $$
 
-算法在 \(\mathcal C_{\mathcal A}\) 上构造 token trie。推理时，非法层级 token 在 softmax 前被置为 \(-\infty\)。对当前合法 token 集 \(\mathcal V_{\mathrm{allow}}(h)\)，约束概率为
+算法在 $\mathcal C_{\mathcal A}$ 上构造 token trie。推理时，非法层级 token 在 softmax 前被置为 $-\infty$。对当前合法 token 集 $\mathcal V_{\mathrm{allow}}(h)$，约束概率为
 
 $$
 \tilde P_\theta(v\mid h)
@@ -608,16 +608,16 @@ $$
 \mathrm{PATH}\;(\delta\;\mathrm{PATH})^\star\;\mathrm{EOS},
 $$
 
-其中每个 \(\mathrm{PATH}\) 恰好包含 \(L\) 个 token。
+其中每个 $\mathrm{PATH}$ 恰好包含 $L$ 个 token。
 
 解码状态包含：
 
-1. 已完成路径集合 \(\mathcal H\)；
-2. 当前路径前缀 \(p\)；
+1. 已完成路径集合 $\mathcal H$；
+2. 当前路径前缀 $p$；
 3. 当前位于路径、分隔符还是路径边界；
-4. 已完成路径数 \(m\)。
+4. 已完成路径数 $m$。
 
-若正在生成路径，合法下一 token 是所有尚未生成路径在前缀 \(p\) 后的 trie child：
+若正在生成路径，合法下一 token 是所有尚未生成路径在前缀 $p$ 后的 trie child：
 
 $$
 \mathcal V_{\mathrm{allow}}(p,\mathcal H)
@@ -631,9 +631,9 @@ $$
 
 完成一条路径后：
 
-- 若达到最大路径数 \(M\)，下一 token 只能是 EOS；
-- 否则模型在 EOS 与 \(\delta\) 的首 token 之间自回归决策；
-- 一旦选择 \(\delta\)，其余分隔 token 被文法强制生成；
+- 若达到最大路径数 $M$，下一 token 只能是 EOS；
+- 否则模型在 EOS 与 $\delta$ 的首 token 之间自回归决策；
+- 一旦选择 $\delta$，其余分隔 token 被文法强制生成；
 - 已完成路径不能再次出现。
 
 ### 5.2 Greedy：完整多 Skill 自回归输出
@@ -654,7 +654,7 @@ c_1\Vert\delta\Vert c_2
 \qquad 1\le m\le M.
 $$
 
-第 \(j\) 条路径的展示分数只累加其 \(L\) 个 code token 的约束 log-probability：
+第 $j$ 条路径的展示分数只累加其 $L$ 个 code token 的约束 log-probability：
 
 $$
 S_j^{\mathrm{greedy}}
@@ -666,7 +666,7 @@ c_{j,\ell}
 \right).
 $$
 
-分隔符与 EOS 的概率不并入路径分数。Greedy 的路径次序表示模型生成的选择/执行次序，而不是按 \(S_j^{\mathrm{greedy}}\) 重新排序。
+分隔符与 EOS 的概率不并入路径分数。Greedy 的路径次序表示模型生成的选择/执行次序，而不是按 $S_j^{\mathrm{greedy}}$ 重新排序。
 
 ```text
 Algorithm 2: Constrained Multi-path Greedy Decoding
@@ -685,11 +685,11 @@ Output: ordered paths C
 10: return C
 ```
 
-### 5.3 Beam：单条路径的 Top-\(K\) code 检索
+### 5.3 Beam：单条路径的 Top-$K$ code 检索
 
-Beam 模式具有不同语义：它不搜索多行输出，也不是 Greedy 多路径解码的增强版。每个 beam 只表示一条固定长度路径，算法恰好生成 \(L\) 个 code token，然后返回得分最高的 \(K\) 个独立 code。
+Beam 模式具有不同语义：它不搜索多行输出，也不是 Greedy 多路径解码的增强版。每个 beam 只表示一条固定长度路径，算法恰好生成 $L$ 个 code token，然后返回得分最高的 $K$ 个独立 code。
 
-对单条路径 \(c\in\mathcal C_{\mathcal A}\)，定义
+对单条路径 $c\in\mathcal C_{\mathcal A}$，定义
 
 $$
 S^{\mathrm{beam}}(c\mid q)
@@ -698,7 +698,7 @@ S^{\mathrm{beam}}(c\mid q)
 \left(c_\ell\mid q,c_{<\ell}\right).
 $$
 
-宽度为 \(K\) 的标准 trie-constrained beam search 在每层展开合法 child，并保留累计分数最高的 \(K\) 个前缀。所有候选长度相同，故无需长度归一化。最终结果近似为
+宽度为 $K$ 的标准 trie-constrained beam search 在每层展开合法 child，并保留累计分数最高的 $K$ 个前缀。所有候选长度相同，故无需长度归一化。最终结果近似为
 
 $$
 \operatorname{TopK}_{c\in\mathcal C_{\mathcal A}}
@@ -726,16 +726,16 @@ Output: K ranked code paths
 
 | 属性 | Greedy | Beam |
 |---|---|---|
-| 搜索对象 | 一个完整的多路径序列 | \(K\) 条独立单路径 |
-| 每个结果长度 | \(mL+(m-1)|\delta|+1\) | 恰好 \(L\) |
+| 搜索对象 | 一个完整的多路径序列 | $K$ 条独立单路径 |
+| 每个结果长度 | $mL+(m-1)|\delta|+1$ | 恰好 $L$ |
 | 是否生成换行/EOS | 是 | 否 |
 | Skill 数量决策 | 模型在边界选择 EOS 或继续 | 不做多 Skill 数量决策 |
-| 输出路径数 | \(1\) 到 \(M\) | 最多 \(K\) 个 code |
+| 输出路径数 | $1$ 到 $M$ | 最多 $K$ 个 code |
 | 排序含义 | 自回归生成/执行顺序 | 单 code 累计概率顺序 |
 
 ### 5.4 Code 到 Skill 的碰撞桶展开
 
-对生成路径序列 \((c_1,\ldots,c_r)\)，依次展开
+对生成路径序列 $(c_1,\ldots,c_r)$，依次展开
 
 $$
 \mathcal B_{\mathcal A}(c_j)
@@ -747,29 +747,29 @@ $$
 1. 先按路径排名；
 2. 同一碰撞桶内使用确定性顺序；
 3. Skill 继承所属路径的分数；
-4. 展开并去重后，再截断 Skill candidate top-\(k\)。
+4. 展开并去重后，再截断 Skill candidate top-$k$。
 
-因此，Beam width \(K\) 与 Skill candidate top-\(k\) 是两个不同参数：前者控制返回多少条 code 路径，后者控制桶展开后最多保留多少个 Skill。
+因此，Beam width $K$ 与 Skill candidate top-$k$ 是两个不同参数：前者控制返回多少条 code 路径，后者控制桶展开后最多保留多少个 Skill。
 
-当前算法没有桶内 reranker。若 \(|\mathcal B(c)|>1\)，仅凭生成 code 无法区分桶内 Skill；降低碰撞率是 Stage 1 的必要目标，而不是可由 Stage 2 自动补救的问题。
+当前算法没有桶内 reranker。若 $|\mathcal B(c)|>1$，仅凭生成 code 无法区分桶内 Skill；降低碰撞率是 Stage 1 的必要目标，而不是可由 Stage 2 自动补救的问题。
 
 ## 6. 算法性质与复杂度
 
 ### 6.1 输出效率
 
-选择 \(m\) 个 Skill 的自回归输出长度为
+选择 $m$ 个 Skill 的自回归输出长度为
 
 $$
 O(mL),
 $$
 
-与 Skill 名称或文档长度无关。当前 \(L=2\)，因此每条路径只包含两个新增 token。
+与 Skill 名称或文档长度无关。当前 $L=2$，因此每条路径只包含两个新增 token。
 
 ### 6.2 约束有效性
 
 只要 trie、registry 和 Router 使用同一 codebook version：
 
-1. 每条输出路径长度恒为 \(L\)；
+1. 每条输出路径长度恒为 $L$；
 2. 每层 token 必属于对应层命名空间；
 3. 每条路径必属于 active code 集；
 4. Greedy 序列内不会重复完整路径；
@@ -777,7 +777,7 @@ $$
 
 ### 6.3 计算复杂度
 
-对 batch size \(B\)、隐维度 \(d_e\)，一次 RQ 前向的距离计算复杂度为
+对 batch size $B$、隐维度 $d_e$，一次 RQ 前向的距离计算复杂度为
 
 $$
 O\!\left(
@@ -793,7 +793,7 @@ B I_{\mathrm{SK}}\sum_{\ell=1}^{L}K_\ell
 \right).
 $$
 
-冻结码本后的距离计算对 \(N\) 个 Skill 为
+冻结码本后的距离计算对 $N$ 个 Skill 为
 
 $$
 O\!\left(
@@ -804,7 +804,7 @@ $$
 Hungarian 子问题为立方复杂度，因此只对受控大小的组精确求解；更大组使用容量约束 deferred assignment。
 
 使用 KV cache 时，Greedy 只需对实际生成的
-\(mL+(m-1)|\delta|+1\) 个位置做增量解码。单路径 Beam 仅搜索 \(L\) 层，其 beam 状态数为 \(K\)，不会随最大多路径数 \(M\) 增长。
+$mL+(m-1)|\delta|+1$ 个位置做增量解码。单路径 Beam 仅搜索 $L$ 层，其 beam 状态数为 $K$，不会随最大多路径数 $M$ 增长。
 
 ## 7. 当前默认算法实例
 
@@ -813,20 +813,20 @@ Hungarian 子问题为立方复杂度，因此只对受控大小的组精确求�
 | 组件 | 当前默认 |
 |---|---|
 | 候选协议 | 训练、验证、测试和推理共享唯一候选集 |
-| 层级长度 | \(L=2\) |
+| 层级长度 | $L=2$ |
 | 码本学习 | 图正则 RQ-VAE + 分层 Sinkhorn |
-| 隐空间维度 | \(d_e=64\) |
-| 量化权重 | \(\lambda_{\mathrm q}=1,\ \beta=2.25\) |
-| 图正则 | \(\lambda_{\mathrm g}=10^{-3}\) |
-| Sinkhorn 温度 | \((\epsilon_1,\epsilon_2)=(0.003,0.01)\) |
+| 隐空间维度 | $d_e=64$ |
+| 量化权重 | $\lambda_{\mathrm q}=1,\ \beta=2.25$ |
+| 图正则 | $\lambda_{\mathrm g}=10^{-3}$ |
+| Sinkhorn 温度 | $(\epsilon_1,\epsilon_2)=(0.003,0.01)$ |
 | 最终分配 | 全候选集上的 balanced hierarchical assignment |
 | Router 目标 | target-only causal cross-entropy |
-| 课程 | memorization \(\rightarrow\) single-skill alignment \(\rightarrow\) multi-skill retrieval |
-| 最终 replay | memorization 请求比例 \(\rho=0.2\)，不足时按实际可采样量截断 |
+| 课程 | memorization $\rightarrow$ single-skill alignment $\rightarrow$ multi-skill retrieval |
+| 最终 replay | memorization 请求比例 $\rho=0.2$，不足时按实际可采样量截断 |
 | 默认推理 | constrained multi-path Greedy |
-| 可选推理 | constrained single-code Top-\(K\) Beam |
+| 可选推理 | constrained single-code Top-$K$ Beam |
 
-ClawHub 1,000-candidate 实例使用 \(128\times128\) 的两层码本；Light 301-candidate 实例使用 \(32\times16\)。二者都让 \(\prod_\ell K_\ell\ge N\)，并通过第二层前缀内唯一性消除可避免碰撞。
+ClawHub 1,000-candidate 实例使用 $128\times128$ 的两层码本；Light 301-candidate 实例使用 $32\times16$。二者都让 $\prod_\ell K_\ell\ge N$，并通过第二层前缀内唯一性消除可避免碰撞。
 
 ## 8. 方法边界
 
