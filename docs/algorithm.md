@@ -8,20 +8,20 @@
 
 给定候选 Agent Skill 集合
 
-$$
+```math
 \mathcal S=\{s_i\}_{i=1}^{N},
-$$
+```
 
 其中每个 Skill $s_i$ 具有名称、能力说明和完整文档。对于用户请求
 $q$，目标是从 $\mathcal S$ 中选择完成该请求所需的一个或多个 Skill：
 
-$$
+```math
 \mathcal T(q)\subseteq\mathcal S,
 \qquad
 m_q=|\mathcal T(q)|,
 \qquad
 1\le m_q\le N.
-$$
+```
 
 路由算法学习映射 $F:q\mapsto\widehat{\mathcal T}(q)$，使预测集合
 $\widehat{\mathcal T}(q)\subseteq\mathcal S$ 尽可能接近真实目标集合
@@ -41,7 +41,7 @@ code 还原为 Skill。
 第 $\ell$ 层包含 $K_\ell$ 个原子 code token。Skill $s_i$ 的 $L$ 层
 code 定义为
 
-$$
+```math
 \begin{aligned}
 c(s_i)
 &=
@@ -60,28 +60,28 @@ a_i^{(\ell)}\in\{0,\ldots,K_\ell-1\},
 =
 \sum_{\ell=1}^{L}K_\ell.
 \end{aligned}
-$$
+```
 
 在接收在线请求之前，code 构建器根据候选 Skill 及其共用关系产生
 code 词表、Skill-to-code 映射和反向 registry：
 
-$$
+```math
 (\mathcal V_{\mathrm{code}},c,\mathcal B)
 =
 \operatorname{CodeBuild}(\mathcal S,\mathcal D_{\mathrm{train}}).
-$$
+```
 
 这些 code token 是 LLM 的原子 token，而不是由多个普通文本 token
 拼出的字符串。设预训练 LLM 的原始 vocabulary 为
 $\mathcal V_{\mathrm{LLM}}$，扩充后的 Router vocabulary 为
 
-$$
+```math
 \mathcal V_{\mathrm{router}}
 =
 \mathcal V_{\mathrm{LLM}}
 \mathbin{\uplus}
 \mathcal V_{\mathrm{code}}.
-$$
+```
 
 LLM 的输入 embedding 矩阵和输出 projection 随 vocabulary 一同扩展，
 使模型能够像生成普通 token 一样生成每一层 code token。基于该词表
@@ -91,7 +91,7 @@ LLM 的输入 embedding 矩阵和输出 projection 随 vocabulary 一同扩展�
 在线推理时，给定 query $q$，Router 在当前合法路径集合
 $\mathcal C_{\mathrm{act}}$ 的约束下自回归生成 code 路径：
 
-$$
+```math
 \widehat{\mathbf C}(q)
 =
 \operatorname{ConstrainedGenerate}
@@ -105,7 +105,7 @@ P_{\theta_\star},q;
 =
 \bigcup_{\mathbf c\in\widehat{\mathbf C}(q)}
 \mathcal B(\mathbf c).
-$$
+```
 
 单个 Skill 对应一条长度为 $L$ 的路径；多个 Skill 对应多条以换行符
 分隔的路径。例如，模型可以生成
@@ -134,7 +134,7 @@ code；code token 随后加入 LLM vocabulary；在线阶段，Router 在合法
 记 $d_i$ 为 Skill $s_i$ 的完整文档。第 $\ell$ 层具有
 $K_\ell$ 个互斥原子 token：
 
-$$
+```math
 \mathcal V_\ell
 =
 \left\{
@@ -143,11 +143,11 @@ $$
 \right\},
 \qquad
 \ell=1,\ldots,L.
-$$
+```
 
 不同层使用互不相交的 token 命名空间。Skill $s_i$ 的固定长度 code 定义为
 
-$$
+```math
 c(s_i)
 =
 \left(
@@ -157,11 +157,11 @@ c(s_i)
 \right),
 \qquad
 a_i^{(\ell)}\in\{0,\ldots,K_\ell-1\}.
-$$
+```
 
 完整路径空间和新增 token 集合分别为
 
-$$
+```math
 \mathcal C_{\mathrm{full}}
 =
 \mathcal V_1\times\cdots\times\mathcal V_L,
@@ -169,11 +169,11 @@ $$
 \mathcal V_{\mathrm{code}}
 =
 \mathop{\biguplus}_{\ell=1}^{L}\mathcal V_\ell.
-$$
+```
 
 因此
 
-$$
+```math
 |\mathcal C_{\mathrm{full}}|
 =
 \prod_{\ell=1}^{L}K_\ell,
@@ -181,24 +181,24 @@ $$
 |\mathcal V_{\mathrm{code}}|
 =
 \sum_{\ell=1}^{L}K_\ell.
-$$
+```
 
 实际分配路径集合为
 
-$$
+```math
 \mathcal C
 =
 \{c(s_i):s_i\in\mathcal S\}
 \subseteq\mathcal C_{\mathrm{full}},
-$$
+```
 
 反向 registry 定义为
 
-$$
+```math
 \mathcal B(\mathbf c)
 =
 \{s_i\in\mathcal S:c(s_i)=\mathbf c\}.
-$$
+```
 
 $\mathcal B(\mathbf c)$ 是路径 $\mathbf c$ 的碰撞桶。当
 $|\mathcal B(\mathbf c)|>1$ 时，仅根据 code 无法区分桶内 Skill。因此，第一阶段需要在保留语义与协同结构的同时，均衡使用各层 token 并尽量减少完整路径碰撞。
@@ -232,7 +232,7 @@ Sinkhorn 获得 batch 平衡分配并硬化为 code index；选中向量用于�
 
 使用冻结的文本表征函数 $f_{\mathrm{emb}}$ 将每个 Skill 文档映射为语义向量：
 
-$$
+```math
 \mathbf x_i
 =
 \operatorname{Norm}
@@ -240,7 +240,7 @@ $$
 f_{\mathrm{emb}}(d_i)
 \right)
 \in\mathbb R^{d}.
-$$
+```
 
 $\operatorname{Norm}(\cdot)$ 表示行级 $L_2$ 归一化。文本表征函数在层级 code 学习中不更新参数，其输出仅服务于离线 code 构建；完成第一阶段后，Router 训练和推理都不再依赖该函数。
 
@@ -248,34 +248,34 @@ $\operatorname{Norm}(\cdot)$ 表示行级 $L_2$ 归一化。文本表征函数�
 
 语义向量描述单个 Skill 的能力，但不能充分表示多个 Skill 在真实任务中的共用关系。为此，从训练 query 的正例标签构造无向加权图
 
-$$
+```math
 \mathcal G=(\mathcal S,\mathcal E,\mathbf W).
-$$
+```
 
 记 $\mathcal T(q)\subseteq\mathcal S$ 为 query $q$ 的去重目标集合。Skill 频次和两两共用次数分别定义为
 
-$$
+```math
 f_i
 =
 \sum_q
 \mathbb I[s_i\in\mathcal T(q)],
-$$
+```
 
-$$
+```math
 n_{ij}
 =
 \sum_q
 \mathbb I[s_i\in\mathcal T(q)]
 \mathbb I[s_j\in\mathcal T(q)].
-$$
+```
 
 当 $n_{ij}>0$ 时，在 $s_i$ 与 $s_j$ 之间建立边，并使用余弦式归一化权重
 
-$$
+```math
 w_{ij}
 =
 \frac{n_{ij}}{\sqrt{f_i f_j}}.
-$$
+```
 
 目标顺序增强会为同一语义 query 产生多个训练序列。构图时先按原始语义 query 去重，再统计 $\mathcal T(q)$，从而避免不同排列重复放大同一条协同边。
 
@@ -288,52 +288,52 @@ $\ell-1$ 层尚未解释的残差；各层选中向量之和用于语义重构�
 
 编码器先将语义向量压缩到连续隐空间：
 
-$$
+```math
 \mathbf z_i
 =
 E_\phi(\mathbf x_i)
 \in\mathbb R^{d_e}.
-$$
+```
 
 第 $\ell$ 层向量码本为
 
-$$
+```math
 \mathbf C^{(\ell)}
 =
 \left\{
 \mathbf e_k^{(\ell)}
 \in\mathbb R^{d_e}
 \right\}_{k=0}^{K_\ell-1}.
-$$
+```
 
 令初始残差为
 
-$$
+```math
 \mathbf r_i^{(0)}=\mathbf z_i.
-$$
+```
 
 在第 $\ell$ 层，计算当前残差与全部码本向量的平方欧氏距离：
 
-$$
+```math
 D_{ik}^{(\ell)}
 =
 \left\|
 \mathbf r_i^{(\ell-1)}
 -\mathbf e_k^{(\ell)}
 \right\|_2^2.
-$$
+```
 
 选中索引 $a_i^{(\ell)}$ 后，记
 
-$$
+```math
 \mathbf e_i^{(\ell)}
 =
 \mathbf e_{a_i^{(\ell)}}^{(\ell)}.
-$$
+```
 
 前向计算使用 straight-through estimator：
 
-$$
+```math
 \widetilde{\mathbf e}_i^{(\ell)}
 =
 \mathbf r_i^{(\ell-1)}
@@ -343,20 +343,20 @@ $$
 \mathbf e_i^{(\ell)}
 -\mathbf r_i^{(\ell-1)}
 \right),
-$$
+```
 
 其中 $\operatorname{sg}(\cdot)$ 表示停止梯度。随后递归更新残差：
 
-$$
+```math
 \mathbf r_i^{(\ell)}
 =
 \mathbf r_i^{(\ell-1)}
 -\widetilde{\mathbf e}_i^{(\ell)}.
-$$
+```
 
 最终量化表示和重构结果为
 
-$$
+```math
 \widehat{\mathbf z}_i
 =
 \sum_{\ell=1}^{L}
@@ -365,7 +365,7 @@ $$
 \widehat{\mathbf x}_i
 =
 D_\psi(\widehat{\mathbf z}_i).
-$$
+```
 
 每层码本在首次参与训练时，以该层当前残差的 K-means 中心初始化。
 
@@ -376,7 +376,7 @@ $$
 对大小为 $B$ 的 batch，记当前距离矩阵的最大值和最小值为
 $D_{\max}^{(\ell)}$ 与 $D_{\min}^{(\ell)}$，并定义
 
-$$
+```math
 m_D^{(\ell)}
 =
 \frac{D_{\max}^{(\ell)}+D_{\min}^{(\ell)}}{2},
@@ -385,20 +385,20 @@ a_D^{(\ell)}
 =
 \frac{D_{\max}^{(\ell)}-D_{\min}^{(\ell)}}{2}
 +10^{-5}.
-$$
+```
 
 距离的仿射尺度归一化为
 
-$$
+```math
 \overline D_{ik}^{(\ell)}
 =
 \frac{D_{ik}^{(\ell)}-m_D^{(\ell)}}{a_D^{(\ell)}}.
-$$
+```
 
 由此得到
 $\overline{\mathbf D}^{(\ell)}\in\mathbb R^{B\times K_\ell}$。第 $\ell$ 层的软分配矩阵近似求解
 
-$$
+```math
 \begin{aligned}
 \mathbf\Pi^{(\ell)}
 =
@@ -420,34 +420,34 @@ $$
 =
 \frac{B}{K_\ell}\mathbf 1_{K_\ell},
 \end{aligned}
-$$
+```
 
 其中分配熵定义为
 
-$$
+```math
 H(\mathbf\Pi)
 =
 -\sum_{i=1}^{B}\sum_{k=1}^{K_\ell}
 \Pi_{ik}\log\Pi_{ik},
-$$
+```
 
 并约定 $0\log 0=0$；$\epsilon_\ell$ 是第 $\ell$ 层的平衡温度。Sinkhorn 迭代对
 
-$$
+```math
 \exp
 \left(
 -\overline{\mathbf D}^{(\ell)}/\epsilon_\ell
 \right)
-$$
+```
 
 交替执行行、列归一化。硬索引取为
 
-$$
+```math
 a_i^{(\ell)}
 =
 \arg\max_k
 \Pi_{ik}^{(\ell)}.
-$$
+```
 
 当 $\epsilon_\ell=0$ 时，该层退化为普通残差最近邻分配。训练时
 Sinkhorn 作用于当前 mini-batch；训练后生成 raw code 时，先分批计算
@@ -463,7 +463,7 @@ $\arg\max$ 后的硬索引不保证严格满足 floor/ceil 容量和前缀内唯
 
 重构损失为
 
-$$
+```math
 \mathcal L_{\mathrm{rec}}
 =
 \frac{1}{Bd}
@@ -471,11 +471,11 @@ $$
 \left\|
 \widehat{\mathbf x}_i-\mathbf x_i
 \right\|_2^2.
-$$
+```
 
 第 $\ell$ 层的 codebook 与 commitment 损失为
 
-$$
+```math
 \begin{aligned}
 \mathcal L_{\mathrm{vq}}^{(\ell)}
 =
@@ -501,21 +501,21 @@ $$
 \right\|_2^2
 \Big],
 \end{aligned}
-$$
+```
 
 并在各层取平均：
 
-$$
+```math
 \mathcal L_{\mathrm{vq}}
 =
 \frac{1}{L}
 \sum_{\ell=1}^{L}
 \mathcal L_{\mathrm{vq}}^{(\ell)}.
-$$
+```
 
 对当前 batch 中被诱导出的协同边集合 $\mathcal E_B$，图损失直接约束每层选中的原始码本向量：
 
-$$
+```math
 \mathcal L_{\mathrm{graph}}
 =
 \frac{1}{L}
@@ -530,11 +530,11 @@ w_{ij}
 }{
 \sum_{(i,j)\in\mathcal E_B}w_{ij}
 }.
-$$
+```
 
 若 batch 内没有协同边，则该项为零。完整目标为
 
-$$
+```math
 \boxed{
 \mathcal L_{\mathrm{code}}
 =
@@ -548,19 +548,19 @@ $$
 \mathcal L_{\mathrm{graph}}
 \right)
 }.
-$$
+```
 
 训练 batch 采用边感知采样：先随机采样基础 Skill，再按边权为其中的 Skill 采样协同邻居，最后随机补齐 batch。该采样提高有效协同边进入 $\mathcal E_B$ 的概率，但不改变上述目标。
 
 训练期间的 raw code 评估会收集完整候选集合的 latent，并使用与训练
 相同的逐层 Sinkhorn。默认模型选择按
 
-$$
+```math
 \left(
 R_{\mathrm{coll}}^{\mathrm{raw}},
 \mathcal L_{\mathrm{code}}
 \right)
-$$
+```
 
 做字典序最小化，即先比较 raw code 碰撞率，再比较训练目标。
 
@@ -571,24 +571,24 @@ $E_\phi$、$D_\psi$ 和所有 $\mathbf C^{(\ell)}$，并对完整候选集合执
 
 首先计算全部隐变量
 
-$$
+```math
 \mathbf z_i=E_\phi(\mathbf x_i),
-$$
+```
 
 并令离线分配残差 $\mathbf u_i^{(0)}=\mathbf z_i$。在第 $\ell$ 层计算
 
-$$
+```math
 \widetilde D_{ik}^{(\ell)}
 =
 \left\|
 \mathbf u_i^{(\ell-1)}
 -\mathbf e_k^{(\ell)}
 \right\|_2^2.
-$$
+```
 
 记由前 $\ell-1$ 层索引定义的前缀组为
 
-$$
+```math
 \mathcal G_p^{(\ell)}
 =
 \left\{
@@ -597,13 +597,13 @@ i:
 a_i^{(1)},\ldots,a_i^{(\ell-1)}
 \right)=p
 \right\}.
-$$
+```
 
 硬分配以距离代价最小为目标，并尽可能同时满足以下约束。
 
 **容量平衡。** 对需要进行全局平衡的层，第 $k$ 个 code 的使用次数满足
 
-$$
+```math
 n_k^{(\ell)}
 =
 \sum_{i=1}^{N}
@@ -613,7 +613,7 @@ n_k^{(\ell)}
 \left\lfloor\frac{N}{K_\ell}\right\rfloor,
 \left\lceil\frac{N}{K_\ell}\right\rceil
 \right\}.
-$$
+```
 
 当 $N$ 不能被 $K_\ell$ 整除时，额外容量优先分配给最近邻需求量更大的 code，索引用于确定性打破平局。
 当某个待分配组的样本数不超过当前层 code 数时，算法不复制容量槽位，而是直接执行注入式 Hungarian 匹配；此时组内使用次数为 0 或 1。
@@ -621,12 +621,12 @@ $$
 **前缀内唯一性。** 当
 $|\mathcal G_p^{(\ell)}|\le K_\ell$ 时，同一历史前缀下的 Skill 在当前层使用不同索引：
 
-$$
+```math
 a_i^{(\ell)}\ne a_j^{(\ell)},
 \qquad
 i\ne j,\quad
 i,j\in\mathcal G_p^{(\ell)}.
-$$
+```
 
 当前层级求解过程如下：
 
@@ -635,12 +635,12 @@ $$
 3. 若某个前缀组大于 $K_\ell$，则在各前缀组内部执行 floor/ceil 平衡。受控规模的组通过复制容量槽位后使用 Hungarian 匹配；大规模组采用确定性的容量约束 deferred assignment。
 4. 当前层分配完成后，更新残差
 
-$$
+```math
 \mathbf u_i^{(\ell)}
 =
 \mathbf u_i^{(\ell-1)}
 -\mathbf e_{a_i^{(\ell)}}^{(\ell)},
-$$
+```
 
 并按新前缀重新分组，继续处理下一层。
 
@@ -648,7 +648,7 @@ Hungarian 子问题在给定容量和当前组的条件下精确最小化距离�
 
 最终 code 为
 
-$$
+```math
 c(s_i)
 =
 \left(
@@ -656,13 +656,13 @@ c(s_i)
 \ldots,
 \tau^{(L)}_{a_i^{(L)}}
 \right).
-$$
+```
 
 层级分配使每个父前缀的成员继续向下一层均匀分散。当总路径容量满足
 
-$$
+```math
 \prod_{\ell=1}^{L}K_\ell\ge N
-$$
+```
 
 且各层约束均可行时，最终叶节点最多包含一个 Skill；若容量不足或约束不可满足，则保留完整碰撞桶 $\mathcal B(\mathbf c)$，而不是丢弃候选。
 
@@ -704,7 +704,7 @@ Output:
 学习出的连续码本和最终硬分配需要分别检查。对第 $\ell$ 层的使用次数
 $n_k^{(\ell)}$，定义 token 利用率
 
-$$
+```math
 U_\ell
 =
 \frac{
@@ -716,11 +716,11 @@ k:n_k^{(\ell)}>0
 }{
 K_\ell
 },
-$$
+```
 
 以及归一化熵
 
-$$
+```math
 \overline H_\ell
 =
 -\frac{1}{\log K_\ell}
@@ -731,11 +731,11 @@ p_k^{(\ell)}
 p_k^{(\ell)}
 =
 \frac{n_k^{(\ell)}}{N}.
-$$
+```
 
 完整路径碰撞率定义为
 
-$$
+```math
 R_{\mathrm{coll}}
 =
 1-
@@ -746,16 +746,16 @@ R_{\mathrm{coll}}
 }{
 N
 }.
-$$
+```
 
 同时记录最大碰撞桶大小
 
-$$
+```math
 B_{\max}
 =
 \max_{\mathbf c\in\mathcal C}
 |\mathcal B(\mathbf c)|.
-$$
+```
 
 实现同时记录三种视图：
 
@@ -771,28 +771,28 @@ $$
 
 目标集合 $\mathcal T(q)$ 本身不规定输出顺序。令
 
-$$
+```math
 \Pi(q)
 \subseteq
 \operatorname{Perm}\!\left(\mathcal T(q)\right)
-$$
+```
 
 表示允许的序列化排列集合。对任意 $\pi\in\Pi(q)$，将 $\pi$ 视为从
 $\{1,\ldots,m_q\}$ 到 $\mathcal T(q)$ 的双射，并定义有序监督
 
-$$
+```math
 \mathcal Y_\pi(q)
 =
 \left(
 \pi(1),\ldots,\pi(m_q)
 \right).
-$$
+```
 
 设 $\boldsymbol\delta$ 为换行符在基础 tokenizer 下对应的 token 序列，
 $\mathtt{EOS}$ 为基础 tokenizer 已有的结束 token。将
 $\mathcal Y_\pi(q)$ 中各 Skill 的完整 code 按顺序稳定去重，得到
 
-$$
+```math
 \overline{\mathcal C}_\pi(q)
 =
 \left(
@@ -800,11 +800,11 @@ $$
 \right),
 \qquad
 r_\pi\le m_q.
-$$
+```
 
 Router 的监督序列化函数为
 
-$$
+```math
 \operatorname{Ser}(\mathcal Y_\pi(q))
 =
 \mathbf c_{\pi,1}
@@ -813,7 +813,7 @@ $$
 \Vert\boldsymbol\delta\Vert
 \mathbf c_{\pi,r_\pi}
 \Vert\mathtt{EOS}.
-$$
+```
 
 稳定去重只在多个目标 Skill 共享同一完整 code 时发生。
 
@@ -832,14 +832,14 @@ replay；所有数据划分始终引用同一候选集合。
 
 将全部层级 token 加入预训练语言模型的基础词表 $\mathcal V$：
 
-$$
+```math
 \mathcal V'
 =
 \mathcal V
 \cup
 \bigcup_{\ell=1}^{L}
 \mathcal V_\ell.
-$$
+```
 
 每个 $\tau_k^{(\ell)}$ 必须被 tokenizer 编码为一个且仅一个 token ID；不同层和不同索引不能共享 ID。Router 训练期间，这些新增 token 的输入与输出表示随语言模型参数共同学习。
 
@@ -849,7 +849,7 @@ $$
 
 **Memorization。** 对每个候选 Skill 构造
 
-$$
+```math
 \mathcal D_{\mathrm{mem}}
 =
 \left\{
@@ -858,13 +858,13 @@ d_i,
 c(s_i)\Vert\mathtt{EOS}
 \right)
 \right\}_{i=1}^{N}.
-$$
+```
 
 输入是 Skill 文档，输出是该 Skill 的单条固定 code 及 EOS。由于候选集合中的每个 Skill 都至少出现一次，该阶段先建立完整的能力文档到 code 的基本映射。
 
 **Single-skill alignment。** 对仅需要一个 Skill 的自然语言请求构造
 
-$$
+```math
 \mathcal D_{\mathrm{align}}
 =
 \left\{
@@ -875,13 +875,13 @@ c(s_{y_n})\Vert\mathtt{EOS}
 \right\}_{n=1}^{N_{\mathrm{align}}},
 \qquad
 s_{y_n}\in\mathcal S.
-$$
+```
 
 同一 Skill 可以对应多个不同 query。输入从结构化能力文档切换到真实用户表达，目标仍是一条低歧义 code。该阶段缩小 memorization 输入分布与复杂 retrieval 输入分布之间的差异。
 
 **Multi-skill retrieval。** 对复杂请求构造
 
-$$
+```math
 \mathcal D_{\mathrm{ret}}
 =
 \left\{
@@ -892,7 +892,7 @@ q_n,
 \right\}_{n=1}^{N_{\mathrm{ret}}},
 \qquad
 \pi_n\in\Pi(q_n).
-$$
+```
 
 模型需要同时学习所需 Skill、Skill 组合、输出顺序、换行边界和结束位置。
 
@@ -902,22 +902,22 @@ Memorization 使用“将 Skill 文档映射到固定层级 code”的任务指�
 
 对一次允许排列 $\pi\in\Pi(q)$，记
 
-$$
+```math
 \mathbf y_{q,\pi}
 =
 \operatorname{Ser}(\mathcal Y_\pi(q)).
-$$
+```
 
 其长度为
 
-$$
+```math
 T_{q,\pi}
 =
 r_\pi L
 +
 (r_\pi-1)|\boldsymbol\delta|
 +1.
-$$
+```
 
 例如，当 $L=2$ 时，单路径和双路径目标分别为：
 
@@ -937,13 +937,13 @@ ID。Router 不生成 Skill 名称、Skill 描述、自然语言解释或工具�
 
 隐式意图通过目标集合及其序列化监督直接学习，不引入单独的意图分类器。将目标 Skill 集合划分为
 
-$$
+```math
 \mathcal T(q)
 =
 \mathcal T_{\mathrm{explicit}}(q)
 \mathbin{\dot\cup}
 \mathcal T_{\mathrm{implicit}}(q),
-$$
+```
 
 其中 $\mathbin{\dot\cup}$ 表示不交并集，$\mathcal T_{\mathrm{implicit}}(q)$ 包含 query 未直接提及、但完成整体任务所需的 Skill。两类目标使用相同的 code 序列监督和交叉熵损失。
 
@@ -954,11 +954,11 @@ $$
 对于同一请求，本节开头定义的每个允许排列
 $\pi\in\Pi(q)$ 都可以形成独立监督样本：
 
-$$
+```math
 \mathbf y_{q,\pi}
 =
 \operatorname{Ser}(\mathcal Y_\pi(q)).
-$$
+```
 
 序列化函数会按排列顺序对碰撞 code 做稳定去重，因此该增强不会重新引入重复路径。算法保留每个样本给定的顺序，不在训练时重新排序为固定 canonical order。这样可以降低模型对偶然标注顺序的过拟合，并让不同 Skill 都获得位于首条路径和后续路径的训练机会。
 
@@ -968,17 +968,17 @@ $$
 
 对条件上下文 $X_n$ 和目标 token 序列
 
-$$
+```math
 \mathbf y_n
 =
 \left(
 y_{n,1},\ldots,y_{n,T_n}
 \right),
-$$
+```
 
 Router 分解为
 
-$$
+```math
 P_\theta(\mathbf y_n\mid X_n)
 =
 \prod_{t=1}^{T_n}
@@ -988,11 +988,11 @@ y_{n,t}
 \mid
 X_n,\mathbf y_{n,<t}
 \right).
-$$
+```
 
 只对 assistant 目标部分计算损失。任务指令、用户输入和其他 prompt token 的 label 全部被屏蔽：
 
-$$
+```math
 \boxed{
 \mathcal L_{\mathrm{route}}
 \left(
@@ -1015,17 +1015,17 @@ X_n,\mathbf y_{n,<t}
 T_n
 }
 }.
-$$
+```
 
 训练时，$P_\theta$ 使用扩展词表 $\mathcal V'$ 上的标准全词表
 softmax：
 
-$$
+```math
 P_\theta(v\mid h)
 =
 \frac{\exp z_v(h)}
 {\sum_{u\in\mathcal V'}\exp z_u(h)}.
-$$
+```
 
 训练过程不施加 trie mask 或输出文法 mask。第 3.3 节的合法 token 集合
 $\mathcal A(h)$ 以及重归一化概率 $\widetilde P_\theta$ 只在推理解码时使用。
@@ -1038,7 +1038,7 @@ Code token、换行 token 和 EOS 使用相同的 token-level 权重。当前算
 
 第一课程阶段优化 memorization：
 
-$$
+```math
 \theta_{\mathrm{mem}}
 =
 \arg\min_\theta
@@ -1049,11 +1049,11 @@ $$
 \right),
 \qquad
 \theta\leftarrow\theta_0.
-$$
+```
 
 第二课程阶段从 $\theta_{\mathrm{mem}}$ 初始化，优化单 Skill alignment：
 
-$$
+```math
 \theta_{\mathrm{align}}
 =
 \arg\min_\theta
@@ -1064,13 +1064,13 @@ $$
 \right),
 \qquad
 \theta\leftarrow\theta_{\mathrm{mem}}.
-$$
+```
 
 第三课程阶段从 $\theta_{\mathrm{align}}$ 初始化，优化多 Skill retrieval。为缓解多 Skill 训练对 Skill-code 映射的遗忘，从
 $\mathcal D_{\mathrm{mem}}$ 中采样 replay 子集
 $\mathcal R_\rho$。若希望 replay 在最终混合数据中的占比为 $\rho\in[0,1)$，所需样本数为
 
-$$
+```math
 R_{\mathrm{req}}
 =
 \begin{cases}
@@ -1088,12 +1088,12 @@ R_{\mathrm{req}}
 \right),
 & 0<\rho<1.
 \end{cases}
-$$
+```
 
 Replay 子集在 retrieval 阶段开始前使用固定随机种子，从 memorization
 样本中无放回抽取一次，并在该阶段的全部 epoch 中复用。因此
 
-$$
+```math
 |\mathcal R_\rho|
 =
 \min
@@ -1101,11 +1101,11 @@ $$
 |\mathcal D_{\mathrm{mem}}|,
 R_{\mathrm{req}}
 \right).
-$$
+```
 
 最终模型为
 
-$$
+```math
 \boxed{
 \theta_\star
 =
@@ -1120,11 +1120,11 @@ $$
 \qquad
 \theta\leftarrow\theta_{\mathrm{align}}
 }.
-$$
+```
 
 $\mathbin{\uplus}$ 表示保留重复样本的列表或多重集拼接，而不是集合并集；若相同文本分别出现在两类监督中，其两个训练条目均被保留。每个 epoch 可以重新打乱拼接后的 dataloader 顺序，但不重新采样 replay 成员。Replay 样本继续使用 memorization 任务指令，retrieval 样本使用多 Skill 路由指令。若 memorization 样本总量不足，实际 replay 比例为
 
-$$
+```math
 \rho_{\mathrm{actual}}
 =
 \frac{
@@ -1135,7 +1135,7 @@ $$
 |\mathcal R_\rho|
 }
 <\rho.
-$$
+```
 
 算法 2 总结阶段二。
 
@@ -1183,19 +1183,19 @@ candidate top-$k$。
 推理时从同版本 registry 取得当前有效 Skill 集合
 $\mathcal S_{\mathrm{act}}\subseteq\mathcal S$。它是唯一候选 registry 的当前状态，而不是另一套独立训练候选集。去重后的合法路径集合为
 
-$$
+```math
 \mathcal C_{\mathrm{act}}
 =
 \left\{
 c(s):
 s\in\mathcal S_{\mathrm{act}}
 \right\}.
-$$
+```
 
 在 $\mathcal C_{\mathrm{act}}$ 上构建深度为 $L$ 的 token trie。给定已生成状态 $h$，设
 $\mathcal A(h)$ 为 trie 和输出文法允许的下一 token 集。推理时将其他 token 的 logit 置为 $-\infty$，得到约束概率
 
-$$
+```math
 \widetilde P_\theta(v\mid h)
 =
 \begin{cases}
@@ -1211,7 +1211,7 @@ P_\theta(u\mid h)
 0,
 & v\notin\mathcal A(h).
 \end{cases}
-$$
+```
 
 因此，格式正确性和路径合法性由解码空间保证，而不是只依赖自然语言指令。
 
@@ -1219,13 +1219,13 @@ $$
 
 Greedy 模式遵循文法
 
-$$
+```math
 \mathrm{PATH}
 \left(
 \boldsymbol\delta\ \mathrm{PATH}
 \right)^\star
 \mathtt{EOS},
-$$
+```
 
 其中每个 $\mathrm{PATH}$ 恰好含 $L$ 个 code token。解码状态记录：
 
@@ -1236,7 +1236,7 @@ $$
 
 在路径内部，合法下一 token 为
 
-$$
+```math
 \mathcal A_{\mathrm{path}}(p,\mathcal H)
 =
 \left\{
@@ -1245,7 +1245,7 @@ $$
 \mathcal C_{\mathrm{act}}\setminus\mathcal H,
 \ \mathbf c_{1:|p|}=p
 \right\}.
-$$
+```
 
 完成一条路径后：
 
@@ -1258,7 +1258,7 @@ $$
 
 Greedy 在每一步选择当前约束分布下概率最大的 token：
 
-$$
+```math
 y_t^\star
 =
 \arg\max_{v\in\mathcal A(y_{<t})}
@@ -1266,11 +1266,11 @@ y_t^\star
 \left(
 v\mid q,y_{<t}
 \right).
-$$
+```
 
 模型最终生成
 
-$$
+```math
 \mathbf c_1
 \Vert\boldsymbol\delta\Vert
 \cdots
@@ -1279,13 +1279,13 @@ $$
 \Vert\mathtt{EOS},
 \qquad
 1\le m\le M.
-$$
+```
 
 这里 $m$ 不是预先给定的候选数，而是模型在每条路径边界上通过“结束或继续”决策得到的。
 
 第 $j$ 条路径的展示分数只累加该路径自身 $L$ 个 code token 的约束 log-probability：
 
-$$
+```math
 S_j^{\mathrm{greedy}}
 =
 \sum_{\ell=1}^{L}
@@ -1299,7 +1299,7 @@ q,
 \boldsymbol\delta,
 \mathbf c_{j,<\ell}
 \right).
-$$
+```
 
 换行和 EOS 的概率不计入单条路径分数。输出保持模型的生成顺序，不按
 $S_j^{\mathrm{greedy}}$ 重新排列。
@@ -1334,7 +1334,7 @@ Beam 模式解决的是单 code 路径排名，而不是多行输出搜索。每
 
 对任意 $\mathbf c\in\mathcal C_{\mathrm{act}}$，定义单路径分数
 
-$$
+```math
 S^{\mathrm{beam}}(\mathbf c\mid q)
 =
 \sum_{\ell=1}^{L}
@@ -1345,14 +1345,14 @@ c_\ell
 \mid
 q,\mathbf c_{<\ell}
 \right).
-$$
+```
 
 给定 beam width $B_{\mathrm{beam}}$，算法在每一层对当前至多
 $B_{\mathrm{beam}}$ 个前缀展开其全部合法 trie child，再保留累计分数最高的
 $B_{\mathrm{beam}}$ 个新前缀。经过恰好 $L$ 层后，返回至多
 $B_{\mathrm{beam}}$ 条完整路径：
 
-$$
+```math
 \operatorname{BeamTop}_{B_{\mathrm{beam}}}
 \left\{
 S^{\mathrm{beam}}(\mathbf c\mid q)
@@ -1360,7 +1360,7 @@ S^{\mathrm{beam}}(\mathbf c\mid q)
 \mathbf c\in\mathcal C_{\mathrm{act}}
 \right\}
 .
-$$
+```
 
 标准有限宽度 beam search 是对全路径
 Top-$B_{\mathrm{beam}}$ 的近似；当搜索宽度足以保留全部竞争前缀时结果为精确 Top-$B_{\mathrm{beam}}$。由于所有结果长度相同，无需长度归一化。
@@ -1410,22 +1410,22 @@ Greedy 与 Beam 的任务语义对比如下。
 
 设解码得到按顺序排列的路径
 
-$$
+```math
 \left(
 \mathbf c_1,\ldots,\mathbf c_r
 \right).
-$$
+```
 
 算法依次查询 active registry：
 
-$$
+```math
 \mathcal B_{\mathrm{act}}(\mathbf c_j)
 =
 \left\{
 s\in\mathcal S_{\mathrm{act}}:
 c(s)=\mathbf c_j
 \right\}.
-$$
+```
 
 Skill 候选排序遵循以下规则：
 
@@ -1447,11 +1447,11 @@ $|\mathcal B(\mathbf c)|>1$，Router 无法仅凭 $\mathbf c$ 区分桶内 Skill
 
 对于包含 $m$ 条路径的 Greedy 结果，生成长度为
 
-$$
+```math
 mL+(m-1)|\boldsymbol\delta|+1
 =
 O(mL).
-$$
+```
 
 对于 Beam，每个候选恰好生成 $L$ 个 token。输出长度与 Skill 名称长度、文档长度和候选集合中文本总量无关。
 
@@ -1479,53 +1479,53 @@ Skill 文本表征只在第一离线阶段使用。Router 训练和在线推理�
 
 对 batch size $B$ 和隐空间维度 $d_e$，一次多层残差距离计算的复杂度为
 
-$$
+```math
 O
 \left(
 B d_e
 \sum_{\ell=1}^{L}K_\ell
 \right).
-$$
+```
 
 若每层 Sinkhorn 执行 $I_{\mathrm{sk}}$ 次迭代，其额外复杂度为
 
-$$
+```math
 O
 \left(
 B I_{\mathrm{sk}}
 \sum_{\ell=1}^{L}K_\ell
 \right).
-$$
+```
 
 全候选集硬分配前的距离计算复杂度为
 
-$$
+```math
 O
 \left(
 N d_e
 \sum_{\ell=1}^{L}K_\ell
 \right).
-$$
+```
 
 精确 Hungarian 子问题对其匹配规模具有立方复杂度，因此只在受控规模的前缀组上使用；更大组使用容量约束 deferred assignment。
 
 Router 推理的语言模型计算由实际生成 token 数决定。Greedy 最多生成
 
-$$
+```math
 ML+(M-1)|\boldsymbol\delta|+1
-$$
+```
 
 个新 token。单路径 Beam 只执行 $L$ 层搜索，不随最大多路径数 $M$ 增长。记第 $\ell$ 层 beam 前缀集合为
 $\mathscr B_{\ell-1}$，trie 前缀 $p$ 的合法 child 数为
 $\deg(p)$，则 Beam 实际展开次数为
 
-$$
+```math
 \sum_{\ell=1}^{L}
 \sum_{p\in\mathscr B_{\ell-1}}
 \deg(p),
 \qquad
 |\mathscr B_{\ell-1}|\le B_{\mathrm{beam}}.
-$$
+```
 
 若最大分支数为 $b_{\max}$，搜索控制开销上界为
 $O(LB_{\mathrm{beam}}b_{\max})$；同一层前缀可以合并为一个 batch 执行语言模型前向计算。
@@ -1585,11 +1585,11 @@ $\prod_\ell K_\ell\ge N$，同时保持每个 Skill 只需两个生成 token。�
 系统提供冻结 codebook 的低成本增量路径。设第 $t$ 个版本的 active
 候选集合和合法路径集合分别为
 
-$$
+```math
 \mathcal S_{\mathrm{act}}^{(t)}
 \quad\text{和}\quad
 \mathcal C_{\mathrm{act}}^{(t)}.
-$$
+```
 
 增量操作只产生一份新的 candidate-state overlay；Stage 1 encoder、各层
 codebook、code token 词表以及所有已有 Skill 的 code 均保持冻结。overlay
@@ -1605,7 +1605,7 @@ codebook、code token 词表以及所有已有 Skill 的 code 均保持冻结。
 冻结 encoder 得到连续表示，再在不修改旧路径的前提下选择最近的空闲完整
 路径：
 
-$$
+```math
 c(s_{\mathrm{new}})
 =
 \mathop{\arg\min}_{\mathbf a\in
@@ -1616,7 +1616,7 @@ E_\phi\!\left(f_{\mathrm{emb}}(d_{\mathrm{new}})\right)
 -
 \sum_{\ell=1}^{L}\mathbf e_{a^{(\ell)}}^{(\ell)}
 \right\|_2^2.
-$$
+```
 
 实现以有限宽度 beam 近似搜索该空闲路径。完成赋码后，将新 Skill 加入
 overlay，并可用一条文档 Memorization 样本和少量直接 query 做增量 LoRA，
@@ -1626,12 +1626,12 @@ overlay，并可用一条文档 Memorization 样本和少量直接 query 做增�
 
 删除 $s_r$ 不执行 embedding、码本计算或模型训练：
 
-$$
+```math
 \mathcal S_{\mathrm{act}}^{(t+1)}
 =
 \mathcal S_{\mathrm{act}}^{(t)}
 \setminus\{s_r\}.
-$$
+```
 
 系统直接重建对应碰撞桶和合法路径集合。若同一路径仍有其他 Skill，则保留
 该 trie path；若桶变空，则立即移除该 path。因此索引侧删除属于实时操作，
