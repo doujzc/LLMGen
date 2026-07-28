@@ -68,7 +68,7 @@ code 词表、Skill-to-code 映射和反向 registry：
 ```math
 (\mathcal V_{\mathrm{code}},c,\mathcal B)
 =
-\operatorname{CodeBuild}(\mathcal S,\mathcal D_{\mathrm{train}}).
+\mathrm{CodeBuild}(\mathcal S,\mathcal D_{\mathrm{train}}).
 ```
 
 这些 code token 是 LLM 的原子 token，而不是由多个普通文本 token
@@ -94,7 +94,7 @@ $\mathcal C_{\mathrm{act}}$ 的约束下自回归生成 code 路径：
 ```math
 \widehat{\mathbf C}(q)
 =
-\operatorname{ConstrainedGenerate}
+\mathrm{ConstrainedGenerate}
 \left(
 P_{\theta_\star},q;
 \mathcal V_{\mathrm{router}},
@@ -235,14 +235,14 @@ Sinkhorn 获得 batch 平衡分配并硬化为 code index；选中向量用于�
 ```math
 \mathbf x_i
 =
-\operatorname{Norm}
+\mathrm{Norm}
 \left(
 f_{\mathrm{emb}}(d_i)
 \right)
 \in\mathbb R^{d}.
 ```
 
-$\operatorname{Norm}(\cdot)$ 表示行级 $L_2$ 归一化。文本表征函数在层级 code 学习中不更新参数，其输出仅服务于离线 code 构建；完成第一阶段后，Router 训练和推理都不再依赖该函数。
+$\mathrm{Norm}(\cdot)$ 表示行级 $L_2$ 归一化。文本表征函数在层级 code 学习中不更新参数，其输出仅服务于离线 code 构建；完成第一阶段后，Router 训练和推理都不再依赖该函数。
 
 #### 3.1.2 Skill 协同图
 
@@ -338,14 +338,14 @@ D_{ik}^{(\ell)}
 =
 \mathbf r_i^{(\ell-1)}
 +
-\operatorname{sg}
+\mathrm{sg}
 \left(
 \mathbf e_i^{(\ell)}
 -\mathbf r_i^{(\ell-1)}
 \right),
 ```
 
-其中 $\operatorname{sg}(\cdot)$ 表示停止梯度。随后递归更新残差：
+其中 $\mathrm{sg}(\cdot)$ 表示停止梯度。随后递归更新残差：
 
 ```math
 \mathbf r_i^{(\ell)}
@@ -484,7 +484,7 @@ $\arg\max$ 后的硬索引不保证严格满足 floor/ceil 容量和前缀内唯
 &
 \left\|
 \mathbf e_i^{(\ell)}
--\operatorname{sg}
+-\mathrm{sg}
 \left(
 \mathbf r_i^{(\ell-1)}
 \right)
@@ -493,7 +493,7 @@ $\arg\max$ 后的硬索引不保证严格满足 floor/ceil 容量和前缀内唯
 &+
 \beta
 \left\|
-\operatorname{sg}
+\mathrm{sg}
 \left(
 \mathbf e_i^{(\ell)}
 \right)
@@ -774,7 +774,7 @@ B_{\max}
 ```math
 \Pi(q)
 \subseteq
-\operatorname{Perm}\!\left(\mathcal T(q)\right)
+\mathrm{Perm}\!\left(\mathcal T(q)\right)
 ```
 
 表示允许的序列化排列集合。对任意 $\pi\in\Pi(q)$，将 $\pi$ 视为从
@@ -805,7 +805,7 @@ r_\pi\le m_q.
 Router 的监督序列化函数为
 
 ```math
-\operatorname{Ser}(\mathcal Y_\pi(q))
+\mathrm{Ser}(\mathcal Y_\pi(q))
 =
 \mathbf c_{\pi,1}
 \Vert\boldsymbol\delta\Vert
@@ -887,7 +887,7 @@ s_{y_n}\in\mathcal S.
 \left\{
 \left(
 q_n,
-\operatorname{Ser}(\mathcal Y_{\pi_n}(q_n))
+\mathrm{Ser}(\mathcal Y_{\pi_n}(q_n))
 \right)
 \right\}_{n=1}^{N_{\mathrm{ret}}},
 \qquad
@@ -905,7 +905,7 @@ Memorization 使用“将 Skill 文档映射到固定层级 code”的任务指�
 ```math
 \mathbf y_{q,\pi}
 =
-\operatorname{Ser}(\mathcal Y_\pi(q)).
+\mathrm{Ser}(\mathcal Y_\pi(q)).
 ```
 
 其长度为
@@ -957,7 +957,7 @@ $\pi\in\Pi(q)$ 都可以形成独立监督样本：
 ```math
 \mathbf y_{q,\pi}
 =
-\operatorname{Ser}(\mathcal Y_\pi(q)).
+\mathrm{Ser}(\mathcal Y_\pi(q)).
 ```
 
 序列化函数会按排列顺序对碰撞 code 做稳定去重，因此该增强不会重新引入重复路径。算法保留每个样本给定的顺序，不在训练时重新排序为固定 canonical order。这样可以降低模型对偶然标注顺序的过拟合，并让不同 Skill 都获得位于首条路径和后续路径的训练机会。
@@ -1080,7 +1080,7 @@ R_{\mathrm{req}}
 \max
 \left(
 1,
-\operatorname{round}
+\mathrm{round}
 \left(
 \dfrac{\rho}{1-\rho}
 |\mathcal D_{\mathrm{ret}}|
@@ -1353,7 +1353,7 @@ $B_{\mathrm{beam}}$ 个新前缀。经过恰好 $L$ 层后，返回至多
 $B_{\mathrm{beam}}$ 条完整路径：
 
 ```math
-\operatorname{BeamTop}_{B_{\mathrm{beam}}}
+\mathrm{BeamTop}_{B_{\mathrm{beam}}}
 \left\{
 S^{\mathrm{beam}}(\mathbf c\mid q)
 :
