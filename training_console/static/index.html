@@ -94,7 +94,7 @@
           </div>
           <div class="draft-identity">
             <strong id="draft-identity-text">clawhub-full-4gpu · 草稿</strong>
-            <span id="draft-identity-help">保存后创建不可变新版本</span>
+            <span id="draft-identity-help">保存后可继续编辑</span>
           </div>
         </header>
 
@@ -135,7 +135,7 @@
             <input
               id="profile-notes"
               type="text"
-              placeholder="为此版本添加备注"
+              placeholder="为此配置添加备注"
               maxlength="2000"
             />
           </label>
@@ -162,16 +162,16 @@
 
         <footer class="workspace-actions">
           <button id="save-profile-button" class="secondary-button action" type="button">
-            仅保存新版本
+            保存配置
           </button>
           <button id="submit-run-button" class="primary-button action" type="button">
-            保存新版本并提交独立任务
+            保存并提交独立任务
           </button>
           <button id="export-env-button" class="secondary-button action" type="button">
             导出 .env
           </button>
           <p>
-            提交后将生成不可变配置快照并交由独立运行器执行；后续修改会创建新的配置版本。
+            保存会更新当前配置；提交时生成不可变运行快照，后续修改不影响已提交任务。
           </p>
         </footer>
       </section>
@@ -282,7 +282,7 @@
           <div class="block-heading">
             <div>
               <h2>有效配置（只读）</h2>
-              <p>提交后冻结为不可变快照。</p>
+              <p>提交时冻结为不可变运行快照。</p>
             </div>
             <button id="copy-env-button" class="text-button" type="button">
               复制

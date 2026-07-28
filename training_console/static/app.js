@@ -12,6 +12,7 @@ const state = {
   currentRun: null,
   loadedProfileId: "",
   loadedVersion: null,
+  loadedRevision: null,
   draft: {
     profileId: "clawhub-full-4gpu",
     dataset: "clawhub",
@@ -97,7 +98,7 @@ function setBusy(busy) {
   });
   $("#submit-run-button").textContent = busy
     ? "正在处理…"
-    : "保存新版本并提交独立任务";
+    : "保存并提交独立任务";
 }
 
 function fieldByKey(key) {
@@ -148,7 +149,7 @@ function renderHeaderMetrics() {
       : `${state.health.gpu_count} / ${configuredGpus}`;
   $("#metric-profile").textContent = state.draft.profileId || "草稿";
   $("#metric-version").textContent = state.loadedVersion
-    ? `v${state.loadedVersion}`
+    ? `v${state.loadedVersion} · r${state.loadedRevision || 1}`
     : "未保存";
   $("#metric-levels").textContent =
     state.validation?.resolved?.NUM_LEVELS ||
@@ -168,7 +169,7 @@ function renderProfiles() {
     const empty = element("div", "profile-empty");
     empty.textContent = state.profiles.length
       ? "没有匹配的配置。"
-      : "尚未保存配置。当前表单是一个草稿，保存后会在这里形成不可变版本。";
+      : "尚未保存配置。当前表单是一个草稿，保存后可以继续编辑。";
     container.append(empty);
     return;
   }
@@ -199,9 +200,15 @@ function renderProfiles() {
         element(
           "span",
           "",
-          version.version === profile.latest_version ? "当前版本" : "历史只读",
+          version.version === profile.latest_version
+            ? `最新 · 可编辑 · r${version.revision || 1}`
+            : `可编辑 · r${version.revision || 1}`,
         ),
-        element("time", "", formatTime(version.created_at)),
+        element(
+          "time",
+          "",
+          formatTime(version.updated_at || version.created_at),
+        ),
       );
       button.addEventListener("click", () =>
         loadProfile(profile.profile_id, version.version),
@@ -257,14 +264,17 @@ function renderWorkspaceHeader() {
   $("#workspace-stage-number").textContent = stage.number || "BASE";
   $("#workspace-title").textContent = `${stage.label} 阶段配置`;
   $("#workspace-description").textContent = stage.description;
-  const versionText = state.loadedVersion ? `v${state.loadedVersion}` : "新草稿";
+  const versionText = state.loadedVersion
+    ? `v${state.loadedVersion} · r${state.loadedRevision || 1}`
+    : "新草稿";
   const dirtyText = state.draft.dirty ? " · 有未保存修改" : "";
   $("#draft-identity-text").textContent =
     `${state.draft.profileId || "未命名"} · ${versionText}${dirtyText}`;
   $("#draft-identity-help").textContent = state.loadedVersion
-    ? `保存将创建 v${state.loadedVersion + 1}，历史版本保持不变`
-    : "保存后创建不可变 v1";
+    ? `保存将原地更新 v${state.loadedVersion}`
+    : "保存后创建可编辑配置 v1";
   $("#profile-id").value = state.draft.profileId;
+  $("#profile-id").disabled = Boolean(state.loadedVersion);
   $("#profile-notes").value = state.draft.notes;
 }
 
@@ -448,8 +458,6 @@ async function switchDataset(dataset) {
   state.draft.dataset = dataset;
   state.draft.overrides = {};
   state.draft.dirty = true;
-  state.loadedProfileId = "";
-  state.loadedVersion = null;
   state.schema = await requestJson(
     `/api/schema?dataset=${encodeURIComponent(dataset)}`,
   );
@@ -556,13 +564,15 @@ function renderContract() {
     !state.draft.dirty &&
     state.loadedVersion &&
     state.currentRun?.profile_id === state.draft.profileId &&
-    state.currentRun?.profile_version === state.loadedVersion;
+    state.currentRun?.profile_version === state.loadedVersion &&
+    (state.currentRun?.profile_revision || 1) ===
+      (state.loadedRevision || 1);
   $("#contract-profile").textContent = state.draft.profileId || "未命名";
   $("#contract-version").textContent = state.loadedVersion
     ? state.draft.dirty
-      ? `基于 v${state.loadedVersion} 的新草稿`
-      : `v${state.loadedVersion}（不可变）`
-    : "保存时生成 v1";
+      ? `v${state.loadedVersion} · r${state.loadedRevision || 1} · 待保存`
+      : `v${state.loadedVersion} · r${state.loadedRevision || 1}（可编辑）`
+    : "保存时创建 v1 · r1";
   $("#contract-overrides").textContent = String(
     Object.keys(state.validation?.overrides || state.draft.overrides).length,
   );
@@ -591,12 +601,17 @@ function renderContract() {
 
 function renderIdentityAndActions() {
   const hasErrors = state.validationErrors.length > 0 || !state.validation;
-  $("#save-profile-button").disabled = state.busy || hasErrors;
+  const savedAndClean =
+    state.loadedVersion &&
+    !state.draft.dirty &&
+    state.loadedProfileId === state.draft.profileId;
+  $("#save-profile-button").disabled =
+    state.busy || hasErrors || Boolean(savedAndClean);
   $("#submit-run-button").disabled = state.busy || hasErrors;
   $("#export-env-button").disabled = state.busy || hasErrors;
   $("#save-profile-button").textContent = state.loadedVersion
-    ? `保存为 v${state.loadedVersion + 1}`
-    : "仅保存新版本";
+    ? "保存修改"
+    : "保存配置";
 }
 
 function renderAll() {
@@ -654,6 +669,7 @@ async function loadProfile(profileId, version) {
     );
     state.loadedProfileId = profile.profile_id;
     state.loadedVersion = profile.version;
+    state.loadedRevision = profile.revision || 1;
     state.draft = {
       profileId: profile.profile_id,
       dataset: profile.dataset,
@@ -682,19 +698,24 @@ async function saveProfile() {
     command: state.draft.command,
     notes: state.draft.notes,
     overrides: state.draft.overrides,
-    parent_version:
-      sameFamily && state.loadedVersion ? state.loadedVersion : null,
+    version: sameFamily && state.loadedVersion ? state.loadedVersion : null,
+    expected_revision:
+      sameFamily && state.loadedVersion ? state.loadedRevision : null,
   });
   const profile = result.profile;
   state.loadedProfileId = profile.profile_id;
   state.loadedVersion = profile.version;
+  state.loadedRevision = profile.revision || 1;
   state.draft.overrides = { ...profile.overrides };
   state.draft.dirty = false;
   state.validation = result.validation;
   state.validationErrors = [];
   await loadProfiles();
   renderAll();
-  showToast(`已保存 ${profile.profile_id} v${profile.version}`);
+  showToast(
+    `已保存 ${profile.profile_id} v${profile.version} · ` +
+      `r${profile.revision || 1}`,
+  );
   return profile;
 }
 
@@ -707,6 +728,7 @@ async function ensureSavedProfile() {
     return {
       profile_id: state.loadedProfileId,
       version: state.loadedVersion,
+      revision: state.loadedRevision,
     };
   }
   return saveProfile();
@@ -818,7 +840,8 @@ function renderCurrentRun() {
       : "持久化状态";
   $("#run-id").textContent = run.run_id || "—";
   $("#run-profile-version").textContent =
-    `${run.profile_id || "—"} · v${run.profile_version || "—"}`;
+    `${run.profile_id || "—"} · v${run.profile_version || "—"} · ` +
+    `r${run.profile_revision || 1}`;
   $("#run-stage").textContent = run.stage || "—";
   $("#run-progress").textContent = run.progress_text || "—";
   $("#run-runner-pid").textContent = run.runner_pid ?? "—";
@@ -873,6 +896,7 @@ async function createDraft(dataset, profileId, command) {
   );
   state.loadedProfileId = "";
   state.loadedVersion = null;
+  state.loadedRevision = null;
   state.draft = {
     profileId,
     dataset,

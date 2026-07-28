@@ -15,7 +15,7 @@ LLMGen 已提供完整的命令行训练、评估、导出流程，以及独立�
 训练控制台用于：
 
 1. 浏览和配置训练流程的全部关键参数；
-2. 保存可追踪、不可变的配置版本；
+2. 保存可追踪、可编辑的配置，并记录单调递增的 revision；
 3. 在提交前显示最终生效值、来源、命令和产物路径；
 4. 把配置快照提交给独立运行器；
 5. 通过持久化元数据、日志和 checkpoint 只读观察任务。
@@ -34,7 +34,8 @@ LLMGen 已提供完整的命令行训练、评估、导出流程，以及独立�
 
 - 控制台不导入训练模块、不加载模型，也不复刻训练逻辑。
 - 控制台保存的配置通过环境变量传给现有 CLI。
-- 配置快照提交后不可变；后续编辑只能创建新版本，不能修改正在运行的任务。
+- 已保存 profile 可以原地更新；每次提交任务都会复制成不可变 run snapshot，
+  后续编辑 profile 不能修改正在运行或历史任务。
 
 ### 2.2 训练生命周期独立
 
@@ -117,9 +118,10 @@ export-web
   - `clawhub-full-4gpu`
   - `light-lora-debug`
   - `skillret-smoke`
-- 每个配置族包含只读版本 `v1`、`v2`、`v3`；
-- 加载历史版本后，中心表单进入“基于此版本创建草稿”的状态；
-- 保存时总是创建新版本。
+- 每个配置族可以包含 `v1`、`v2`、`v3` 等稳定版本槽位；
+- 每个版本槽位均可加载、编辑，并显示 `r1`、`r2` 等修订号；
+- 保存时原子覆盖当前 `vN.json` 并递增 revision；
+- 新建配置首次保存时创建 `v1 · r1`。
 
 训练流水线：
 
@@ -152,7 +154,7 @@ export-web
 
 - 配置名与版本；
 - 覆盖默认值数量；
-- 不可变配置快照路径；
+- 不可变运行快照路径；
 - 生成命令；
 - GPU、DeepSpeed、精度等资源摘要；
 - 输出目录、checkpoint 和提交后分配的独立运行日志路径；
@@ -183,8 +185,8 @@ export-web
 
 ### 4.5 主操作
 
-1. `保存新版本并提交独立任务`
-2. `仅保存新版本`
+1. `保存并提交独立任务`
+2. `保存修改`
 3. `导出 .env`
 
 提交前必须：
@@ -355,7 +357,7 @@ EVAL_CUTOFFS
 EVAL_DIR
 ```
 
-## 6. 配置版本模型
+## 6. 配置持久化模型
 
 运行时状态根目录默认为：
 
@@ -364,6 +366,17 @@ EVAL_DIR
 ```
 
 可通过 `LLMGEN_TRAINING_CONSOLE_STATE` 覆盖。
+
+浏览器中的字段修改只存在于内存草稿中。点击保存后：
+
+1. 浏览器向 `POST /api/profiles` 发送 `profile_id`、`version`、
+   `expected_revision` 和 overrides；
+2. Web 服务重新解析仓库默认配置并执行完整校验；
+3. `StateStore` 在 `.registry.lock` 文件锁内核对 revision；
+4. 内容先写入同目录的 `0600` 临时文件并 `fsync`；
+5. `os.replace` 原子替换目标 `vNNNN.json`。
+
+因此 Web 进程崩溃不会留下半个 JSON；但没有点击保存的浏览器草稿不会落盘。
 
 目录结构：
 
@@ -383,19 +396,21 @@ EVAL_DIR
         └── train.log
 ```
 
-配置版本 JSON：
+可编辑配置 JSON：
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "profile_id": "clawhub-full-4gpu",
-  "version": 3,
+  "version": 1,
+  "revision": 4,
   "dataset": "clawhub",
   "command": "full",
-  "parent_version": 2,
+  "parent_version": null,
   "name": "clawhub-full-4gpu",
   "notes": "",
   "created_at": "ISO-8601 UTC",
+  "updated_at": "ISO-8601 UTC",
   "overrides": {
     "ROUTER_NUM_GPUS": "4",
     "ROUTER_FINETUNE_MODE": "full"
@@ -409,12 +424,15 @@ EVAL_DIR
 
 规则：
 
-- 已保存版本不可覆盖；
-- 新版本号在文件锁内分配；
-- JSON 使用临时文件加原子 rename；
+- `version` 是稳定文件槽位，保存修改不改变 `vN`；
+- `revision` 每次保存递增；客户端提交 `expected_revision` 做乐观并发检查；
+- 首次保存新配置时创建 `v1 · r1`；
+- JSON 在文件锁内使用临时文件加原子 rename，读取方不会看到半写文件；
 - profile ID 只能包含小写字母、数字、短横线和下划线；
 - `overrides` 只保存相对默认值有变化的字段；
-- `resolved` 保存提交时的完整最终值，保证可复现。
+- `resolved` 保存本次修订的完整最终值；
+- 真正保证训练可复现的是提交时复制到 run 目录、之后不再修改的
+  `config.json`。
 
 ## 7. 运行快照与状态模型
 
@@ -503,7 +521,7 @@ sequenceDiagram
     participant R as Detached Runner
     participant T as Existing Training CLI
 
-    B->>W: 保存新版本并提交
+    B->>W: 保存当前配置并提交
     W->>W: 校验白名单、类型和路径
     W->>F: 原子写入 profile、config.json、config.env、run.json
     W->>R: start_new_session 启动 runner
@@ -539,10 +557,26 @@ POST /api/validate
 POST /api/runs
 ```
 
-`POST /api/profiles` 创建不可变的新版本。
+`POST /api/profiles` 未提供 `version` 时创建新配置的 `v1 · r1`；提供
+`version + expected_revision` 时原地更新该版本并递增 revision。revision 不匹配时
+拒绝保存，避免两个浏览器页面静默互相覆盖。
+
+```json
+{
+  "profile_id": "clawhub-full-4gpu",
+  "dataset": "clawhub",
+  "command": "full",
+  "version": 1,
+  "expected_revision": 3,
+  "overrides": {
+    "ROUTER_RETRIEVAL_EPOCHS": "5"
+  }
+}
+```
 
 `POST /api/runs` 只接受已保存的 `profile_id + version`。服务重新加载该版本，
-生成独立快照后再启动任务，避免提交浏览器中未保存的草稿。
+把当前 revision 复制为独立且不可变的 run snapshot 后再启动任务，避免提交浏览器
+中未保存的草稿，也避免后续配置修改影响任务。
 
 API 响应不返回已知密钥，不返回任意文件内容，不允许客户端传入任意命令。
 所有请求必须携带 loopback Host；写请求还必须为同源 `application/json`。
@@ -556,7 +590,7 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 | Runner 启动失败 | run 状态为 `failed_to_start`，不启动训练 |
 | Runner 意外退出、训练仍在 | UI 根据 training PID 显示 `running` 或 `unknown` |
 | 训练返回非零状态 | run 状态为 `failed` 并显示 exit code 和日志尾部 |
-| 配置版本冲突 | 在锁内分配新版本，不覆盖历史文件 |
+| 配置修订冲突 | 拒绝覆盖并提示重新加载最新 revision |
 | 质量门禁失败 | 保留失败状态和日志，不自动修改阈值重试 |
 | 输入产物缺失 | 现有 CLI 失败并记录具体文件或阶段；控制台只读呈现状态与日志 |
 | UI 无法读取某个 run | 其他任务仍可读取，错误局部展示 |
@@ -585,12 +619,13 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 
 - 能加载 `clawhub` 和 `light` 的有效默认值；
 - 能创建多个配置族；
-- 同一配置族能连续保存多个不可变版本；
-- 能加载历史版本并派生新版本；
+- 能加载并原地修改任一已保存版本；
+- 每次保存递增 revision，过期页面不能覆盖较新修订；
 - 能按阶段编辑所有 schema 字段；
 - 能比较默认值和覆盖值；
 - 能导出 `.env`；
 - 能从已保存版本提交白名单 pipeline command；
+- 已提交任务的配置快照不受后续 profile 修改影响；
 - 能在 Web 服务重启后恢复 profile 和 run 列表；
 - 能有界读取任务日志尾部、阶段、PID、exit code 和最新 checkpoint；
 - 不修改任何训练脚本。
@@ -620,7 +655,7 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 - 在 `1440 × 1024` 下与选定设计的布局、层级、颜色、间距和密度一致；
 - 左侧同时容纳配置库和完整流水线；
 - 中间表单仍是视觉主体；
-- 右侧清晰表达不可变快照和独立运行语义；
+- 右侧清晰区分可编辑 profile、不可变 run snapshot 和独立运行语义；
 - 页面无横向溢出、裁切或不可读小字；
 - 配置切换、版本加载、阶段导航、过滤覆盖项、比较默认值、保存、提交和
   运行观察均可操作；

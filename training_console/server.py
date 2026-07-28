@@ -239,8 +239,22 @@ class TrainingConsoleService:
 
     def save_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
         validation = self.validate(payload)
-        parent = payload.get("parent_version")
-        parent_version = None if parent in (None, "") else int(parent)
+        selected = payload.get("version", payload.get("parent_version"))
+        expected = payload.get("expected_revision")
+        try:
+            version = None if selected in (None, "") else int(selected)
+            expected_revision = (
+                None if expected in (None, "") else int(expected)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigValidationError(
+                [
+                    {
+                        "field": "version",
+                        "message": "配置版本和修订号必须是整数",
+                    }
+                ]
+            ) from exc
         profile = self.store.save_profile(
             profile_id=str(payload.get("profile_id", "")),
             dataset=validation["dataset"],
@@ -248,7 +262,8 @@ class TrainingConsoleService:
             overrides=validation["overrides"],
             resolved=validation["resolved"],
             notes=str(payload.get("notes", "")),
-            parent_version=parent_version,
+            version=version,
+            expected_revision=expected_revision,
         )
         return {
             "profile": profile,

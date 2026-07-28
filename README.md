@@ -81,8 +81,8 @@ bash scripts/router_pipeline.sh "$DATASET" paths
 
 ## 训练控制台
 
-激活安装了 LLMGen 的 Conda 环境后，可以通过独立开发者控制台管理参数和不可变
-配置版本：
+激活安装了 LLMGen 的 Conda 环境后，可以通过独立开发者控制台管理参数和可编辑
+配置：
 
 ```bash
 conda activate llmgen

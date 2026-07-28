@@ -471,7 +471,7 @@ def pid_alive(pid: Any) -> bool:
 
 
 class StateStore:
-    """Persist immutable profiles and independent-run metadata as JSON files."""
+    """Persist mutable profiles and independent-run metadata as JSON files."""
 
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
@@ -511,7 +511,8 @@ class StateStore:
         overrides: Mapping[str, str],
         resolved: Mapping[str, str],
         notes: str = "",
-        parent_version: int | None = None,
+        version: int | None = None,
+        expected_revision: int | None = None,
     ) -> dict[str, Any]:
         profile_id = validate_profile_id(profile_id)
         if "\x00" in notes or len(notes) > 2000:
@@ -522,32 +523,75 @@ class StateStore:
         with self.lock():
             profile_dir.mkdir(parents=True, exist_ok=True)
             versions = self._version_numbers(profile_dir)
-            if parent_version is not None and parent_version not in versions:
+            now = utc_now()
+            if version is None:
+                if versions:
+                    raise ConfigValidationError(
+                        [
+                            {
+                                "field": "profile_id",
+                                "message": (
+                                    f"配置已存在：{profile_id}；"
+                                    "请先加载需要修改的版本"
+                                ),
+                            }
+                        ]
+                    )
+                version = 1
+                revision = 1
+                created_at = now
+                parent_version = None
+            elif version not in versions:
                 raise ConfigValidationError(
                     [
                         {
-                            "field": "parent_version",
-                            "message": f"父版本不存在：v{parent_version}",
+                            "field": "version",
+                            "message": f"配置版本不存在：v{version}",
                         }
                     ]
                 )
-            version = (max(versions) if versions else 0) + 1
+            else:
+                path = self._profile_path(profile_dir, version)
+                existing = _read_json(path)
+                current_revision = max(
+                    1,
+                    int(existing.get("revision", 1)),
+                )
+                if (
+                    expected_revision is not None
+                    and int(expected_revision) != current_revision
+                ):
+                    raise ConfigValidationError(
+                        [
+                            {
+                                "field": "revision",
+                                "message": (
+                                    "配置已在其他页面更新："
+                                    f"当前为 r{current_revision}，"
+                                    f"本页面基于 r{expected_revision}"
+                                ),
+                            }
+                        ]
+                    )
+                revision = current_revision + 1
+                created_at = existing.get("created_at") or now
+                parent_version = existing.get("parent_version")
             payload: dict[str, Any] = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "profile_id": profile_id,
                 "name": profile_id,
                 "version": version,
+                "revision": revision,
                 "dataset": dataset,
                 "command": command,
                 "parent_version": parent_version,
                 "notes": notes.strip(),
-                "created_at": utc_now(),
+                "created_at": created_at,
+                "updated_at": now,
                 "overrides": dict(sorted(overrides.items())),
                 "resolved": dict(sorted(resolved.items())),
             }
             path = self._profile_path(profile_dir, version)
-            if path.exists():
-                raise FileExistsError(f"refusing to overwrite {path}")
             _atomic_write_json(path, payload)
         return payload
 
@@ -570,7 +614,10 @@ class StateStore:
         path = self._profile_path(profile_dir, selected)
         if not path.is_file():
             raise FileNotFoundError(f"配置版本不存在：{profile_id} v{selected}")
-        return _read_json(path)
+        profile = _read_json(path)
+        profile.setdefault("revision", 1)
+        profile.setdefault("updated_at", profile.get("created_at"))
+        return profile
 
     def list_profiles(self) -> list[dict[str, Any]]:
         profiles: list[dict[str, Any]] = []
@@ -590,9 +637,14 @@ class StateStore:
                 rows.append(
                     {
                         "version": version,
+                        "revision": max(1, int(profile.get("revision", 1))),
                         "dataset": profile.get("dataset"),
                         "command": profile.get("command"),
                         "created_at": profile.get("created_at"),
+                        "updated_at": (
+                            profile.get("updated_at")
+                            or profile.get("created_at")
+                        ),
                         "parent_version": profile.get("parent_version"),
                         "override_count": len(profile.get("overrides", {})),
                     }
@@ -638,6 +690,7 @@ class StateStore:
                 "run_id": run_id,
                 "profile_id": profile["profile_id"],
                 "profile_version": profile["version"],
+                "profile_revision": profile.get("revision", 1),
                 "dataset": profile["dataset"],
                 "command": profile["command"],
                 "created_at": utc_now(),
@@ -656,6 +709,7 @@ class StateStore:
                 "run_id": run_id,
                 "profile_id": profile["profile_id"],
                 "profile_version": profile["version"],
+                "profile_revision": profile.get("revision", 1),
                 "dataset": profile["dataset"],
                 "command": profile["command"],
                 "status": "queued",
@@ -668,7 +722,7 @@ class StateStore:
                 "updated_at": utc_now(),
                 "exit_code": None,
                 "latest_checkpoint": "",
-                "progress_text": "已保存不可变配置快照",
+                "progress_text": "已保存不可变运行快照",
                 "command_argv": command_argv,
                 "config_path": str(config_path),
                 "env_path": str(env_path),

@@ -156,7 +156,7 @@ def run(args: argparse.Namespace) -> int:
         runner_pid=os.getpid(),
         started_at=utc_now(),
         command_argv=argv,
-        progress_text="独立运行器已加载不可变配置快照",
+        progress_text="独立运行器已加载不可变运行快照",
     )
     print(
         f"launching detached training process for {args.run_id}: {argv!r}",

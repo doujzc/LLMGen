@@ -92,6 +92,8 @@ final result: passed
   `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-1250.png`
 - Mobile capture:
   `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-mobile.png`
+- Mutable-profile capture:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-mutable-config.png`
 - Desktop viewport and state: 1440 × 1024, `clawhub-full-4gpu` v6,
   Retrieval selected, 4-GPU ZeRO-3 contract, persisted detached run completed.
 
@@ -102,9 +104,9 @@ No actionable P0, P1, or P2 issues remain.
 - Visual hierarchy: the implementation preserves the selected direction's compact
   top bar, three-pane developer workbench, warm ivory surfaces, vermilion action
   states, restrained dividers, monospace parameter metadata, and dense form rhythm.
-- Configuration management: the left rail exposes three profile families and
-  nine immutable versions in the QA fixture. Historical versions are explicitly
-  read-only; editing and saving creates a new version.
+- Configuration management: the left rail exposes multiple profile families and
+  stable version slots. Every loaded version is editable; saving overwrites the
+  same `vN.json` and increments the visible revision.
 - Training workflow: all nine configuration views are reachable, including
   separate Memorization, Alignment, and Retrieval views. The selected stage,
   validation state, value provenance, overrides, defaults, and advanced fields
@@ -114,10 +116,10 @@ No actionable P0, P1, or P2 issues remain.
   It offers no stop, kill, or pause control that could make the Web service own the
   training lifecycle. Runner PID, training PID, exit code, actual state-root log
   path, checkpoint, and progress are rendered from persisted metadata.
-- Core browser journey: changed Retrieval Epochs, waited for live validation,
-  saved immutable v5 and v6 during separate checks, and submitted `--no-launch`
-  run snapshots. The page displayed the loaded version as immutable and surfaced
-  each saved run from disk.
+- Mutation journey: a live `mutable-live-qa` profile was created as `v1 · r1`,
+  updated in place to `v1 · r2`, and retained exactly one profile file. A stale
+  `r1` update returned HTTP 400 while the stored `r2` value remained unchanged.
+  Chrome then edited Retrieval Epochs and saved the same slot as `v1 · r3`.
 - Interaction coverage: profile/version loading, stage navigation, phase switch,
   “仅看覆盖项”, default comparison, contract/snapshot tabs, save, submit, and
   periodic run refresh were exercised.
@@ -125,10 +127,11 @@ No actionable P0, P1, or P2 issues remain.
   1100 × 900 move the run contract below the two-column workspace; 390 × 844 uses
   one continuous column. None has page-level horizontal overflow, and all nine
   stages and primary actions remain present.
-- Browser health: desktop, tablet, and mobile checks reported zero console errors
-  and zero failed network requests.
+- Browser health: desktop, tablet, mobile, and mutable-profile checks reported zero
+  console errors, zero failed network requests, and no page-level overflow.
 - Automated checks: the complete repository suite passed (194 tests), including
-  immutable profile storage, validation and injection rejection, API snapshots,
+  mutable profile revisions, immutable run snapshots, validation and injection
+  rejection, API snapshots,
   bounded log reads, credential filtering, package completeness, and a real
   Web-process SIGKILL survival test.
 
@@ -150,6 +153,9 @@ No actionable P0, P1, or P2 issues remain.
    redaction, prefixed-environment-secret, and credential-bearing URL edges.
    Loopback Host/Origin requests, a 1 MiB log-tail cap, 16 KiB line cap, and
    structured URL validation now have regression coverage.
+6. Profile persistence changed from append-only versions to mutable version slots.
+   Revision-based optimistic concurrency and immutable per-run snapshots preserve
+   conflict safety and training reproducibility.
 
 ## Intentional differences
 

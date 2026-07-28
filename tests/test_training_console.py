@@ -335,7 +335,7 @@ def test_log_tail_bounds_bytes_lines_and_single_line_length(
     ]
 
 
-def test_profile_versions_are_immutable_and_export_review_only_env(tmp_path) -> None:
+def test_saved_profile_is_mutable_with_optimistic_revision(tmp_path) -> None:
     resolver = ConfigResolver(REPO_ROOT, inherited_env=_clean_env())
     store = StateStore(tmp_path / "state")
     first = resolver.validate("clawhub", "full", {"ROUTER_RETRIEVAL_EPOCHS": "7"})
@@ -346,26 +346,55 @@ def test_profile_versions_are_immutable_and_export_review_only_env(tmp_path) -> 
         overrides=first["overrides"],
         resolved=first["resolved"],
     )
+    created_at = v1["created_at"]
     second = resolver.validate("clawhub", "full", {"ROUTER_RETRIEVAL_EPOCHS": "9"})
-    v2 = store.save_profile(
+    updated = store.save_profile(
         profile_id="clawhub-full-4gpu",
         dataset="clawhub",
         command="full",
         overrides=second["overrides"],
         resolved=second["resolved"],
-        parent_version=1,
+        version=1,
+        expected_revision=1,
     )
 
-    assert (v1["version"], v2["version"]) == (1, 2)
+    assert (v1["version"], v1["revision"]) == (1, 1)
+    assert (updated["version"], updated["revision"]) == (1, 2)
+    assert updated["created_at"] == created_at
+    assert updated["updated_at"]
     assert store.get_profile("clawhub-full-4gpu", 1)["resolved"][
         "ROUTER_RETRIEVAL_EPOCHS"
-    ] == "7"
-    assert store.get_profile("clawhub-full-4gpu", 2)["resolved"][
-        "ROUTER_RETRIEVAL_EPOCHS"
     ] == "9"
-    exported = store.profile_env("clawhub-full-4gpu", 2)
+    profile_files = list(
+        (store.profiles_dir / "clawhub-full-4gpu").glob("v*.json")
+    )
+    assert len(profile_files) == 1
+    exported = store.profile_env("clawhub-full-4gpu", 1)
     assert "ROUTER_RETRIEVAL_EPOCHS=9" in exported
     assert "OPENAI_API_KEY" not in exported
+
+    with pytest.raises(ConfigValidationError) as stale:
+        store.save_profile(
+            profile_id="clawhub-full-4gpu",
+            dataset="clawhub",
+            command="full",
+            overrides=first["overrides"],
+            resolved=first["resolved"],
+            version=1,
+            expected_revision=1,
+        )
+    assert stale.value.errors[0]["field"] == "revision"
+    assert store.get_profile("clawhub-full-4gpu", 1)["revision"] == 2
+
+    with pytest.raises(ConfigValidationError) as duplicate:
+        store.save_profile(
+            profile_id="clawhub-full-4gpu",
+            dataset="clawhub",
+            command="full",
+            overrides=first["overrides"],
+            resolved=first["resolved"],
+        )
+    assert duplicate.value.errors[0]["field"] == "profile_id"
 
 
 def test_http_api_saves_profiles_and_run_snapshots_without_launching(
@@ -403,6 +432,21 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
             },
         )
         assert saved["profile"]["version"] == 1
+        assert saved["profile"]["revision"] == 1
+
+        _, updated = _request(
+            base + "/api/profiles",
+            {
+                "profile_id": "clawhub-full-4gpu",
+                "dataset": "clawhub",
+                "command": "full",
+                "version": 1,
+                "expected_revision": 1,
+                "overrides": {"ROUTER_RETRIEVAL_EPOCHS": "3"},
+            },
+        )
+        assert updated["profile"]["version"] == 1
+        assert updated["profile"]["revision"] == 2
 
         _, run = _request(
             base + "/api/runs",
@@ -415,14 +459,35 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert Path(run["config_path"]).is_file()
         assert Path(run["env_path"]).is_file()
         assert Path(run["log_path"]).exists() is False
+        assert run["profile_revision"] == 2
         snapshot_text = Path(run["config_path"]).read_text(encoding="utf-8")
         snapshot = json.loads(snapshot_text)
+        assert snapshot["profile_revision"] == 2
+        assert snapshot["resolved"]["ROUTER_RETRIEVAL_EPOCHS"] == "3"
         assert snapshot["runtime_env"]["NCCL_DEBUG"] == "INFO"
         assert "OPENAI_API_KEY" not in snapshot_text
         assert "BASH_ENV" not in snapshot["runtime_env"]
         assert "PYTHONPATH" not in snapshot["runtime_env"]
         assert "PREPARE_SCRIPT" not in snapshot["runtime_env"]
         assert "ROUTER_EXTRA_ARGS" not in snapshot["runtime_env"]
+
+        _, revised_again = _request(
+            base + "/api/profiles",
+            {
+                "profile_id": "clawhub-full-4gpu",
+                "dataset": "clawhub",
+                "command": "full",
+                "version": 1,
+                "expected_revision": 2,
+                "overrides": {"ROUTER_RETRIEVAL_EPOCHS": "4"},
+            },
+        )
+        assert revised_again["profile"]["revision"] == 3
+        frozen_snapshot = json.loads(
+            Path(run["config_path"]).read_text(encoding="utf-8")
+        )
+        assert frozen_snapshot["profile_revision"] == 2
+        assert frozen_snapshot["resolved"]["ROUTER_RETRIEVAL_EPOCHS"] == "3"
 
         _, runs = _request(base + "/api/runs?limit=10")
         assert runs["runs"][0]["run_id"] == run["run_id"]
@@ -431,6 +496,8 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
             page = response.read().decode("utf-8")
         assert "独立任务" in page
         assert "训练控制台" in page
+        assert "保存会更新当前配置" in page
+        assert "保存新版本" not in page
         assert 'id="run-runner-pid"' in page
         assert 'id="run-training-pid"' in page
         assert 'id="run-exit-code"' in page
