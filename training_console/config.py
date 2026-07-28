@@ -109,6 +109,8 @@ class FieldSpec:
     advanced: bool = False
     required: bool = False
     placeholder: str = ""
+    derived_from: str = ""
+    derived_suffix: str = ""
 
     def payload(self, dataset: str) -> dict[str, Any]:
         result = asdict(self)
@@ -131,6 +133,8 @@ def _field(
     advanced: bool = False,
     required: bool = False,
     placeholder: str = "",
+    derived_from: str = "",
+    derived_suffix: str = "",
 ) -> FieldSpec:
     return FieldSpec(
         key=key,
@@ -144,6 +148,8 @@ def _field(
         advanced=advanced,
         required=required,
         placeholder=placeholder,
+        derived_from=derived_from,
+        derived_suffix=derived_suffix,
     )
 
 
@@ -175,6 +181,7 @@ FIELDS = (
         "运行身份",
         kind="path",
         source="dataset",
+        help="整个训练流程的工作目录；各阶段产物目录默认随它联动。",
         required=True,
     ),
     _field(
@@ -226,8 +233,11 @@ FIELDS = (
         "embedding",
         "数据路径",
         kind="path",
-        source="dataset",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/processed；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="processed",
     ),
     _field(
         "EMBEDDING_DIR",
@@ -235,8 +245,11 @@ FIELDS = (
         "embedding",
         "数据路径",
         kind="path",
-        source="dataset",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/embeddings；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="embeddings",
     ),
     _field(
         "EMBEDDING_PROVIDER",
@@ -315,7 +328,11 @@ FIELDS = (
         "tokenizer",
         "产物路径",
         kind="path",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/stage1；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="stage1",
     ),
     _field(
         "NUM_LEVELS",
@@ -452,7 +469,11 @@ FIELDS = (
         "code",
         "产物路径",
         kind="path",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/index；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="index",
     ),
     _field(
         "CODE_SPLITS",
@@ -555,7 +576,11 @@ FIELDS = (
         "router_data",
         "产物路径",
         kind="path",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/router_data；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="router_data",
     ),
     _field(
         "MEMORIZATION_VALIDATION_FRACTION",
@@ -585,7 +610,11 @@ FIELDS = (
         "memorization",
         "模型与产物",
         kind="path",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/router；手动修改可单独覆盖。",
         required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="router",
     ),
     _field(
         "ROUTER_MODEL",
@@ -916,11 +945,20 @@ FIELDS = (
         "evaluation",
         "产物路径",
         kind="path",
+        source="RUN_DIR",
+        help="默认跟随 $RUN_DIR/evaluation；手动修改可单独覆盖。",
         advanced=True,
+        derived_from="RUN_DIR",
+        derived_suffix="evaluation",
     ),
 )
 
 FIELD_BY_KEY = {field.key: field for field in FIELDS}
+RUN_DIR_DERIVED_PATHS = {
+    field.key: field.derived_suffix
+    for field in FIELDS
+    if field.derived_from == "RUN_DIR" and field.derived_suffix
+}
 ALLOWED_KEYS = frozenset(FIELD_BY_KEY)
 CONFIG_SOURCE_RUNTIME_KEYS = frozenset(
     {
@@ -1102,6 +1140,35 @@ def _normalize_value(spec: FieldSpec, raw: Any) -> str:
     return value
 
 
+def _run_dir_child(run_dir: str, suffix: str) -> str:
+    """Return a stable shell-style child path without resolving it on this host."""
+
+    stripped = run_dir.rstrip("/")
+    if stripped:
+        return f"{stripped}/{suffix}"
+    if run_dir.startswith("/"):
+        return f"/{suffix}"
+    return suffix
+
+
+def _run_dir_expression(suffix: str) -> str:
+    return f"$RUN_DIR/{suffix}"
+
+
+def _canonical_run_dir_expression(value: str) -> str:
+    braced_prefix = "${RUN_DIR}/"
+    if value.startswith(braced_prefix):
+        return f"$RUN_DIR/{value[len(braced_prefix):]}"
+    return value
+
+
+def _expand_run_dir_expression(value: str, run_dir: str) -> str:
+    prefix = "$RUN_DIR/"
+    if value.startswith(prefix):
+        return _run_dir_child(run_dir, value[len(prefix):])
+    return value
+
+
 class ConfigResolver:
     """Resolve trusted shell defaults and validate versioned UI overrides."""
 
@@ -1188,6 +1255,14 @@ class ConfigResolver:
         resolved.setdefault("EVAL_DIR", "")
         for field in FIELDS:
             resolved.setdefault(field.key, "")
+        run_dir = resolved.get("RUN_DIR", "")
+        if run_dir:
+            resolved.update(
+                {
+                    key: _run_dir_child(run_dir, suffix)
+                    for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+                }
+            )
         return resolved
 
     def validate(
@@ -1218,16 +1293,38 @@ class ConfigResolver:
         if errors:
             raise ConfigValidationError(errors)
 
-        preset = dict(normalized)
+        for key in RUN_DIR_DERIVED_PATHS:
+            if key in normalized:
+                normalized[key] = _canonical_run_dir_expression(normalized[key])
+
+        base = self.defaults(dataset)
+        effective_run_dir = normalized.get("RUN_DIR", base.get("RUN_DIR", ""))
+        runtime_overrides = {
+            key: (
+                _expand_run_dir_expression(value, effective_run_dir)
+                if key in RUN_DIR_DERIVED_PATHS
+                else value
+            )
+            for key, value in normalized.items()
+        }
+        preset = dict(runtime_overrides)
         preset["DATASET"] = dataset
         preset["PIPELINE_COMMAND"] = command
-        base = self.defaults(dataset)
         resolved = dict(base)
         resolved.update(self._source_config(dataset, preset=preset))
-        resolved.update(normalized)
+        resolved.update(runtime_overrides)
         resolved["DATASET"] = dataset
         resolved["PIPELINE_COMMAND"] = command
         resolved.setdefault("SKIP_PREPARE", "0")
+        run_dir = resolved.get("RUN_DIR", "")
+        if run_dir:
+            resolved.update(
+                {
+                    key: _run_dir_child(run_dir, suffix)
+                    for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+                    if key not in runtime_overrides
+                }
+            )
 
         for field in FIELDS:
             try:
@@ -1287,10 +1384,19 @@ class ConfigResolver:
         if errors:
             raise ConfigValidationError(errors)
 
+        contextual_defaults = dict(base)
+        run_dir = resolved.get("RUN_DIR", "")
+        if run_dir:
+            contextual_defaults.update(
+                {
+                    key: _run_dir_expression(suffix)
+                    for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+                }
+            )
         effective_overrides = {
             key: value
             for key, value in normalized.items()
-            if value != base.get(key, "")
+            if value != contextual_defaults.get(key, "")
         }
         sources = {
             field.key: (
@@ -1368,6 +1474,13 @@ class ConfigResolver:
 
     def schema(self, dataset: str) -> dict[str, Any]:
         defaults = self.defaults(dataset)
+        display_defaults = dict(defaults)
+        display_defaults.update(
+            {
+                key: _run_dir_expression(suffix)
+                for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+            }
+        )
         return {
             "schema_version": 1,
             "dataset": dataset,
@@ -1377,7 +1490,14 @@ class ConfigResolver:
             "commands": list(PIPELINE_COMMANDS),
             "stages": list(STAGES),
             "fields": [field.payload(dataset) for field in FIELDS],
-            "defaults": defaults,
+            "defaults": display_defaults,
+            "directory_contract": {
+                "root": "RUN_DIR",
+                "derived": [
+                    {"key": key, "suffix": suffix}
+                    for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+                ],
+            },
             "default_profile_id": DATASETS[dataset]["profile"],
             "secrets": {
                 "OPENAI_API_KEY": {

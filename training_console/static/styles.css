@@ -870,6 +870,18 @@ input::placeholder {
   font-weight: 700;
 }
 
+.field-row.linked .field-source {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.field-row.linked .field-control input:not([type="checkbox"]) {
+  border-color: #c7d8cd;
+  background:
+    linear-gradient(90deg, rgba(42, 107, 74, 0.055), transparent 38%),
+    var(--surface);
+}
+
 .field-default {
   display: none;
   overflow: hidden;

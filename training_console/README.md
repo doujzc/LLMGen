@@ -33,6 +33,30 @@ profile JSON 同时保存相对默认值的 `overrides` 和完整生效值 `reso
 API key。默认状态根目录相对仓库，也可通过 `--state-root` 或
 `LLMGEN_TRAINING_CONSOLE_STATE` 修改。
 
+## 训练工作目录
+
+`RUN_DIR` 是一次训练流程的统一工作目录。以下产物目录默认随它联动：
+
+```text
+$RUN_DIR/
+├── processed/
+├── embeddings/
+├── stage1/
+├── index/
+├── router_data/
+├── router/
+└── evaluation/
+```
+
+未覆盖的目录字段直接显示 `$RUN_DIR/processed`、`$RUN_DIR/index` 等符号默认值；
+校验、提交和运行快照中才安全展开为实际路径。修改 `RUN_DIR` 不需要同步修改这些
+字段，也不会清除某个目录已有的独立覆盖；单项覆盖也可以继续使用
+`$RUN_DIR/custom_path`。原始 `DATASET_DIR` 和控制台自己的 state root 不属于该
+工作目录。
+
+配置检查失败不会锁死“保存配置”按钮。修正字段后可以等待自动检查，也可以直接
+点击“重新检查并保存”；无效配置仍不会写入磁盘或提交训练。
+
 完整设计与安全边界见
 [设计与实现规范](../docs/training-console/design.md)。
 

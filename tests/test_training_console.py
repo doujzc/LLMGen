@@ -15,7 +15,11 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from training_console.config import ConfigResolver, ConfigValidationError
+from training_console.config import (
+    RUN_DIR_DERIVED_PATHS,
+    ConfigResolver,
+    ConfigValidationError,
+)
 from training_console.server import (
     TrainingConsoleService,
     handler_class,
@@ -107,6 +111,77 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
     assert light["defaults"]["BRANCHING_FACTORS"] == "32 16"
     assert clawhub["defaults"]["ROUTER_FINETUNE_MODE"] == "full"
     assert clawhub["secrets"]["OPENAI_API_KEY"]["persisted"] is False
+
+
+def test_run_dir_is_the_default_root_for_every_training_artifact() -> None:
+    resolver = ConfigResolver(REPO_ROOT, inherited_env=_clean_env())
+    run_dir = "/data/llmgen/runs/linked"
+
+    validated = resolver.validate(
+        "clawhub",
+        "full",
+        {"RUN_DIR": run_dir},
+    )
+
+    assert validated["overrides"] == {"RUN_DIR": run_dir}
+    for key, suffix in RUN_DIR_DERIVED_PATHS.items():
+        assert validated["resolved"][key] == f"{run_dir}/{suffix}"
+
+    schema = resolver.schema("clawhub")
+    assert schema["directory_contract"] == {
+        "root": "RUN_DIR",
+        "derived": [
+            {"key": key, "suffix": suffix}
+            for key, suffix in RUN_DIR_DERIVED_PATHS.items()
+        ],
+    }
+    fields = {field["key"]: field for field in schema["fields"]}
+    for key, suffix in RUN_DIR_DERIVED_PATHS.items():
+        assert schema["defaults"][key] == f"$RUN_DIR/{suffix}"
+        assert fields[key]["derived_from"] == "RUN_DIR"
+        assert fields[key]["derived_suffix"] == suffix
+
+
+def test_run_dir_link_can_be_explicitly_overridden_per_artifact() -> None:
+    resolver = ConfigResolver(REPO_ROOT, inherited_env=_clean_env())
+    run_dir = "runs/linked"
+    custom_index = "/shared/router-index"
+
+    validated = resolver.validate(
+        "clawhub",
+        "full",
+        {
+            "RUN_DIR": run_dir,
+            "INDEX_DIR": custom_index,
+        },
+    )
+
+    assert validated["resolved"]["INDEX_DIR"] == custom_index
+    assert validated["overrides"] == {
+        "INDEX_DIR": custom_index,
+        "RUN_DIR": run_dir,
+    }
+
+    moved = resolver.validate(
+        "clawhub",
+        "full",
+        {
+            "RUN_DIR": "runs/moved",
+            "INDEX_DIR": custom_index,
+            "PROCESSED_DIR": "$RUN_DIR/processed",
+            "EMBEDDING_DIR": "$RUN_DIR/custom_embeddings",
+        },
+    )
+    assert moved["resolved"]["PROCESSED_DIR"] == "runs/moved/processed"
+    assert moved["resolved"]["EMBEDDING_DIR"] == (
+        "runs/moved/custom_embeddings"
+    )
+    assert moved["resolved"]["INDEX_DIR"] == custom_index
+    assert moved["overrides"] == {
+        "EMBEDDING_DIR": "$RUN_DIR/custom_embeddings",
+        "INDEX_DIR": custom_index,
+        "RUN_DIR": "runs/moved",
+    }
 
 
 def test_config_resolution_is_anchored_to_repo_and_ignores_bash_env(
@@ -505,6 +580,15 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         with urlopen(base + "/static/styles.css", timeout=5) as response:
             styles = response.read().decode("utf-8")
         assert "@media (max-width: 1320px)" in styles
+        assert ".field-row.linked .field-source" in styles
+
+        with urlopen(base + "/static/app.js", timeout=5) as response:
+            app = response.read().decode("utf-8")
+        assert "state.busy || Boolean(savedAndClean)" in app
+        assert "重新检查并保存" in app
+        assert "validationRequestId" in app
+        assert "`$${field.derived_from}/${field.derived_suffix}`" in app
+        assert "delete state.draft.overrides[candidate.key]" not in app
 
         _, validated = _request(
             base + "/api/validate",

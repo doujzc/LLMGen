@@ -8,6 +8,8 @@ const state = {
   onlyOverrides: false,
   compareDefaults: false,
   validateTimer: null,
+  validationRequestId: 0,
+  validationPending: false,
   busy: false,
   currentRun: null,
   loadedProfileId: "",
@@ -86,6 +88,14 @@ function showToast(message, error = false) {
   }, 3400);
 }
 
+function dismissErrorToast() {
+  const toast = $("#toast");
+  if (!toast.hidden && toast.classList.contains("error")) {
+    window.clearTimeout(showToast.timer);
+    toast.hidden = true;
+  }
+}
+
 function setBusy(busy) {
   state.busy = busy;
   [
@@ -105,12 +115,19 @@ function fieldByKey(key) {
   return state.schema?.fields.find((field) => field.key === key);
 }
 
+function derivedFieldValue(field) {
+  if (!field?.derived_from || !field.derived_suffix) return null;
+  return `$${field.derived_from}/${field.derived_suffix}`;
+}
+
 function effectiveValue(key) {
   if (key === "DATASET") return state.draft.dataset;
   if (key === "PIPELINE_COMMAND") return state.draft.command;
   if (Object.hasOwn(state.draft.overrides, key)) {
     return state.draft.overrides[key];
   }
+  const linkedValue = derivedFieldValue(fieldByKey(key));
+  if (linkedValue !== null) return linkedValue;
   return (
     state.validation?.resolved?.[key] ??
     state.schema?.defaults?.[key] ??
@@ -121,7 +138,22 @@ function effectiveValue(key) {
 function defaultValue(key) {
   if (key === "DATASET") return state.schema?.dataset || "clawhub";
   if (key === "PIPELINE_COMMAND") return "full";
+  const linkedValue = derivedFieldValue(fieldByKey(key));
+  if (linkedValue !== null) return linkedValue;
   return state.schema?.defaults?.[key] ?? "";
+}
+
+function fieldSourceText(field) {
+  if (isOverridden(field.key)) return "本版本覆盖";
+  if (field.derived_from) return `联动 · ${field.derived_from}`;
+  return field.source;
+}
+
+function fieldDefaultText(field) {
+  if (field.derived_from && field.derived_suffix) {
+    return `默认 · $${field.derived_from}/${field.derived_suffix}`;
+  }
+  return `默认 · ${defaultValue(field.key) || "空"}`;
 }
 
 function isOverridden(key) {
@@ -359,6 +391,10 @@ function createFieldRow(field) {
   const row = element("div", "field-row");
   row.dataset.fieldKey = field.key;
   row.classList.toggle("changed", isOverridden(field.key));
+  row.classList.toggle(
+    "linked",
+    Boolean(field.derived_from) && !isOverridden(field.key),
+  );
   row.classList.toggle("compare", state.compareDefaults);
 
   const label = element("label", "field-label");
@@ -387,12 +423,15 @@ function createFieldRow(field) {
   const source = element(
     "span",
     "field-source",
-    isOverridden(field.key) ? "本版本覆盖" : field.source,
+    fieldSourceText(field),
   );
+  if (field.derived_from) {
+    source.title = `默认值跟随 ${field.derived_from}；手动修改后转为独立覆盖`;
+  }
   const defaultNode = element(
     "span",
     "field-default",
-    `默认 · ${defaultValue(field.key) || "空"}`,
+    fieldDefaultText(field),
   );
   const error = element("span", "field-error");
   error.id = `error-${field.key}`;
@@ -489,13 +528,26 @@ function handleFieldChange(field, input, row) {
   state.draft.dirty = true;
   const changed = isOverridden(field.key);
   row.classList.toggle("changed", changed);
-  row.querySelector(".field-source").textContent = changed
-    ? "本版本覆盖"
-    : field.source;
+  row.classList.toggle("linked", Boolean(field.derived_from) && !changed);
+  row.querySelector(".field-source").textContent = fieldSourceText(field);
+  invalidateDraftValidation();
   renderWorkspaceHeader();
   renderHeaderMetrics();
   renderStages();
   scheduleValidation();
+}
+
+function invalidateDraftValidation() {
+  window.clearTimeout(state.validateTimer);
+  dismissErrorToast();
+  state.validationRequestId += 1;
+  state.validationPending = false;
+  state.validation = null;
+  state.validationErrors = [];
+  renderValidation();
+  renderFieldErrors();
+  renderContract();
+  renderIdentityAndActions();
 }
 
 function setActiveStage(stageId) {
@@ -536,12 +588,23 @@ function renderValidation() {
     return;
   }
   const gpuCount = state.validation.contract.num_gpus || "—";
+  const derivedDirectories =
+    state.schema?.directory_contract?.derived || [];
+  const linkedDirectoryCount = derivedDirectories.filter(
+    (directory) => !Object.hasOwn(state.draft.overrides, directory.key),
+  ).length;
+  const overriddenDirectoryCount =
+    derivedDirectories.length - linkedDirectoryCount;
+  const directorySummary = overriddenDirectoryCount
+    ? `${linkedDirectoryCount} 个目录跟随 RUN_DIR · ` +
+      `${overriddenDirectoryCount} 个单独覆盖`
+    : `${linkedDirectoryCount} 个产物目录跟随 RUN_DIR`;
   banner.append(
     element("strong", "", "配置检查通过"),
     element(
       "span",
       "",
-      `${gpuCount} GPUs 已配置 · 参数类型与层级结构合法`,
+      `${gpuCount} GPUs 已配置 · ${directorySummary}`,
     ),
   );
 }
@@ -606,12 +669,14 @@ function renderIdentityAndActions() {
     !state.draft.dirty &&
     state.loadedProfileId === state.draft.profileId;
   $("#save-profile-button").disabled =
-    state.busy || hasErrors || Boolean(savedAndClean);
+    state.busy || Boolean(savedAndClean);
   $("#submit-run-button").disabled = state.busy || hasErrors;
   $("#export-env-button").disabled = state.busy || hasErrors;
-  $("#save-profile-button").textContent = state.loadedVersion
-    ? "保存修改"
-    : "保存配置";
+  $("#save-profile-button").textContent = state.validationErrors.length
+    ? "重新检查并保存"
+    : state.loadedVersion
+      ? "保存修改"
+      : "保存配置";
 }
 
 function renderAll() {
@@ -628,15 +693,24 @@ function renderAll() {
 }
 
 async function validateDraft() {
+  window.clearTimeout(state.validateTimer);
+  const requestId = ++state.validationRequestId;
+  state.validationPending = true;
   state.validation = null;
   state.validationErrors = [];
   renderValidation();
+  let validation = null;
+  let validationErrors = [];
   try {
-    state.validation = await postJson("/api/validate", validationPayload());
+    validation = await postJson("/api/validate", validationPayload());
   } catch (error) {
-    state.validationErrors =
+    validationErrors =
       error.payload?.errors || [{ field: "configuration", message: error.message }];
   }
+  if (requestId !== state.validationRequestId) return state.validation;
+  state.validationPending = false;
+  state.validation = validation;
+  state.validationErrors = validationErrors;
   renderValidation();
   renderFieldErrors();
   renderContract();
@@ -689,7 +763,7 @@ async function loadProfile(profileId, version) {
 }
 
 async function saveProfile() {
-  const valid = state.validation || (await validateDraft());
+  const valid = await validateDraft();
   if (!valid) throw new Error("请先修复配置错误");
   const sameFamily = state.draft.profileId === state.loadedProfileId;
   const result = await postJson("/api/profiles", {

@@ -198,6 +198,10 @@ export-web
   现有 CLI 权威执行，并写入独立任务日志；
 - 用户能看到最终命令和输出目录。
 
+配置检查失败时，“提交任务”和“导出”保持禁用，但“保存配置”仍可点击并显示为
+“重新检查并保存”。字段修正会立即清除旧错误状态并触发带请求序号的防抖校验；
+过期响应不得覆盖较新的校验结果。无效配置始终不会落盘。
+
 ## 5. 参数 schema
 
 控制台 schema 是展示和校验元数据，不是训练逻辑。权威默认值仍来自现有配置链：
@@ -222,6 +226,24 @@ configs/<dataset>.env
 | `DEVICE` | string | 默认 `cuda` |
 | `CUDA_VISIBLE_DEVICES` | csv | 例如 `0,1,2,3` |
 | `SKIP_PREPARE` | bool | 完整流程是否跳过已有预处理 |
+
+`RUN_DIR` 是训练产物的单一工作目录根：
+
+| 派生参数 | 默认值 |
+|---|---|
+| `PROCESSED_DIR` | `$RUN_DIR/processed` |
+| `EMBEDDING_DIR` | `$RUN_DIR/embeddings` |
+| `STAGE1_DIR` | `$RUN_DIR/stage1` |
+| `INDEX_DIR` | `$RUN_DIR/index` |
+| `ROUTER_DATA_DIR` | `$RUN_DIR/router_data` |
+| `ROUTER_OUTPUT_DIR` | `$RUN_DIR/router` |
+| `EVAL_DIR` | `$RUN_DIR/evaluation` |
+
+未覆盖字段的输入框直接显示上述 `$RUN_DIR/xxx` 表达式；后端只对这组白名单表达式
+做安全展开，并在运行契约与快照中呈现实际路径。修改 `RUN_DIR` 不改写派生字段，
+也不清除用户对单个目录的独立覆盖；`$RUN_DIR/custom_path` 形式的单项覆盖同样
+由后端安全展开，不执行通用 shell 插值。`DATASET_DIR` 是原始数据源位置，训练
+控制台 state root 是独立控制面状态，两者都不随 `RUN_DIR` 变化。
 
 ### 5.2 数据与 Embedding
 
