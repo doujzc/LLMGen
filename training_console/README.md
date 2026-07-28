@@ -7,7 +7,9 @@
 - 提交时在 `.llmgen/training-console/runs/` 写入独立快照；
 - detached runner 调用现有 `scripts/router_pipeline.sh`；
 - 关闭浏览器或 Web 服务不会终止训练；
-- 页面重启后从磁盘恢复任务、日志和 checkpoint 状态。
+- 页面重启后从磁盘恢复任务、日志和 checkpoint 状态；
+- “运行监控”页集中显示历史任务、流水线阶段、进度、PID、GPU、checkpoint
+  与实时日志尾部。
 
 加载已保存的 `vN` 后，点击“保存修改”会原子覆盖同一个 `vN.json`，不会创建
 新版本；`revision` 用于阻止多个页面静默互相覆盖。已经提交的 run 始终读取自己的
@@ -56,6 +58,20 @@ $RUN_DIR/
 
 配置检查失败不会锁死“保存配置”按钮。修正字段后可以等待自动检查，也可以直接
 点击“重新检查并保存”；无效配置仍不会写入磁盘或提交训练。
+
+Stage 02“层级 Tokenizer”会同时显示 Stage 03 执行的 Code 质量门参数，包括
+`CODE_MAX_RAW_COLLISION_RATE`、碰撞桶大小、各层 raw utilization 和 normalized
+entropy。碰撞率、利用率和熵阈值在控制台中限制为 `0..1`，控制台不会自动放宽
+质量门禁。
+
+## 运行监控与停止
+
+顶栏可在“配置工作台”和“运行监控”之间切换。监控页每 3 秒从磁盘状态、日志和
+`nvidia-smi` 刷新一次；它不使用浏览器心跳维持任务，页面崩溃不会影响训练。
+
+“停止训练”不会由浏览器直接 kill PID。Web 服务只把停止请求原子写入对应
+`run.json`，独立 Runner 读取后终止自己创建的训练进程组：先发送 `SIGTERM`，
+12 秒后仍未退出才发送 `SIGKILL`。日志、运行快照和已保存 Checkpoint 均保留。
 
 完整设计与安全边界见
 [设计与实现规范](../docs/training-console/design.md)。

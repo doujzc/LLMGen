@@ -152,15 +152,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def probe_gpu_count() -> int | None:
-    """Best-effort GPU count without importing torch into the Web service."""
+def probe_gpu_metrics() -> list[dict[str, Any]] | None:
+    """Return a lightweight NVIDIA GPU snapshot without importing torch."""
 
     try:
         completed = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=index",
-                "--format=csv,noheader",
+                (
+                    "--query-gpu=index,name,utilization.gpu,memory.used,"
+                    "memory.total,temperature.gpu"
+                ),
+                "--format=csv,noheader,nounits",
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -172,7 +175,32 @@ def probe_gpu_count() -> int | None:
         return None
     if completed.returncode != 0:
         return None
-    return len([line for line in completed.stdout.splitlines() if line.strip()])
+    rows: list[dict[str, Any]] = []
+    for raw_line in completed.stdout.splitlines():
+        parts = [part.strip() for part in raw_line.split(",", 5)]
+        if len(parts) != 6:
+            continue
+        try:
+            rows.append(
+                {
+                    "index": parts[0],
+                    "name": parts[1],
+                    "utilization": int(parts[2]),
+                    "memory_used_mib": int(parts[3]),
+                    "memory_total_mib": int(parts[4]),
+                    "temperature_c": int(parts[5]),
+                }
+            )
+        except ValueError:
+            continue
+    return rows
+
+
+def probe_gpu_count() -> int | None:
+    """Return the current NVIDIA GPU count when nvidia-smi is available."""
+
+    metrics = probe_gpu_metrics()
+    return None if metrics is None else len(metrics)
 
 
 class TrainingConsoleService:
@@ -209,9 +237,10 @@ class TrainingConsoleService:
         profiles = self.store.list_profiles()
         runs = self.store.list_runs(limit=200)
         active = sum(
-            run.get("status") in {"queued", "starting", "running"}
+            run.get("status") in {"queued", "starting", "running", "stopping"}
             for run in runs
         )
+        gpus = probe_gpu_metrics()
         return {
             "ready": True,
             "service": "training-console",
@@ -222,7 +251,8 @@ class TrainingConsoleService:
             "profile_count": len(profiles),
             "run_count": len(runs),
             "active_runs": active,
-            "gpu_count": probe_gpu_count(),
+            "gpu_count": None if gpus is None else len(gpus),
+            "gpus": gpus or [],
         }
 
     def validate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -346,6 +376,48 @@ class TrainingConsoleService:
             )
         self.store.update_run(run["run_id"], runner_pid=runner_pid)
         return self.store.get_run(run["run_id"])
+
+    def request_stop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Persist a cooperative stop request for the detached runner."""
+
+        run_id = str(payload.get("run_id", "")).strip()
+        if not run_id:
+            raise ConfigValidationError(
+                [{"field": "run_id", "message": "请选择要停止的运行"}]
+            )
+        run = self.store.get_run(run_id)
+        status = str(run.get("status", ""))
+        if status == "stopping":
+            return run
+        if status not in {"queued", "starting", "running", "unknown"}:
+            raise ConfigValidationError(
+                [
+                    {
+                        "field": "run_id",
+                        "message": f"当前状态不可停止：{status or 'unknown'}",
+                    }
+                ]
+            )
+        requested_at = utc_now()
+        if not run.get("runner_alive") and not run.get("training_alive"):
+            return self.store.update_run(
+                run_id,
+                status="stopped",
+                stage="用户停止",
+                progress_text="停止请求已记录；运行进程已不存在",
+                stop_requested_at=requested_at,
+                stop_requested_stage=run.get("stage", ""),
+                stopped_at=requested_at,
+                finished_at=requested_at,
+            )
+        return self.store.update_run(
+            run_id,
+            status="stopping",
+            stage="正在停止",
+            progress_text="停止请求已写入磁盘，等待独立运行器安全退出",
+            stop_requested_at=requested_at,
+            stop_requested_stage=run.get("stage", ""),
+        )
 
     def tail_log(self, run_id: str, lines: int) -> str:
         """Return a redacted training-log tail for the browser."""
@@ -516,6 +588,7 @@ def handler_class(service: TrainingConsoleService):
                 "/api/validate",
                 "/api/profiles",
                 "/api/runs",
+                "/api/runs/stop",
             }:
                 self._error(HTTPStatus.NOT_FOUND, "not found")
                 return
@@ -547,8 +620,10 @@ def handler_class(service: TrainingConsoleService):
                     result = service.validate(payload)
                 elif request_path == "/api/profiles":
                     result = service.save_profile(payload)
-                else:
+                elif request_path == "/api/runs":
                     result = service.submit_run(payload)
+                else:
+                    result = service.request_stop(payload)
                 self._json(HTTPStatus.OK, result)
             except ConfigValidationError as exc:
                 self._error(

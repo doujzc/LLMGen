@@ -11,7 +11,14 @@ const state = {
   validationRequestId: 0,
   validationPending: false,
   busy: false,
+  stopBusy: false,
+  monitorRefreshing: false,
+  currentPage: "configuration",
   currentRun: null,
+  runs: [],
+  selectedRunId: "",
+  runFilter: "all",
+  monitorLogRequestId: 0,
   loadedProfileId: "",
   loadedVersion: null,
   loadedRevision: null,
@@ -24,6 +31,31 @@ const state = {
     dirty: true,
   },
 };
+
+const ACTIVE_RUN_STATUSES = new Set([
+  "queued",
+  "starting",
+  "running",
+  "stopping",
+  "unknown",
+]);
+const PROCESS_RUN_STATUSES = new Set(["starting", "running", "stopping"]);
+const ATTENTION_RUN_STATUSES = new Set([
+  "failed",
+  "failed_to_start",
+  "stopped",
+  "unknown",
+]);
+const PIPELINE_STAGES = [
+  { id: "embedding", number: "01", label: "Embedding", markers: ["01", "embedding"] },
+  { id: "tokenizer", number: "02", label: "Tokenizer", markers: ["02", "tokenizer"] },
+  { id: "code", number: "03", label: "Code", markers: ["03", "code 导出"] },
+  { id: "router_data", number: "04", label: "Router Data", markers: ["04", "router 数据"] },
+  { id: "memorization", number: "05", label: "Memorization", markers: ["05", "memorization"] },
+  { id: "alignment", number: "06a", label: "Alignment", markers: ["06a", "alignment"] },
+  { id: "retrieval", number: "06b", label: "Retrieval", markers: ["06b", "retrieval", "06 retrieval"] },
+  { id: "evaluation", number: "07", label: "Evaluation", markers: ["07", "评估"] },
+];
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -460,7 +492,9 @@ function renderFields() {
   container.replaceChildren();
   if (!state.schema) return;
   let fields = state.schema.fields.filter(
-    (field) => field.stage === state.activeStage,
+    (field) =>
+      field.stage === state.activeStage ||
+      (field.visible_stages || []).includes(state.activeStage),
   );
   if (state.onlyOverrides) {
     fields = fields.filter((field) => isOverridden(field.key));
@@ -688,6 +722,7 @@ function renderAll() {
   renderValidation();
   renderContract();
   renderCurrentRun();
+  renderMonitor();
   renderHeaderMetrics();
   renderIdentityAndActions();
 }
@@ -830,9 +865,14 @@ async function submitRun() {
       profile_id: profile.profile_id,
       version: profile.version,
     });
+    state.runs = [run, ...state.runs.filter((item) => item.run_id !== run.run_id)];
     state.currentRun = run;
+    state.selectedRunId = run.run_id;
     renderCurrentRun();
     renderContract();
+    renderMonitor();
+    setConsolePage("monitor");
+    loadMonitorLog(false);
     showToast(
       run.status === "saved"
         ? "已保存运行快照；当前服务未启动训练"
@@ -887,6 +927,8 @@ function statusLabel(status) {
     queued: "等待运行器",
     starting: "正在启动",
     running: "运行中",
+    stopping: "正在停止",
+    stopped: "已停止",
     succeeded: "已完成",
     failed: "失败",
     failed_to_start: "启动失败",
@@ -894,6 +936,363 @@ function statusLabel(status) {
     unknown: "状态未知",
   };
   return labels[status] || status || "—";
+}
+
+function statusTone(status) {
+  if (["running", "succeeded"].includes(status)) return "positive";
+  if (["queued", "starting", "stopping"].includes(status)) return "pending";
+  if (["failed", "failed_to_start", "unknown"].includes(status)) return "negative";
+  if (status === "stopped") return "stopped";
+  return "neutral";
+}
+
+function selectedRun() {
+  return (
+    state.runs.find((run) => run.run_id === state.selectedRunId) ||
+    state.runs[0] ||
+    null
+  );
+}
+
+function runDuration(run) {
+  const started = new Date(run.started_at || run.created_at || "");
+  if (Number.isNaN(started.getTime())) return "—";
+  const finished = new Date(
+    run.finished_at || run.stopped_at || Date.now(),
+  );
+  const seconds = Math.max(
+    0,
+    Math.floor((finished.getTime() - started.getTime()) / 1000),
+  );
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  if (days) return `${days}d ${hours}h ${minutes}m`;
+  if (hours) return `${hours}h ${minutes}m ${remainder}s`;
+  if (minutes) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function runProgress(run) {
+  const text = String(run.progress_text || "");
+  const match = text.match(/(\d[\d,]*)\s*\/\s*(\d[\d,]*)/);
+  if (match) {
+    const done = Number(match[1].replaceAll(",", ""));
+    const total = Number(match[2].replaceAll(",", ""));
+    if (Number.isFinite(done) && total > 0) {
+      return Math.max(0, Math.min(100, (done / total) * 100));
+    }
+  }
+  if (run.status === "succeeded") return 100;
+  return null;
+}
+
+function runMatchesFilter(run) {
+  if (state.runFilter === "active") return ACTIVE_RUN_STATUSES.has(run.status);
+  if (state.runFilter === "succeeded") return run.status === "succeeded";
+  if (state.runFilter === "attention") {
+    return ATTENTION_RUN_STATUSES.has(run.status);
+  }
+  return true;
+}
+
+function renderMonitorSummary() {
+  const processActive = state.runs.filter((run) =>
+    PROCESS_RUN_STATUSES.has(run.status),
+  ).length;
+  const queued = state.runs.filter((run) => run.status === "queued").length;
+  const succeeded = state.runs.filter((run) => run.status === "succeeded").length;
+  const activeTotal = processActive + queued;
+  $("#monitor-active-count").textContent = String(processActive);
+  $("#monitor-queued-count").textContent = String(queued);
+  $("#monitor-success-count").textContent = String(succeeded);
+  $("#active-run-badge").textContent = String(activeTotal);
+  $("#active-run-badge").hidden = activeTotal === 0;
+
+  const gpus = state.health?.gpus || [];
+  const gpuCount = state.health?.gpu_count;
+  $("#monitor-gpu-count").textContent =
+    gpuCount === null || gpuCount === undefined ? "—" : String(gpuCount);
+  if (!gpus.length) {
+    $("#monitor-gpu-summary").textContent =
+      gpuCount === 0 ? "未检测到 NVIDIA GPU" : "等待 nvidia-smi";
+    return;
+  }
+  const averageUtilization = Math.round(
+    gpus.reduce((total, gpu) => total + gpu.utilization, 0) / gpus.length,
+  );
+  const used = gpus.reduce((total, gpu) => total + gpu.memory_used_mib, 0);
+  const total = gpus.reduce((sum, gpu) => sum + gpu.memory_total_mib, 0);
+  $("#monitor-gpu-summary").textContent =
+    `平均 ${averageUtilization}% · ${(used / 1024).toFixed(1)} / ` +
+    `${(total / 1024).toFixed(1)} GiB`;
+}
+
+function renderRunList() {
+  const container = $("#monitor-run-list");
+  container.replaceChildren();
+  const runs = state.runs.filter(runMatchesFilter);
+  $("#monitor-run-count").textContent = `${state.runs.length} RUNS`;
+  if (!runs.length) {
+    container.append(
+      element(
+        "div",
+        "ledger-empty",
+        state.runs.length ? "当前筛选条件下没有运行记录。" : "尚未提交训练任务。",
+      ),
+    );
+    return;
+  }
+  runs.forEach((run) => {
+    const button = element("button", "monitor-run-card");
+    button.type = "button";
+    button.classList.toggle("selected", run.run_id === state.selectedRunId);
+    button.dataset.status = statusTone(run.status);
+    const heading = element("span", "run-card-heading");
+    heading.append(
+      element("strong", "", run.profile_id || "未命名配置"),
+      element("span", `run-card-state ${statusTone(run.status)}`, statusLabel(run.status)),
+    );
+    const identity = element("code", "run-card-id", run.run_id || "—");
+    const stage = element("span", "run-card-stage", run.stage || "等待阶段信息");
+    const footer = element("span", "run-card-footer");
+    footer.append(
+      element("span", "", run.progress_text || run.command || "—"),
+      element("time", "", formatTime(run.updated_at || run.created_at)),
+    );
+    button.append(heading, identity, stage, footer);
+    button.addEventListener("click", () => {
+      state.selectedRunId = run.run_id;
+      renderMonitor();
+      loadMonitorLog(false);
+    });
+    container.append(button);
+  });
+}
+
+function stagesForRun(run) {
+  const singleStage = {
+    prepare: "embedding",
+    "train-tokenizer": "tokenizer",
+    "export-codes": "code",
+    "build-router-data": "router_data",
+    "train-memorization": "memorization",
+    "train-retrieval": "retrieval",
+    evaluate: "evaluation",
+  }[run.command];
+  return singleStage
+    ? PIPELINE_STAGES.filter((stage) => stage.id === singleStage)
+    : PIPELINE_STAGES;
+}
+
+function renderMonitorStageTrack(run) {
+  const container = $("#monitor-stage-track");
+  container.replaceChildren();
+  const stages = stagesForRun(run);
+  const stageText = String(
+    run.stop_requested_stage || run.stage || "",
+  ).toLocaleLowerCase();
+  let currentIndex = stages.findIndex((stage) =>
+    stage.markers.some((marker) => stageText.includes(marker)),
+  );
+  if (run.status === "succeeded") currentIndex = stages.length;
+  stages.forEach((stage, index) => {
+    const node = element("div", "monitor-stage-node");
+    const completed = currentIndex === stages.length || index < currentIndex;
+    const current = index === currentIndex;
+    node.classList.toggle("complete", completed);
+    node.classList.toggle("current", current);
+    node.classList.toggle(
+      "failed",
+      current && ["failed", "failed_to_start", "unknown"].includes(run.status),
+    );
+    node.classList.toggle("stopped", current && run.status === "stopped");
+    node.append(
+      element("i", "", stage.number),
+      element("span", "", stage.label),
+    );
+    container.append(node);
+  });
+}
+
+function renderGpuBoard() {
+  const board = $("#gpu-board");
+  board.replaceChildren();
+  const gpus = state.health?.gpus || [];
+  if (!gpus.length) {
+    board.append(
+      element(
+        "div",
+        "gpu-empty",
+        state.health?.gpu_count === 0
+          ? "当前主机未检测到 NVIDIA GPU。"
+          : "nvidia-smi 暂不可用；训练任务仍由磁盘状态独立监控。",
+      ),
+    );
+    return;
+  }
+  gpus.forEach((gpu) => {
+    const card = element("article", "gpu-card");
+    const heading = element("div", "gpu-card-heading");
+    heading.append(
+      element("strong", "", `GPU ${gpu.index}`),
+      element("span", "", `${gpu.temperature_c}°C`),
+    );
+    const name = element("span", "gpu-name", gpu.name);
+    const memoryPercent =
+      gpu.memory_total_mib > 0
+        ? Math.round((gpu.memory_used_mib / gpu.memory_total_mib) * 100)
+        : 0;
+    const utilization = element("div", "gpu-reading");
+    utilization.append(
+      element("span", "", "Compute"),
+      element("strong", "", `${gpu.utilization}%`),
+    );
+    const utilizationTrack = element("div", "gpu-meter");
+    const utilizationBar = element("span");
+    utilizationBar.style.width = `${gpu.utilization}%`;
+    utilizationTrack.append(utilizationBar);
+    const memory = element("div", "gpu-reading");
+    memory.append(
+      element("span", "", "Memory"),
+      element(
+        "strong",
+        "",
+        `${(gpu.memory_used_mib / 1024).toFixed(1)} / ` +
+          `${(gpu.memory_total_mib / 1024).toFixed(1)} GiB`,
+      ),
+    );
+    const memoryTrack = element("div", "gpu-meter memory");
+    const memoryBar = element("span");
+    memoryBar.style.width = `${memoryPercent}%`;
+    memoryTrack.append(memoryBar);
+    card.append(
+      heading,
+      name,
+      utilization,
+      utilizationTrack,
+      memory,
+      memoryTrack,
+    );
+    board.append(card);
+  });
+}
+
+function renderMonitorDetail() {
+  const run = selectedRun();
+  $("#monitor-empty").hidden = Boolean(run);
+  $("#monitor-detail").hidden = !run;
+  if (!run) {
+    renderGpuBoard();
+    return;
+  }
+  if (state.selectedRunId !== run.run_id) state.selectedRunId = run.run_id;
+  const status = $("#monitor-status-pill");
+  status.textContent = statusLabel(run.status);
+  status.className = `run-pill ${statusTone(run.status)}`;
+  $("#selected-run-title").textContent = run.run_id || "—";
+  $("#monitor-run-subtitle").textContent =
+    `${run.profile_id || "—"} · v${run.profile_version || "—"} · ` +
+    `${run.dataset || "—"} / ${run.command || "—"}`;
+  $("#monitor-updated").textContent =
+    `最后更新 ${formatTime(run.updated_at || run.created_at)}`;
+
+  const stopButton = $("#monitor-stop-button");
+  stopButton.disabled =
+    state.stopBusy ||
+    !ACTIVE_RUN_STATUSES.has(run.status) ||
+    run.status === "stopping";
+  stopButton.textContent =
+    state.stopBusy || run.status === "stopping" ? "正在停止…" : "停止训练";
+
+  const progress = runProgress(run);
+  const progressTrack = $("#monitor-progress-track");
+  progressTrack.classList.toggle(
+    "indeterminate",
+    progress === null && PROCESS_RUN_STATUSES.has(run.status),
+  );
+  $("#monitor-progress-bar").style.width = `${progress ?? 0}%`;
+  if (progress === null) {
+    progressTrack.removeAttribute("aria-valuenow");
+    $("#monitor-progress-percent").textContent = "—";
+  } else {
+    progressTrack.setAttribute("aria-valuenow", String(Math.round(progress)));
+    $("#monitor-progress-percent").textContent = `${progress.toFixed(1)}%`;
+  }
+  $("#monitor-progress-text").textContent =
+    run.progress_text || "等待进度日志";
+  renderMonitorStageTrack(run);
+
+  $("#monitor-duration").textContent = runDuration(run);
+  $("#monitor-stage").textContent = run.stage || "—";
+  $("#monitor-runner-pid").textContent = run.runner_pid ?? "—";
+  $("#monitor-training-pid").textContent = run.training_pid ?? "—";
+  $("#monitor-exit-code").textContent = run.exit_code ?? "—";
+  $("#monitor-profile-version").textContent =
+    `${run.profile_id || "—"} · v${run.profile_version || "—"} · ` +
+    `r${run.profile_revision || 1}`;
+  $("#monitor-checkpoint").textContent =
+    run.latest_checkpoint || "尚未产生";
+  $("#monitor-artifact-dir").textContent = run.artifact_run_dir || "—";
+  const processHealth = $("#monitor-process-health");
+  if (run.training_alive) {
+    processHealth.textContent = "训练进程在线";
+    processHealth.className = "health-label positive";
+  } else if (run.runner_alive) {
+    processHealth.textContent = "Runner 在线";
+    processHealth.className = "health-label pending";
+  } else if (ACTIVE_RUN_STATUSES.has(run.status)) {
+    processHealth.textContent = "进程不可见";
+    processHealth.className = "health-label negative";
+  } else {
+    processHealth.textContent = "运行已结束";
+    processHealth.className = "health-label neutral";
+  }
+  renderGpuBoard();
+}
+
+function renderMonitor() {
+  renderMonitorSummary();
+  renderRunList();
+  renderMonitorDetail();
+}
+
+function setConsolePage(page) {
+  const monitorActive = page === "monitor";
+  state.currentPage = monitorActive ? "monitor" : "configuration";
+  $("#configuration-page").hidden = monitorActive;
+  $("#monitor-page").hidden = !monitorActive;
+  $("#configuration-view-button").classList.toggle("active", !monitorActive);
+  $("#monitor-view-button").classList.toggle("active", monitorActive);
+  if (monitorActive) {
+    $("#monitor-view-button").setAttribute("aria-current", "page");
+    $("#configuration-view-button").removeAttribute("aria-current");
+  } else {
+    $("#configuration-view-button").setAttribute("aria-current", "page");
+    $("#monitor-view-button").removeAttribute("aria-current");
+  }
+  window.history.replaceState(
+    null,
+    "",
+    monitorActive ? "#monitor" : "#configuration",
+  );
+  if (monitorActive) {
+    renderMonitor();
+    refreshMonitor(false);
+  }
+}
+
+async function loadHealth(showMessage = false) {
+  try {
+    state.health = await requestJson("/api/health");
+    renderHeaderMetrics();
+    renderMonitorSummary();
+    renderGpuBoard();
+    if (showMessage) showToast("已刷新 GPU 与服务状态");
+  } catch (error) {
+    if (showMessage) showToast(`无法刷新服务状态：${error.message}`, true);
+  }
 }
 
 function renderCurrentRun() {
@@ -907,7 +1306,9 @@ function renderCurrentRun() {
     ? run.status === "unknown"
       ? "unknown"
       : "failed"
-    : "";
+    : run.status === "stopped"
+      ? "stopped"
+      : "";
   $("#run-status-source").textContent =
     run.status === "running"
       ? "独立进程持续写入"
@@ -928,14 +1329,122 @@ function renderCurrentRun() {
 
 async function loadRuns(showMessage = false) {
   try {
-    const payload = await requestJson("/api/runs?limit=20");
-    state.currentRun = payload.runs?.[0] || null;
+    const payload = await requestJson("/api/runs?limit=100");
+    state.runs = payload.runs || [];
+    state.currentRun = state.runs[0] || null;
+    if (
+      !state.selectedRunId ||
+      !state.runs.some((run) => run.run_id === state.selectedRunId)
+    ) {
+      state.selectedRunId =
+        state.runs.find((run) => ACTIVE_RUN_STATUSES.has(run.status))?.run_id ||
+        state.runs[0]?.run_id ||
+        "";
+    }
     renderCurrentRun();
     renderContract();
+    renderMonitor();
     if (showMessage) showToast("已从磁盘刷新运行状态");
   } catch (error) {
     if (showMessage) showToast(`无法刷新任务：${error.message}`, true);
   }
+}
+
+async function loadMonitorLog(showMessage = false) {
+  const run = selectedRun();
+  if (!run) {
+    $("#monitor-log").textContent = "尚无运行日志。";
+    $("#monitor-log-updated").textContent = "尚未读取";
+    return;
+  }
+  const requestId = ++state.monitorLogRequestId;
+  try {
+    const payload = await requestJson(
+      `/api/run-log?id=${encodeURIComponent(run.run_id)}&tail=600`,
+    );
+    if (requestId !== state.monitorLogRequestId) return;
+    const log = $("#monitor-log");
+    log.textContent = payload.text || "日志文件尚未产生内容。";
+    $("#monitor-log-updated").textContent =
+      `读取于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
+    if ($("#monitor-follow-log").checked) log.scrollTop = log.scrollHeight;
+    if (showMessage) showToast("已刷新持久化训练日志");
+  } catch (error) {
+    if (requestId !== state.monitorLogRequestId) return;
+    $("#monitor-log").textContent = `无法读取日志：${error.message}`;
+    $("#monitor-log-updated").textContent = "读取失败";
+    if (showMessage) showToast(error.message, true);
+  }
+}
+
+async function refreshMonitor(showMessage = false) {
+  if (state.monitorRefreshing) return;
+  state.monitorRefreshing = true;
+  $("#monitor-poll-state").classList.add("refreshing");
+  try {
+    await Promise.all([loadRuns(false), loadHealth(false)]);
+    await loadMonitorLog(false);
+    if (showMessage) showToast("运行、日志与 GPU 状态均已刷新");
+  } finally {
+    state.monitorRefreshing = false;
+    $("#monitor-poll-state").classList.remove("refreshing");
+  }
+}
+
+function openStopDialog() {
+  const run = selectedRun();
+  if (!run || !ACTIVE_RUN_STATUSES.has(run.status)) return;
+  $("#stop-run-id").textContent = run.run_id;
+  $("#stop-run-stage").textContent =
+    `${statusLabel(run.status)} · ${run.stage || "等待阶段信息"}`;
+  $("#stop-run-dialog").showModal();
+}
+
+async function confirmStopRun() {
+  const run = selectedRun();
+  if (!run) return;
+  state.stopBusy = true;
+  renderMonitorDetail();
+  $("#confirm-stop-button").disabled = true;
+  try {
+    const stopped = await postJson("/api/runs/stop", {
+      run_id: run.run_id,
+    });
+    state.runs = state.runs.map((item) =>
+      item.run_id === stopped.run_id ? stopped : item,
+    );
+    state.currentRun =
+      state.runs.find((item) => item.run_id === state.currentRun?.run_id) ||
+      state.runs[0] ||
+      null;
+    $("#stop-run-dialog").close();
+    renderCurrentRun();
+    renderMonitor();
+    showToast(`已向 ${run.run_id} 写入停止请求`);
+  } catch (error) {
+    showToast(`停止失败：${error.message}`, true);
+  } finally {
+    state.stopBusy = false;
+    $("#confirm-stop-button").disabled = false;
+    renderMonitorDetail();
+  }
+}
+
+async function openSelectedRunConfig() {
+  const run = selectedRun();
+  if (!run) return;
+  const sameProfile =
+    state.loadedProfileId === run.profile_id &&
+    state.loadedVersion === run.profile_version;
+  if (
+    state.draft.dirty &&
+    !sameProfile &&
+    !window.confirm("当前配置有未保存修改，仍要切换到该运行的配置吗？")
+  ) {
+    return;
+  }
+  setConsolePage("configuration");
+  await loadProfile(run.profile_id, run.profile_version);
 }
 
 async function openRunLog() {
@@ -999,6 +1508,18 @@ function stageForCommand(command) {
 }
 
 function wireEvents() {
+  $("#configuration-view-button").addEventListener("click", () =>
+    setConsolePage("configuration"),
+  );
+  $("#monitor-view-button").addEventListener("click", () =>
+    setConsolePage("monitor"),
+  );
+  $("#open-monitor-button").addEventListener("click", () =>
+    setConsolePage("monitor"),
+  );
+  $("#monitor-empty-config-button").addEventListener("click", () =>
+    setConsolePage("configuration"),
+  );
   $("#profile-search").addEventListener("input", renderProfiles);
   $("#new-profile-button").addEventListener("click", () => {
     $("#new-profile-id").value =
@@ -1075,6 +1596,33 @@ function wireEvents() {
   $("#contract-tab").addEventListener("click", () => setContractTab("contract"));
   $("#snapshot-tab").addEventListener("click", () => setContractTab("snapshot"));
   $("#refresh-runs-button").addEventListener("click", () => loadRuns(true));
+  $("#monitor-refresh-button").addEventListener("click", () =>
+    refreshMonitor(true),
+  );
+  $("#monitor-log-refresh").addEventListener("click", () =>
+    loadMonitorLog(true),
+  );
+  $$(".run-filters button").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.runFilter = button.dataset.runFilter;
+      $$(".run-filters button").forEach((candidate) => {
+        candidate.classList.toggle("active", candidate === button);
+      });
+      renderRunList();
+    });
+  });
+  $("#monitor-stop-button").addEventListener("click", openStopDialog);
+  $("#monitor-config-button").addEventListener(
+    "click",
+    openSelectedRunConfig,
+  );
+  $("#close-stop-dialog").addEventListener("click", () =>
+    $("#stop-run-dialog").close(),
+  );
+  $("#cancel-stop-button").addEventListener("click", () =>
+    $("#stop-run-dialog").close(),
+  );
+  $("#confirm-stop-button").addEventListener("click", confirmStopRun);
   $("#view-log-button").addEventListener("click", openRunLog);
   $("#close-log-dialog").addEventListener("click", () =>
     $("#log-dialog").close(),
@@ -1088,12 +1636,17 @@ async function initialize() {
       requestJson("/api/health"),
       requestJson("/api/schema?dataset=clawhub"),
       requestJson("/api/profiles"),
-      requestJson("/api/runs?limit=20"),
+      requestJson("/api/runs?limit=100"),
     ]);
     state.health = health;
     state.schema = schema;
     state.profiles = profiles.profiles || [];
-    state.currentRun = runs.runs?.[0] || null;
+    state.runs = runs.runs || [];
+    state.currentRun = state.runs[0] || null;
+    state.selectedRunId =
+      state.runs.find((run) => ACTIVE_RUN_STATUSES.has(run.status))?.run_id ||
+      state.runs[0]?.run_id ||
+      "";
     state.draft.profileId = schema.default_profile_id;
     $("#inference-link").href = health.inference_url;
     $("#service-state-text").textContent = health.launch_enabled
@@ -1108,9 +1661,23 @@ async function initialize() {
       await validateDraft();
       renderAll();
     }
+    renderMonitor();
+    setConsolePage(
+      window.location.hash === "#monitor" ? "monitor" : "configuration",
+    );
     window.setInterval(() => {
-      if (!document.hidden) loadRuns(false);
-    }, 5000);
+      if (document.hidden) return;
+      if (state.currentPage === "monitor") {
+        refreshMonitor(false);
+      } else {
+        loadRuns(false);
+      }
+    }, 3000);
+    window.setInterval(() => {
+      if (!document.hidden && state.currentPage === "monitor") {
+        renderMonitorDetail();
+      }
+    }, 1000);
   } catch (error) {
     $(".service-state").classList.add("failed");
     $("#service-state-text").textContent = "控制台连接失败";

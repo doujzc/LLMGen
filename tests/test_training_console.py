@@ -111,6 +111,17 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
     assert light["defaults"]["BRANCHING_FACTORS"] == "32 16"
     assert clawhub["defaults"]["ROUTER_FINETUNE_MODE"] == "full"
     assert clawhub["secrets"]["OPENAI_API_KEY"]["persisted"] is False
+    fields = {field["key"]: field for field in clawhub["fields"]}
+    for key in (
+        "CODE_MAX_COLLISION_RATE",
+        "CODE_MAX_RAW_COLLISION_RATE",
+        "CODE_MAX_BUCKET_SIZE",
+        "CODE_MIN_LEVEL_UTILIZATION",
+        "CODE_MIN_NORMALIZED_ENTROPY",
+        "CODE_MIN_RAW_LEVEL_UTILIZATION",
+        "CODE_MIN_RAW_NORMALIZED_ENTROPY",
+    ):
+        assert "tokenizer" in fields[key]["visible_stages"]
 
 
 def test_run_dir_is_the_default_root_for_every_training_artifact() -> None:
@@ -244,6 +255,16 @@ def test_validation_rejects_unknown_values_newlines_and_gpu_mismatch() -> None:
     assert any(
         error["field"] == "ROUTER_NUM_GPUS"
         for error in mismatch.value.errors
+    )
+
+    with pytest.raises(ConfigValidationError) as invalid_rate:
+        resolver.validate(
+            "clawhub",
+            "full",
+            {"CODE_MAX_RAW_COLLISION_RATE": "1.01"},
+        )
+    assert invalid_rate.value.errors[0]["field"] == (
+        "CODE_MAX_RAW_COLLISION_RATE"
     )
 
 
@@ -576,6 +597,9 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert 'id="run-runner-pid"' in page
         assert 'id="run-training-pid"' in page
         assert 'id="run-exit-code"' in page
+        assert 'id="monitor-page"' in page
+        assert 'id="monitor-stop-button"' in page
+        assert "训练运行中心" in page
 
         with urlopen(base + "/static/styles.css", timeout=5) as response:
             styles = response.read().decode("utf-8")
@@ -589,6 +613,8 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert "validationRequestId" in app
         assert "`$${field.derived_from}/${field.derived_suffix}`" in app
         assert "delete state.draft.overrides[candidate.key]" not in app
+        assert '(field.visible_stages || []).includes(state.activeStage)' in app
+        assert 'postJson("/api/runs/stop"' in app
 
         _, validated = _request(
             base + "/api/validate",
@@ -599,6 +625,19 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
             },
         )
         assert validated["contract"]["log_dir"] == ""
+
+        service.store.update_run(
+            run["run_id"],
+            status="running",
+            runner_pid=os.getpid(),
+        )
+        _, stopping = _request(
+            base + "/api/runs/stop",
+            {"run_id": run["run_id"]},
+        )
+        assert stopping["status"] == "stopping"
+        assert stopping["stop_requested_at"]
+        assert stopping["stop_requested_stage"]
     finally:
         server.shutdown()
         server.server_close()
@@ -776,6 +815,79 @@ def test_detached_runner_survives_without_a_web_request_owner(
     assert "Authorization: Bearer [REDACTED]" in redacted
     assert stat.S_IMODE(Path(observed["log_path"]).stat().st_mode) == 0o600
     assert stat.S_IMODE(Path(observed["runner_log_path"]).stat().st_mode) == 0o600
+
+
+def test_detached_runner_cooperatively_stops_its_training_group(tmp_path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    scripts.mkdir(parents=True)
+    _link_console_package(fake_repo)
+    pipeline = scripts / "router_pipeline.sh"
+    pipeline.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "mkdir -p \"$RUN_DIR\"\n"
+        "printf '[06b] long retrieval\\n'\n"
+        "printf 'started\\n' > \"$RUN_DIR/stop-marker.txt\"\n"
+        "sleep 30\n"
+        "printf 'finished\\n' >> \"$RUN_DIR/stop-marker.txt\"\n",
+        encoding="utf-8",
+    )
+    pipeline.chmod(0o755)
+    state_root = tmp_path / "state"
+    artifact_dir = tmp_path / "artifacts"
+    store = StateStore(state_root)
+    profile = store.save_profile(
+        profile_id="stop-test",
+        dataset="clawhub",
+        command="full",
+        overrides={"RUN_DIR": str(artifact_dir)},
+        resolved={"RUN_DIR": str(artifact_dir)},
+    )
+    service = TrainingConsoleService(
+        repo_root=fake_repo,
+        state_root=state_root,
+        inference_url="",
+        launch_enabled=True,
+    )
+
+    run = service.submit_run(
+        {
+            "profile_id": profile["profile_id"],
+            "version": profile["version"],
+        }
+    )
+    deadline = time.time() + 8
+    observed = run
+    while time.time() < deadline:
+        observed = store.get_run(run["run_id"])
+        if observed.get("training_pid") and (
+            artifact_dir / "stop-marker.txt"
+        ).is_file():
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("training process did not start")
+
+    requested = service.request_stop({"run_id": run["run_id"]})
+    assert requested["status"] == "stopping"
+    assert requested["stop_requested_stage"]
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        observed = store.get_run(run["run_id"])
+        if observed["status"] == "stopped":
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError(f"training did not stop: {observed}")
+
+    assert observed["stage"] == "用户停止"
+    assert observed["finished_at"]
+    assert observed["training_alive"] is False
+    assert (artifact_dir / "stop-marker.txt").read_text(
+        encoding="utf-8"
+    ) == "started\n"
 
 
 def test_training_completes_after_web_process_is_killed(tmp_path) -> None:

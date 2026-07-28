@@ -18,7 +18,8 @@ LLMGen 已提供完整的命令行训练、评估、导出流程，以及独立�
 2. 保存可追踪、可编辑的配置，并记录单调递增的 revision；
 3. 在提交前显示最终生效值、来源、命令和产物路径；
 4. 把配置快照提交给独立运行器；
-5. 通过持久化元数据、日志和 checkpoint 只读观察任务。
+5. 通过独立运行监控页观察元数据、流水线位置、GPU、日志和 checkpoint；
+6. 通过磁盘停止请求让 detached runner 安全终止其自有训练进程组。
 
 ## 2. 强约束
 
@@ -39,14 +40,18 @@ LLMGen 已提供完整的命令行训练、评估、导出流程，以及独立�
 
 ### 2.2 训练生命周期独立
 
-- Web 服务不持有训练进程的生命周期。
+- 浏览器和 Web 服务都不是维持训练存活的生命周期所有者。
 - Web 服务只启动一个新的、脱离当前会话的运行器进程。
 - 独立运行器再以独立 session 启动现有训练 CLI，并把输出直接写入磁盘日志。
 - 提交成功并返回 runner PID 后，Web 服务刷新、崩溃、被杀死或网络断开时，
   运行器和训练进程继续执行。
 - 训练状态来自磁盘中的 `run.json`、日志和产物，不依赖浏览器连接或
   WebSocket 心跳。
-- 首版不提供暂停、停止、kill 等控制，避免让界面成为任务生命周期所有者。
+- 停止控制采用协作协议：Web 服务只在 `run.json` 写入
+  `stop_requested_at`，不向登记 PID 直接发送信号；拥有真实 `Popen` 对象的
+  detached runner 负责向自己创建的训练进程组先发送 `SIGTERM`，宽限期后再按需
+  发送 `SIGKILL`。
+- 不提供暂停、恢复或任意 PID/命令控制；页面崩溃不会生成停止请求。
 
 ### 2.3 安全边界
 
@@ -101,11 +106,12 @@ export-web
 
 ## 4. 页面信息架构
 
-### 4.1 顶栏
+### 4.1 顶栏与页面切换
 
 - 复用推理控制台的 Skill Router 标记、暖白背景和状态语言；
 - 产品名为 `Skill Router Lab`；
-- `训练控制台` 为当前入口，`推理控制台` 作为可配置链接；
+- `配置工作台` 与 `运行监控` 是两个完整、可切换的控制台页面；
+- `运行监控` 显示活跃任务数量，`推理控制台` 保持为独立入口；
 - 顶部只展示训练控制台相关摘要：可见 GPU、当前配置、配置版本、Code 层数。
 
 ### 4.2 左侧：配置库与训练流水线
@@ -181,9 +187,20 @@ export-web
 - 最新 checkpoint；
 - 日志路径；
 - 最后更新时间；
-- 不提供暂停、停止或 kill。
+- 提供进入完整“运行监控”页的入口。
 
-### 4.5 主操作
+### 4.5 运行监控页
+
+- 左侧运行账本展示最近 100 条任务，可按全部、活跃、完成、异常筛选；
+- 主区域展示选中任务的状态、profile revision、流水线位置和可解析进度；
+- 运行遥测展示阶段、持续时间、runner/training PID、exit code、checkpoint
+  与产物目录；
+- GPU 面板通过独立的 `nvidia-smi` 只读探测展示利用率、显存和温度；
+- 日志面板每 3 秒有界读取已脱敏的 `train.log` 尾部，支持跟随底部和手动刷新；
+- 活跃任务提供显式二次确认的“停止训练”，停止中禁止重复提交；
+- 配置页面右侧只保留当前任务摘要，不再承担完整监控职责。
+
+### 4.6 主操作
 
 1. `保存并提交独立任务`
 2. `保存修改`
@@ -284,7 +301,18 @@ TOKENIZER_GRAPH_LAMBDA
 TOKENIZER_AMP_DTYPE
 TOKENIZER_RESUME
 CODEBOOK_VERSION
+CODE_QUALITY_GATE_SPLIT
+CODE_MAX_COLLISION_RATE
+CODE_MAX_RAW_COLLISION_RATE
+CODE_MAX_BUCKET_SIZE
+CODE_MIN_LEVEL_UTILIZATION
+CODE_MIN_NORMALIZED_ENTROPY
+CODE_MIN_RAW_LEVEL_UTILIZATION
+CODE_MIN_RAW_NORMALIZED_ENTROPY
 ```
+
+质量门参数的权威执行点仍是 Stage 03，但同时显示在 Stage 02，便于在设计层级
+Code 时一次完成配置。ratio 和 ratio list 均限制在 `0..1`。
 
 ### 5.4 Code 导出与质量门禁
 
@@ -463,6 +491,7 @@ EVAL_DIR
 ```text
 queued -> starting -> running -> succeeded
            |            |      -> failed
+           |            `------> stopping -> stopped
            |            `------> unknown（只读观察状态）
            `-> failed_to_start
 queued -> saved（仅 --no-launch）
@@ -509,6 +538,8 @@ queued -> saved（仅 --no-launch）
   "exit_code": null,
   "latest_checkpoint": "runs/.../checkpoint-500",
   "progress_text": "step 2450 / 18750",
+  "stop_requested_at": null,
+  "stop_requested_stage": "",
   "command_argv": [
     "bash",
     "scripts/router_pipeline.sh",
@@ -527,6 +558,7 @@ Runner 每隔数秒：
 - 读取新增日志；
 - 从 `[01]`、`[02]`、`[06a]`、`[06b]` 等标记更新阶段；
 - 解析最新的 `checkpoint-*` 字样；
+- 检查 `stop_requested_at`；收到请求后只终止自己创建的训练进程组；
 - 原子更新 `run.json`；
 - 进程结束后写入 exit code 和最终状态。
 
@@ -555,6 +587,13 @@ sequenceDiagram
     B->>W: 重新打开并查询 run_id
     W->>F: 只读加载状态、日志和产物
     W-->>B: 返回重建后的任务状态
+    opt 用户确认停止
+        B->>W: POST /api/runs/stop
+        W->>F: 原子写入 stop_requested_at
+        R->>F: 读取停止请求
+        R->>T: SIGTERM 训练进程组
+        R->>F: 写入 stopped、exit code 与 finished_at
+    end
 ```
 
 ## 9. HTTP API
@@ -577,6 +616,7 @@ GET /api/run-log?id=<run_id>&tail=200
 POST /api/profiles
 POST /api/validate
 POST /api/runs
+POST /api/runs/stop
 ```
 
 `POST /api/profiles` 未提供 `version` 时创建新配置的 `v1 · r1`；提供
@@ -600,6 +640,10 @@ POST /api/runs
 把当前 revision 复制为独立且不可变的 run snapshot 后再启动任务，避免提交浏览器
 中未保存的草稿，也避免后续配置修改影响任务。
 
+`POST /api/runs/stop` 只接受已登记且仍活跃的 `run_id`。它只持久化协作停止
+请求，不接受 PID、signal 或命令；终止信号只能由对应 detached runner 发给它
+自己创建的训练进程组。
+
 API 响应不返回已知密钥，不返回任意文件内容，不允许客户端传入任意命令。
 所有请求必须携带 loopback Host；写请求还必须为同源 `application/json`。
 
@@ -614,6 +658,8 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 | 训练返回非零状态 | run 状态为 `failed` 并显示 exit code 和日志尾部 |
 | 配置修订冲突 | 拒绝覆盖并提示重新加载最新 revision |
 | 质量门禁失败 | 保留失败状态和日志，不自动修改阈值重试 |
+| 用户停止活跃任务 | `running -> stopping -> stopped`；保留日志、快照和 checkpoint |
+| 停止请求到达时进程已退出 | 记录为 `stopped`，不向可能复用的 PID 发送信号 |
 | 输入产物缺失 | 现有 CLI 失败并记录具体文件或阶段；控制台只读呈现状态与日志 |
 | UI 无法读取某个 run | 其他任务仍可读取，错误局部展示 |
 
@@ -626,14 +672,15 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
   - coral/vermilion 主操作和当前状态；
   - green 表示校验通过或独立任务运行；
   - warm-gray 分隔线；
-- 页面使用平面分区和细分隔线，不使用卡片套卡片；
+- 配置页使用平面分区和细分隔线；监控页采用工业观测台式运行账本与遥测面板；
 - 正文基准为 14–16px，路径与参数使用 monospace；
 - 主要交互都必须有 hover、focus-visible、disabled、loading、success、error 状态；
 - 表单错误与字段关联，不只依赖颜色；
 - 桌面三栏保持与视觉稿一致；
 - 小于等于 1320px 时，右侧运行契约下移，避免三栏最小宽度造成裁切；
 - 小于等于 780px 时，配置库、阶段导航、表单、运行契约按顺序纵向排列；
-- 不使用装饰性图表、渐变、玻璃效果、浮动工具条或非必要动画。
+- 仅使用进度条和 GPU meter 表达真实遥测；动画限于刷新状态和不确定进度，并
+  遵循 `prefers-reduced-motion`。
 
 ## 12. 验收标准
 
@@ -650,6 +697,9 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 - 已提交任务的配置快照不受后续 profile 修改影响；
 - 能在 Web 服务重启后恢复 profile 和 run 列表；
 - 能有界读取任务日志尾部、阶段、PID、exit code 和最新 checkpoint；
+- 能在完整监控页切换历史任务，显示 GPU、流水线位置与持续时间；
+- 能对活跃任务二次确认并发出协作停止请求；
+- Stage 02 能直接配置 raw collision rate 等全部 Code 质量门参数；
 - 不修改任何训练脚本。
 
 ### 12.2 独立性
@@ -658,7 +708,7 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 - runner 和训练进程均使用独立 session；
 - 日志直接写文件，不依赖 Web 服务转发；
 - 正在运行的配置快照不可编辑；
-- UI 不提供停止训练的隐式生命周期控制。
+- UI 停止操作只写入显式、可审计的停止请求，由 runner 终止其自有进程组。
 
 ### 12.3 安全
 
@@ -676,7 +726,7 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 
 - 在 `1440 × 1024` 下与选定设计的布局、层级、颜色、间距和密度一致；
 - 左侧同时容纳配置库和完整流水线；
-- 中间表单仍是视觉主体；
+- 配置工作台以中间表单为视觉主体；运行监控页以状态、进度和日志为主体；
 - 右侧清晰区分可编辑 profile、不可变 run snapshot 和独立运行语义；
 - 页面无横向溢出、裁切或不可读小字；
 - 配置切换、版本加载、阶段导航、过滤覆盖项、比较默认值、保存、提交和

@@ -111,6 +111,7 @@ class FieldSpec:
     placeholder: str = ""
     derived_from: str = ""
     derived_suffix: str = ""
+    visible_stages: tuple[str, ...] = ()
 
     def payload(self, dataset: str) -> dict[str, Any]:
         result = asdict(self)
@@ -135,6 +136,7 @@ def _field(
     placeholder: str = "",
     derived_from: str = "",
     derived_suffix: str = "",
+    visible_stages: Iterable[str] = (),
 ) -> FieldSpec:
     return FieldSpec(
         key=key,
@@ -150,6 +152,7 @@ def _field(
         placeholder=placeholder,
         derived_from=derived_from,
         derived_suffix=derived_suffix,
+        visible_stages=tuple(visible_stages),
     )
 
 
@@ -511,64 +514,80 @@ FIELDS = (
         "CODE_QUALITY_GATE_SPLIT",
         "质量门禁 Split",
         "code",
-        "质量门禁",
+        "Code 质量门禁",
         source="configs/closedset.env",
+        help="选择计算碰撞率与利用率阈值的数据 Split；Stage 03 导出时执行。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MAX_COLLISION_RATE",
         "最大碰撞率",
         "code",
-        "质量门禁",
-        kind="float",
+        "Code 质量门禁",
+        kind="ratio",
         source="dataset",
+        help="平衡分配后允许的最大完整 Code 碰撞比例。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MAX_RAW_COLLISION_RATE",
         "最大原始碰撞率",
         "code",
-        "质量门禁",
-        kind="float",
+        "Code 质量门禁",
+        kind="ratio",
         source="dataset",
+        help="平衡分配前原始 RQ-VAE Code 允许的最大碰撞比例。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MAX_BUCKET_SIZE",
         "最大碰撞桶大小",
         "code",
-        "质量门禁",
+        "Code 质量门禁",
         kind="int",
         source="configs/closedset.env",
+        help="任一完整 Code 最多容纳的候选 Skill 数。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MIN_LEVEL_UTILIZATION",
         "最小层利用率",
         "code",
-        "质量门禁",
-        kind="float",
+        "Code 质量门禁",
+        kind="ratio",
         source="dataset",
+        help="平衡分配后每层 Code token 的最低使用比例。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MIN_NORMALIZED_ENTROPY",
         "最小归一化熵",
         "code",
-        "质量门禁",
-        kind="float",
+        "Code 质量门禁",
+        kind="ratio",
         source="dataset",
+        help="平衡分配后每层 token 分布的最低归一化熵。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MIN_RAW_LEVEL_UTILIZATION",
         "各层最小原始利用率",
         "code",
-        "质量门禁",
-        kind="number_list",
+        "Code 质量门禁",
+        kind="ratio_list",
         source="dataset",
+        help="平衡前的最低利用率；可填一个全局值或按层填写。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "CODE_MIN_RAW_NORMALIZED_ENTROPY",
         "最小原始归一化熵",
         "code",
-        "质量门禁",
-        kind="float",
+        "Code 质量门禁",
+        kind="ratio",
         source="dataset",
+        help="平衡分配前每层 token 分布的最低归一化熵。",
+        visible_stages=("tokenizer",),
     ),
     _field(
         "ROUTER_DATA_DIR",
@@ -1121,6 +1140,11 @@ def _normalize_value(spec: FieldSpec, raw: Any) -> str:
         return _validate_number(value, integer=True, optional=True)
     if spec.kind == "float":
         return _validate_number(value, integer=False)
+    if spec.kind == "ratio":
+        normalized = _validate_number(value, integer=False)
+        if not 0.0 <= float(normalized) <= 1.0:
+            raise ValueError("必须在 0 到 1 之间")
+        return normalized
     if spec.kind == "select" and value not in spec.options:
         raise ValueError(f"必须是：{', '.join(spec.options)}")
     if spec.kind == "gpu_csv":
@@ -1134,6 +1158,13 @@ def _normalize_value(spec: FieldSpec, raw: Any) -> str:
             raise ValueError("至少需要一个数值")
         for token in tokens:
             float(token)
+        return " ".join(tokens)
+    if spec.kind == "ratio_list":
+        tokens = value.split()
+        if not tokens:
+            raise ValueError("至少需要一个数值")
+        if any(not 0.0 <= float(token) <= 1.0 for token in tokens):
+            raise ValueError("每个值都必须在 0 到 1 之间")
         return " ".join(tokens)
     if spec.kind == "url" and value:
         return _validate_url(value)

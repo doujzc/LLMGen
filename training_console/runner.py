@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -38,6 +39,7 @@ STAGE_PATTERNS = (
 )
 CHECKPOINT_RE = re.compile(r"(?P<path>[^\s\"']*checkpoint[-_]\d+[^\s\"']*)")
 PROGRESS_RE = re.compile(r"(?P<done>\d[\d,]*)\s*/\s*(?P<total>\d[\d,]*)")
+STOP_GRACE_SECONDS = 12.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,6 +127,42 @@ def _latest_checkpoint(artifact_run_dir: str, repo_root: Path) -> str:
         return str(latest)
 
 
+def _stop_requested(store: StateStore, run_id: str) -> bool:
+    return bool(
+        store.get_run(run_id, observe=False).get("stop_requested_at")
+    )
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], sig: int) -> None:
+    """Signal only the training session created by this runner."""
+
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        return
+
+
+def _mark_stopped(
+    store: StateStore,
+    run_id: str,
+    *,
+    exit_code: int | None,
+    progress_text: str,
+) -> None:
+    finished_at = utc_now()
+    store.update_run(
+        run_id,
+        status="stopped",
+        stage="用户停止",
+        progress_text=progress_text,
+        exit_code=exit_code,
+        stopped_at=finished_at,
+        finished_at=finished_at,
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     repo_root = args.repo_root.expanduser().resolve()
     store = StateStore(args.state_root)
@@ -158,6 +196,14 @@ def run(args: argparse.Namespace) -> int:
         command_argv=argv,
         progress_text="独立运行器已加载不可变运行快照",
     )
+    if _stop_requested(store, args.run_id):
+        _mark_stopped(
+            store,
+            args.run_id,
+            exit_code=None,
+            progress_text="训练进程启动前收到停止请求",
+        )
+        return 0
     print(
         f"launching detached training process for {args.run_id}: {argv!r}",
         flush=True,
@@ -191,6 +237,8 @@ def run(args: argparse.Namespace) -> int:
     stage = "训练已启动"
     checkpoint = ""
     progress = ""
+    stop_signal_at: float | None = None
+    force_stop_sent = False
     while process.poll() is None:
         text, offset = _read_new_text(log_path, offset)
         stage, checkpoint, parsed_progress = _progress_from_text(
@@ -200,13 +248,38 @@ def run(args: argparse.Namespace) -> int:
         )
         if parsed_progress:
             progress = parsed_progress
-        store.update_run(
-            args.run_id,
-            status="running",
-            stage=stage,
-            latest_checkpoint=checkpoint,
-            progress_text=progress or "等待新的训练日志",
-        )
+        if _stop_requested(store, args.run_id):
+            if stop_signal_at is None:
+                _signal_process_group(process, signal.SIGTERM)
+                stop_signal_at = time.monotonic()
+                store.update_run(
+                    args.run_id,
+                    status="stopping",
+                    stage="正在停止",
+                    latest_checkpoint=checkpoint,
+                    progress_text="已向训练进程组发送 SIGTERM",
+                )
+            elif (
+                not force_stop_sent
+                and time.monotonic() - stop_signal_at >= STOP_GRACE_SECONDS
+            ):
+                _signal_process_group(process, signal.SIGKILL)
+                force_stop_sent = True
+                store.update_run(
+                    args.run_id,
+                    status="stopping",
+                    stage="正在强制停止",
+                    latest_checkpoint=checkpoint,
+                    progress_text="优雅退出超时，已向训练进程组发送 SIGKILL",
+                )
+        else:
+            store.update_run(
+                args.run_id,
+                status="running",
+                stage=stage,
+                latest_checkpoint=checkpoint,
+                progress_text=progress or "等待新的训练日志",
+            )
         time.sleep(max(0.25, args.poll_seconds))
 
     text, _ = _read_new_text(log_path, offset)
@@ -221,7 +294,18 @@ def run(args: argparse.Namespace) -> int:
         str(run_meta.get("artifact_run_dir", "")),
         repo_root,
     )
-    return_code = int(process.returncode or 0)
+    return_code = int(
+        process.returncode if process.returncode is not None else 0
+    )
+    if _stop_requested(store, args.run_id):
+        _mark_stopped(
+            store,
+            args.run_id,
+            exit_code=return_code,
+            progress_text="训练进程已按用户请求停止",
+        )
+        print("training process stopped by user request", flush=True)
+        return 0
     store.update_run(
         args.run_id,
         status="succeeded" if return_code == 0 else "failed",

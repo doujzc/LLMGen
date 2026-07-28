@@ -21,8 +21,19 @@
         </span>
       </a>
 
-      <nav class="surface-nav" aria-label="控制台">
-        <a class="active" href="/" aria-current="page">训练控制台</a>
+      <nav class="surface-nav" aria-label="训练控制台视图">
+        <button
+          id="configuration-view-button"
+          class="active"
+          type="button"
+          aria-current="page"
+        >
+          配置工作台
+        </button>
+        <button id="monitor-view-button" type="button">
+          运行监控
+          <span id="active-run-badge" class="nav-badge" hidden>0</span>
+        </button>
         <a id="inference-link" href="http://127.0.0.1:8080/">推理控制台</a>
       </nav>
 
@@ -51,7 +62,11 @@
       </dl>
     </header>
 
-    <main class="console-layout">
+    <main
+      id="configuration-page"
+      class="console-layout console-page"
+      aria-label="训练配置工作台"
+    >
       <aside class="left-rail">
         <section class="profile-library" aria-labelledby="profile-library-title">
           <div class="rail-heading">
@@ -297,9 +312,14 @@
               <h2 id="current-run-title">当前运行</h2>
               <p>从持久化产物读取</p>
             </div>
-            <button id="refresh-runs-button" class="text-button" type="button">
-              刷新
-            </button>
+            <div class="current-run-actions">
+              <button id="refresh-runs-button" class="text-button" type="button">
+                刷新
+              </button>
+              <button id="open-monitor-button" class="text-button" type="button">
+                打开监控
+              </button>
+            </div>
           </div>
           <div id="run-empty" class="run-empty">
             <strong>尚未提交训练任务</strong>
@@ -358,6 +378,216 @@
           </div>
         </section>
       </aside>
+    </main>
+
+    <main
+      id="monitor-page"
+      class="monitor-page console-page"
+      aria-label="训练运行监控"
+      hidden
+    >
+      <header class="monitor-masthead">
+        <div class="monitor-title">
+          <span class="eyebrow">DETACHED RUN OBSERVATORY</span>
+          <h1>训练运行中心</h1>
+          <p>
+            从磁盘状态、训练日志与 GPU 遥测持续读取；关闭或刷新页面不会影响独立训练进程。
+          </p>
+        </div>
+        <div class="monitor-refresh-cluster">
+          <span id="monitor-poll-state">
+            <i></i>
+            自动刷新 · 3 秒
+          </span>
+          <button id="monitor-refresh-button" class="secondary-button" type="button">
+            立即刷新
+          </button>
+        </div>
+        <dl class="monitor-summary">
+          <div>
+            <dt>活跃任务</dt>
+            <dd id="monitor-active-count">0</dd>
+            <small>运行 / 启动 / 停止中</small>
+          </div>
+          <div>
+            <dt>排队任务</dt>
+            <dd id="monitor-queued-count">0</dd>
+            <small>等待独立 Runner</small>
+          </div>
+          <div>
+            <dt>本次完成</dt>
+            <dd id="monitor-success-count">0</dd>
+            <small>最近 100 次运行</small>
+          </div>
+          <div>
+            <dt>GPU 遥测</dt>
+            <dd id="monitor-gpu-count">—</dd>
+            <small id="monitor-gpu-summary">等待 nvidia-smi</small>
+          </div>
+        </dl>
+      </header>
+
+      <div class="monitor-workbench">
+        <aside class="run-ledger" aria-labelledby="run-ledger-title">
+          <header>
+            <div>
+              <span class="eyebrow">RUN LEDGER</span>
+              <h2 id="run-ledger-title">运行记录</h2>
+            </div>
+            <span id="monitor-run-count" class="ledger-count">0 RUNS</span>
+          </header>
+          <div class="run-filters" role="group" aria-label="筛选运行状态">
+            <button class="active" type="button" data-run-filter="all">全部</button>
+            <button type="button" data-run-filter="active">活跃</button>
+            <button type="button" data-run-filter="succeeded">完成</button>
+            <button type="button" data-run-filter="attention">异常</button>
+          </div>
+          <div id="monitor-run-list" class="monitor-run-list" aria-live="polite"></div>
+        </aside>
+
+        <section class="run-observatory" aria-labelledby="selected-run-title">
+          <div id="monitor-empty" class="monitor-empty">
+            <span>00</span>
+            <h2>没有可监控的训练任务</h2>
+            <p>在配置工作台保存并提交任务后，运行状态会自动出现在这里。</p>
+            <button id="monitor-empty-config-button" class="primary-button" type="button">
+              前往配置工作台
+            </button>
+          </div>
+
+          <div id="monitor-detail" class="monitor-detail" hidden>
+            <header class="selected-run-header">
+              <div class="selected-run-identity">
+                <div class="selected-run-kicker">
+                  <span id="monitor-status-pill" class="run-pill">—</span>
+                  <span id="monitor-updated">最后更新 —</span>
+                </div>
+                <h2 id="selected-run-title">—</h2>
+                <p id="monitor-run-subtitle">—</p>
+              </div>
+              <div class="selected-run-actions">
+                <button
+                  id="monitor-config-button"
+                  class="secondary-button"
+                  type="button"
+                >
+                  查看对应配置
+                </button>
+                <button
+                  id="monitor-stop-button"
+                  class="danger-button"
+                  type="button"
+                >
+                  停止训练
+                </button>
+              </div>
+            </header>
+
+            <section class="monitor-progress-panel" aria-labelledby="progress-title">
+              <div class="progress-heading">
+                <div>
+                  <span class="eyebrow">PIPELINE POSITION</span>
+                  <h3 id="progress-title">当前训练进度</h3>
+                </div>
+                <div class="progress-reading">
+                  <strong id="monitor-progress-percent">—</strong>
+                  <span id="monitor-progress-text">等待进度日志</span>
+                </div>
+              </div>
+              <div
+                id="monitor-progress-track"
+                class="monitor-progress-track indeterminate"
+                role="progressbar"
+                aria-label="训练进度"
+                aria-valuemin="0"
+                aria-valuemax="100"
+              >
+                <span id="monitor-progress-bar"></span>
+              </div>
+              <div id="monitor-stage-track" class="monitor-stage-track"></div>
+            </section>
+
+            <div class="monitor-detail-grid">
+              <section class="telemetry-panel" aria-labelledby="telemetry-title">
+                <div class="panel-title">
+                  <div>
+                    <span class="eyebrow">PROCESS TELEMETRY</span>
+                    <h3 id="telemetry-title">运行遥测</h3>
+                  </div>
+                  <span id="monitor-process-health" class="health-label">—</span>
+                </div>
+                <dl class="telemetry-grid">
+                  <div>
+                    <dt>持续时间</dt>
+                    <dd id="monitor-duration">—</dd>
+                  </div>
+                  <div>
+                    <dt>当前阶段</dt>
+                    <dd id="monitor-stage">—</dd>
+                  </div>
+                  <div>
+                    <dt>Runner PID</dt>
+                    <dd id="monitor-runner-pid">—</dd>
+                  </div>
+                  <div>
+                    <dt>Training PID</dt>
+                    <dd id="monitor-training-pid">—</dd>
+                  </div>
+                  <div>
+                    <dt>Exit code</dt>
+                    <dd id="monitor-exit-code">—</dd>
+                  </div>
+                  <div>
+                    <dt>配置版本</dt>
+                    <dd id="monitor-profile-version">—</dd>
+                  </div>
+                </dl>
+                <div class="artifact-lines">
+                  <div>
+                    <span>最新 Checkpoint</span>
+                    <code id="monitor-checkpoint">尚未产生</code>
+                  </div>
+                  <div>
+                    <span>产物目录</span>
+                    <code id="monitor-artifact-dir">—</code>
+                  </div>
+                </div>
+              </section>
+
+              <section class="gpu-panel" aria-labelledby="gpu-panel-title">
+                <div class="panel-title">
+                  <div>
+                    <span class="eyebrow">DEVICE BOARD</span>
+                    <h3 id="gpu-panel-title">GPU 状态</h3>
+                  </div>
+                  <span id="gpu-panel-updated">实时快照</span>
+                </div>
+                <div id="gpu-board" class="gpu-board"></div>
+              </section>
+            </div>
+
+            <section class="live-log-panel" aria-labelledby="live-log-title">
+              <header>
+                <div>
+                  <span class="eyebrow">PERSISTED TRAIN LOG</span>
+                  <h3 id="live-log-title">实时日志尾部</h3>
+                </div>
+                <div class="log-controls">
+                  <span id="monitor-log-updated">尚未读取</span>
+                  <label>
+                    <input id="monitor-follow-log" type="checkbox" checked />
+                    跟随底部
+                  </label>
+                  <button id="monitor-log-refresh" class="text-button" type="button">
+                    刷新日志
+                  </button>
+                </div>
+              </header>
+              <pre id="monitor-log" tabindex="0">正在读取持久化日志…</pre>
+            </section>
+          </div>
+        </section>
+      </div>
     </main>
 
     <dialog id="new-profile-dialog">
@@ -423,6 +653,36 @@
           </button>
         </header>
         <pre id="run-log">正在读取日志…</pre>
+      </div>
+    </dialog>
+
+    <dialog id="stop-run-dialog" class="stop-run-dialog">
+      <div class="dialog-form">
+        <header>
+          <div>
+            <span class="eyebrow">COOPERATIVE STOP</span>
+            <h2>停止训练任务？</h2>
+          </div>
+          <button id="close-stop-dialog" class="dialog-close" type="button">
+            关闭
+          </button>
+        </header>
+        <div class="stop-warning">
+          <strong id="stop-run-id">—</strong>
+          <p id="stop-run-stage">—</p>
+        </div>
+        <p class="stop-explanation">
+          控制台会把停止请求写入磁盘。独立 Runner 随后向自己创建的训练进程组发送
+          SIGTERM；若未在宽限期内退出，再发送 SIGKILL。已有 Checkpoint 和日志不会删除。
+        </p>
+        <footer>
+          <button id="cancel-stop-button" class="secondary-button" type="button">
+            继续训练
+          </button>
+          <button id="confirm-stop-button" class="danger-button" type="button">
+            确认停止
+          </button>
+        </footer>
       </div>
     </dialog>
 
