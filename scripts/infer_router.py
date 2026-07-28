@@ -47,9 +47,16 @@ def parse_args() -> argparse.Namespace:
         "--base-model-name-or-path",
         help="Base model when --model-name-or-path is a PEFT adapter directory.",
     )
-    parser.add_argument("--virtual-tokens", required=True)
-    parser.add_argument("--codes", required=True, help="index/test_codes.jsonl")
-    parser.add_argument("--registry", required=True, help="index/test_registry.json")
+    parser.add_argument("--virtual-tokens")
+    parser.add_argument("--codes", help="index/test_codes.jsonl")
+    parser.add_argument("--registry", help="index/test_registry.json")
+    parser.add_argument(
+        "--candidate-state-dir",
+        help=(
+            "Candidate overlay/model bundle containing skill_decode_map.json and "
+            "virtual_tokens.txt. Replaces --codes/--registry for incremental inference."
+        ),
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--queries", help="queries_test.jsonl")
     source.add_argument(
@@ -188,13 +195,20 @@ def _validate_training_contract(args: argparse.Namespace) -> int | None:
             if isinstance(decoder_artifacts, dict)
             else None
         )
+        actual_decode_hash = sha256_file(decode_map_path)
         if (
             expected_decode_hash
-            and sha256_file(decode_map_path) != expected_decode_hash
+            and actual_decode_hash != expected_decode_hash
         ):
-            raise RouterDataError(
-                "bundled skill_decode_map.json differs from the router manifest"
-            )
+            from llmgen.incremental import incremental_ancestor_hashes
+            from llmgen.router_bundle import load_skill_decode_map
+
+            incremental_map = load_skill_decode_map(decode_map_path)
+            if expected_decode_hash not in incremental_ancestor_hashes(incremental_map):
+                raise RouterDataError(
+                    "skill_decode_map.json differs from the router manifest and "
+                    "does not declare that bundled map as an incremental ancestor"
+                )
     expected_stage1_sha256 = payload.get("stage1_checkpoint_sha256")
     if expected_stage1_sha256:
         if decode_map_path:
@@ -593,18 +607,53 @@ def main() -> None:
     if args.qrels and args.top_k < max(args.cutoffs):
         raise RouterDataError("top_k must cover the largest requested metric cutoff")
 
-    code_rows = read_jsonl(args.codes)
-    skill_to_code, num_levels = normalize_code_rows(code_rows)
-    args._num_levels = num_levels
-    registry = _load_registry(args.registry)
-    validate_registry_assignments(registry, code_rows)
-    registry_levels = registry.get("num_levels")
-    if registry_levels is not None and registry_levels != num_levels:
-        raise RouterDataError(
-            f"registry num_levels={registry_levels} disagrees with codes={num_levels}"
+    if args.candidate_state_dir:
+        from llmgen.incremental import load_candidate_state
+
+        if args.codes or args.registry:
+            raise RouterDataError(
+                "--candidate-state-dir replaces --codes and --registry"
+            )
+        decode_map, decode_path, state_tokens_path = load_candidate_state(
+            args.candidate_state_dir
         )
-    active_skill_ids = active_skill_ids_from_registry(registry)
-    buckets = buckets_from_codes(skill_to_code, active_skill_ids)
+        if (
+            args.virtual_tokens
+            and sha256_file(args.virtual_tokens) != sha256_file(state_tokens_path)
+        ):
+            raise RouterDataError(
+                "--virtual-tokens differs from the candidate-state namespace"
+            )
+        args.virtual_tokens = str(state_tokens_path)
+        args.decode_map = str(decode_path)
+        num_levels = int(decode_map["num_levels"])
+        skill_to_code = {
+            skill_id: tuple(details["tokens"])
+            for skill_id, details in decode_map["skill_to_code"].items()
+        }
+        active_skill_ids = tuple(sorted(decode_map["skills"]))
+        buckets = {
+            tuple(path["tokens"]): tuple(path["skill_ids"])
+            for path in decode_map["paths"]
+        }
+    else:
+        if not args.virtual_tokens or not args.codes or not args.registry:
+            raise RouterDataError(
+                "set --candidate-state-dir, or set --virtual-tokens, --codes, "
+                "and --registry together"
+            )
+        code_rows = read_jsonl(args.codes)
+        skill_to_code, num_levels = normalize_code_rows(code_rows)
+        registry = _load_registry(args.registry)
+        validate_registry_assignments(registry, code_rows)
+        registry_levels = registry.get("num_levels")
+        if registry_levels is not None and registry_levels != num_levels:
+            raise RouterDataError(
+                f"registry num_levels={registry_levels} disagrees with codes={num_levels}"
+            )
+        active_skill_ids = active_skill_ids_from_registry(registry)
+        buckets = buckets_from_codes(skill_to_code, active_skill_ids)
+    args._num_levels = num_levels
 
     virtual_tokens = load_virtual_tokens(args.virtual_tokens)
     torch, tokenizer, model, token_ids = _load_model_and_tokenizer(

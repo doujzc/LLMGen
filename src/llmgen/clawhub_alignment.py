@@ -146,6 +146,30 @@ def _parse_generation(
     return output
 
 
+def generate_alignment_query_rows(
+    profiles: Sequence[Mapping[str, Any]],
+    client: ChatBatchClient,
+    *,
+    variants: int,
+    prior_examples: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    """Generate validated single-skill query rows for an in-memory profile set."""
+
+    if variants < 1:
+        raise DatasetBuildError("alignment variants must be positive")
+    if not profiles:
+        raise DatasetBuildError("alignment profile set must not be empty")
+    payload = client.complete_json(
+        _generation_prompt(
+            profiles,
+            variants,
+            prior_examples=prior_examples,
+        ),
+        max_tokens=max(3000, 900 * len(profiles), 260 * variants),
+    )
+    return _parse_generation(payload, profiles, variants)
+
+
 def generate_alignment_queries(
     profiles_path: Path,
     output_path: Path,
@@ -176,11 +200,11 @@ def generate_alignment_queries(
     batches = [pending[index : index + batch_size] for index in range(0, len(pending), batch_size)]
 
     def run(batch: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        payload = client.complete_json(
-            _generation_prompt(batch, variants),
-            max_tokens=max(3000, 900 * len(batch)),
+        return generate_alignment_query_rows(
+            batch,
+            client,
+            variants=variants,
         )
-        return _parse_generation(payload, batch, variants)
 
     results, errors = client.map(run, batches, progress_label="alignment generation") if batches else ([], [])
     for rows in results:

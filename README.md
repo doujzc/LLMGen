@@ -272,6 +272,86 @@ ssh -L 8080:127.0.0.1:8080 user@server
 切换到“批量 TXT”后，每个非空行会作为一个 Query 分批推理，结果可以逐条检查
 并下载为 JSONL。
 
+## 候选增删基线
+
+增量更新冻结 Stage 1 codebook，已有 Skill code 不变。候选状态是小型 overlay，
+不复制模型权重。以下变量只需指向现有产物和一个新 Skill JSON：
+
+```bash
+export SOURCE_ROUTER=runs/my-run/router/retrieval
+export STAGE1_CHECKPOINT=runs/my-run/stage1/best.pt
+export SKILL_JSON=/path/to/new_skill.json
+export INC_ROOT=runs/my-run/incremental/new-skill
+```
+
+仅计算新 code 并启用对应 trie path：
+
+```bash
+python scripts/incremental/01_add_candidate.py \
+  --source-state-dir "$SOURCE_ROUTER" \
+  --stage1-checkpoint "$STAGE1_CHECKPOINT" \
+  --skill "$SKILL_JSON" \
+  --output-dir "$INC_ROOT/state" \
+  --update-mode index_only
+
+WEB_MODEL_DIR="$SOURCE_ROUTER" \
+WEB_CANDIDATE_STATE_DIR="$INC_ROOT/state" \
+  bash scripts/router_pipeline.sh "$DATASET" web
+```
+
+对新增 Skill 做增量 LoRA（只训练 1 条 Memorization 和默认 10 条 query）：
+
+```bash
+python scripts/incremental/01_add_candidate.py \
+  --source-state-dir "$SOURCE_ROUTER" \
+  --stage1-checkpoint "$STAGE1_CHECKPOINT" \
+  --skill "$SKILL_JSON" \
+  --output-dir "$INC_ROOT/state" \
+  --update-mode lora_train
+
+python scripts/incremental/02_build_training_data.py \
+  --candidate-state-dir "$INC_ROOT/state" \
+  --output-dir "$INC_ROOT/data"
+
+CUDA_VISIBLE_DEVICES=0 \
+  bash scripts/incremental/03_train_lora.sh \
+  "$SOURCE_ROUTER" "$INC_ROOT/state" "$INC_ROOT/data" "$INC_ROOT/router"
+
+python -m web_server.server \
+  --model-dir "$INC_ROOT/router/retrieval" \
+  --device cuda:0 --dtype bfloat16
+```
+
+`02_build_training_data.py` 默认用 `~/llm_api.txt` 和 `Qwen3.6-Plus` 生成 query；
+也可传 `--queries-txt queries.txt`，每个非空行一条。源 Router 若是 PEFT adapter，
+可用 `INCREMENTAL_BASE_MODEL=/models/Qwen3-1.7B` 覆盖其 base model 路径。
+用一份独立的 held-out TXT 对 index-only 或 LoRA 模型批量验证：
+
+```bash
+python scripts/infer_router.py \
+  --model-name-or-path "$INC_ROOT/router/retrieval" \
+  --candidate-state-dir "$INC_ROOT/router/retrieval" \
+  --query-txt heldout.txt \
+  --output-jsonl "$INC_ROOT/heldout.predictions.jsonl" \
+  --device cuda:0 --dtype bfloat16
+```
+
+验证 index-only 时，分别把上面的模型目录和候选目录改为
+`$SOURCE_ROUTER`、`$INC_ROOT/state`。
+
+删除候选只更新 active decode map 和 trie。若该 code 是碰撞桶，默认仅移除目标
+Skill 并保留同 path 的其他成员；显式传 `--disable-shared-path` 才会删除整个桶：
+
+```bash
+python scripts/incremental/01_remove_candidate.py \
+  --source-state-dir "$SOURCE_ROUTER" \
+  --skill-id '@owner/skill' \
+  --output-dir "$INC_ROOT/removed-state"
+```
+
+后续连续增删时，把上一次的 `state` 目录作为新的 `--source-state-dir`。详细约束见
+[增量候选设计](docs/incremental-candidates.md)。
+
 ## 显存不足
 
 优先启用 ZeRO-3 CPU parameter offload：

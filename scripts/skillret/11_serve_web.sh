@@ -26,6 +26,9 @@ ARGS=(
   --max-batch-queries "${WEB_MAX_BATCH_QUERIES:-1000}"
   --max-batch-size "${WEB_MAX_BATCH_SIZE:-8}"
 )
+if [[ -n "${WEB_CANDIDATE_STATE_DIR:-}" ]]; then
+  ARGS+=(--candidate-state-dir "$WEB_CANDIDATE_STATE_DIR")
+fi
 if [[ -n "${WEB_BASE_MODEL:-}" ]]; then
   ARGS+=(--base-model-name-or-path "$WEB_BASE_MODEL")
 fi

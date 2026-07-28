@@ -41,6 +41,7 @@ class RouterRuntime:
         max_code_paths: int,
         max_input_length: int | None,
         trust_remote_code: bool,
+        candidate_state_dir: str | Path | None = None,
         max_num_beams: int = 8,
         max_batch_queries: int = 1000,
         max_batch_size: int = 8,
@@ -56,14 +57,24 @@ class RouterRuntime:
         self.model_dir = Path(model_dir).expanduser().resolve()
         if not self.model_dir.is_dir():
             raise RouterDataError(f"model directory does not exist: {self.model_dir}")
-        self.decode_map_path = self.model_dir / DECODE_MAP_FILENAME
+        self.candidate_state_dir = (
+            Path(candidate_state_dir).expanduser().resolve()
+            if candidate_state_dir is not None
+            else self.model_dir
+        )
+        if not self.candidate_state_dir.is_dir():
+            raise RouterDataError(
+                f"candidate-state directory does not exist: {self.candidate_state_dir}"
+            )
+        self.decode_map_path = self.candidate_state_dir / DECODE_MAP_FILENAME
         self.virtual_tokens_path = (
-            self.model_dir / BUNDLED_VIRTUAL_TOKENS_FILENAME
+            self.candidate_state_dir / BUNDLED_VIRTUAL_TOKENS_FILENAME
         )
         if not self.decode_map_path.is_file() or not self.virtual_tokens_path.is_file():
             raise RouterDataError(
-                "model dump is missing skill_decode_map.json or virtual_tokens.txt; "
-                "run scripts/export_router_bundle.py first"
+                "candidate state is missing skill_decode_map.json or "
+                "virtual_tokens.txt; export the router bundle or build an "
+                "incremental candidate overlay first"
             )
         self.decode_map = load_skill_decode_map(self.decode_map_path)
         self.skills: dict[str, dict[str, Any]] = self.decode_map["skills"]
@@ -130,6 +141,10 @@ class RouterRuntime:
         return {
             "ready": True,
             "model_dir": str(self.model_dir),
+            "candidate_state_dir": str(self.candidate_state_dir),
+            "candidate_state_revision": self.decode_map.get(
+                "incremental_state", {}
+            ).get("revision"),
             "device": str(self.args.device),
             "dtype": self.args.dtype,
             "num_skills": int(self.decode_map["num_skills"]),

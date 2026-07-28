@@ -127,7 +127,9 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help=(
             "Comma-separated full modules saved with the adapter. 'auto' keeps "
-            "the resized input/output embeddings trainable and checkpointed."
+            "the resized input/output embeddings trainable and checkpointed; "
+            "'none' creates a pure LoRA delta when the source router already "
+            "contains the complete virtual-token vocabulary."
         ),
     )
     return parser.parse_args()
@@ -270,12 +272,15 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
                 name = _module_name_for(model, target)
                 if name and name not in modules_to_save:
                     modules_to_save.append(name)
+        elif args.lora_modules_to_save.strip().casefold() == "none":
+            modules_to_save = None
         else:
             modules_to_save = _csv(args.lora_modules_to_save)
-        if not modules_to_save:
+        if modules_to_save == []:
             raise RouterDataError(
                 "LoRA must checkpoint the resized input/output embeddings; "
-                "set --lora-modules-to-save explicitly for this architecture"
+                "set --lora-modules-to-save explicitly for this architecture, "
+                "or use 'none' only when continuing from a trained router"
             )
         lora_kwargs: dict[str, Any] = {
             "task_type": TaskType.CAUSAL_LM,
@@ -283,14 +288,18 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
             "lora_alpha": args.lora_alpha,
             "lora_dropout": args.lora_dropout,
             "target_modules": _csv(args.lora_target_modules),
-            "modules_to_save": modules_to_save,
             "bias": "none",
         }
+        if modules_to_save is not None:
+            lora_kwargs["modules_to_save"] = modules_to_save
         # Some Qwen3 models tie input and output embeddings. Newer PEFT
         # versions can preserve that contract explicitly when both resized
         # modules are stored in the adapter; retain compatibility with older
         # supported PEFT releases that do not expose this argument.
-        if "ensure_weight_tying" in inspect.signature(LoraConfig).parameters:
+        if (
+            modules_to_save is not None
+            and "ensure_weight_tying" in inspect.signature(LoraConfig).parameters
+        ):
             lora_kwargs["ensure_weight_tying"] = bool(
                 getattr(model.config, "tie_word_embeddings", False)
             )

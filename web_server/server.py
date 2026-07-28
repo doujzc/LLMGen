@@ -28,6 +28,13 @@ STATIC_ROUTES = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-dir", required=True)
+    parser.add_argument(
+        "--candidate-state-dir",
+        help=(
+            "Optional incremental overlay containing skill_decode_map.json and "
+            "virtual_tokens.txt; model weights still load from --model-dir."
+        ),
+    )
     parser.add_argument("--base-model-name-or-path")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
@@ -187,8 +194,15 @@ def main() -> None:
     if not 1 <= args.port <= 65535:
         raise SystemExit("--port must be between 1 and 65535")
     print(f"Loading router from {Path(args.model_dir).expanduser()} ...", flush=True)
+    if args.candidate_state_dir:
+        print(
+            "Loading active candidates from "
+            f"{Path(args.candidate_state_dir).expanduser()} ...",
+            flush=True,
+        )
     runtime = RouterRuntime(
         model_dir=args.model_dir,
+        candidate_state_dir=args.candidate_state_dir,
         base_model_name_or_path=args.base_model_name_or_path,
         device=args.device,
         dtype=args.dtype,
