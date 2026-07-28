@@ -73,3 +73,96 @@ None.
   1,000 Skills, row virtualization could reduce DOM work without changing the UI.
 
 final result: passed
+
+---
+
+# Training Console Product Design QA — 2026-07-28
+
+- Source visual truth:
+  `docs/training-console/selected-design.png` (portable repository copy);
+  original generation:
+  `/mnt/c/Users/T/.codex/generated_images/019fa26f-688c-7353-a674-6a1ba2cd7d6e/call_ZPRBNV5UOjy2IfabR4qrGwWw.png`
+- Implemented desktop capture:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-implemented-v3.png`
+- Full-view comparison:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-comparison-v3.png`
+- Focused center-workspace comparison:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-focus-comparison-v3.png`
+- 1250px regression capture:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-1250.png`
+- Mobile capture:
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-training-console-mobile.png`
+- Desktop viewport and state: 1440 × 1024, `clawhub-full-4gpu` v6,
+  Retrieval selected, 4-GPU ZeRO-3 contract, persisted detached run completed.
+
+## Findings
+
+No actionable P0, P1, or P2 issues remain.
+
+- Visual hierarchy: the implementation preserves the selected direction's compact
+  top bar, three-pane developer workbench, warm ivory surfaces, vermilion action
+  states, restrained dividers, monospace parameter metadata, and dense form rhythm.
+- Configuration management: the left rail exposes three profile families and
+  nine immutable versions in the QA fixture. Historical versions are explicitly
+  read-only; editing and saving creates a new version.
+- Training workflow: all nine configuration views are reachable, including
+  separate Memorization, Alignment, and Retrieval views. The selected stage,
+  validation state, value provenance, overrides, defaults, and advanced fields
+  remain visible without changing training code.
+- Independence contract: the right rail shows the exact CLI boundary, resolved
+  resource and output contracts, immutable snapshot path, and persisted run state.
+  It offers no stop, kill, or pause control that could make the Web service own the
+  training lifecycle. Runner PID, training PID, exit code, actual state-root log
+  path, checkpoint, and progress are rendered from persisted metadata.
+- Core browser journey: changed Retrieval Epochs, waited for live validation,
+  saved immutable v5 and v6 during separate checks, and submitted `--no-launch`
+  run snapshots. The page displayed the loaded version as immutable and surfaced
+  each saved run from disk.
+- Interaction coverage: profile/version loading, stage navigation, phase switch,
+  “仅看覆盖项”, default comparison, contract/snapshot tabs, save, submit, and
+  periodic run refresh were exercised.
+- Responsive behavior: 1321 × 900 keeps three columns; 1250 × 900 and
+  1100 × 900 move the run contract below the two-column workspace; 390 × 844 uses
+  one continuous column. None has page-level horizontal overflow, and all nine
+  stages and primary actions remain present.
+- Browser health: desktop, tablet, and mobile checks reported zero console errors
+  and zero failed network requests.
+- Automated checks: the complete repository suite passed (194 tests), including
+  immutable profile storage, validation and injection rejection, API snapshots,
+  bounded log reads, credential filtering, package completeness, and a real
+  Web-process SIGKILL survival test.
+
+## Comparison history
+
+1. The first browser capture established the complete three-pane layout and
+   interaction states. The source and implementation were combined into one
+   side-by-side image before judging fidelity.
+2. The end-to-end browser journey created v5 and verified that saved configuration
+   identity, provenance, and a read-only detached run remain coherent.
+3. Completion audit found a 1241–1275px overflow gap and missing Runner PID /
+   exit-code rows. The breakpoint moved to 1320px, the fields were added, and the
+   misleading artifact `$RUN_DIR/logs` path was replaced by the real persisted
+   state-root log path.
+4. The final desktop capture plus 1321/1250/1100/390 browser checks found no
+   remaining P0, P1, or P2 mismatch, console error, network failure, or horizontal
+   overflow.
+5. The final independence audit closed DNS-rebinding, unbounded-log, proxy
+   redaction, prefixed-environment-secret, and credential-bearing URL edges.
+   Loopback Host/Origin requests, a 1 MiB log-tail cap, 16 KiB line cap, and
+   structured URL validation now have regression coverage.
+
+## Intentional differences
+
+- The header reports `1 / 4` available GPUs because it reads the QA host's actual
+  `nvidia-smi` result; the contract still correctly displays the configured four
+  devices. The source mock's `4 / 4` is illustrative.
+- Paths, profile versions, timestamps, PIDs, and progress are real persisted QA
+  values rather than copied mock text.
+
+## Follow-up polish
+
+- P3: on phone widths the full developer console is intentionally a long vertical
+  document. A future compact mode could collapse the profile library and pipeline,
+  but no control is clipped or inaccessible in the current implementation.
+
+final result: passed

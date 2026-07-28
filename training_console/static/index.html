@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="LLMGen training configuration and detached-run console"
+    />
+    <title>LLMGen 训练控制台</title>
+    <link rel="icon" href="/static/skill-router-mark.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="LLMGen 训练控制台首页">
+        <img src="/static/skill-router-mark.svg" alt="" />
+        <span>
+          <strong>Skill Router Lab</strong>
+          <small>LLMGen · Training control console</small>
+        </span>
+      </a>
+
+      <nav class="surface-nav" aria-label="控制台">
+        <a class="active" href="/" aria-current="page">训练控制台</a>
+        <a id="inference-link" href="http://127.0.0.1:8080/">推理控制台</a>
+      </nav>
+
+      <div class="service-state" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="service-state-text">正在连接控制台</span>
+      </div>
+
+      <dl class="header-metrics">
+        <div>
+          <dt>可用 GPU</dt>
+          <dd id="metric-gpus">—</dd>
+        </div>
+        <div>
+          <dt>当前配置</dt>
+          <dd id="metric-profile">草稿</dd>
+        </div>
+        <div>
+          <dt>配置版本</dt>
+          <dd id="metric-version">未保存</dd>
+        </div>
+        <div>
+          <dt>Code 层数</dt>
+          <dd id="metric-levels">—</dd>
+        </div>
+      </dl>
+    </header>
+
+    <main class="console-layout">
+      <aside class="left-rail">
+        <section class="profile-library" aria-labelledby="profile-library-title">
+          <div class="rail-heading">
+            <h2 id="profile-library-title">配置库</h2>
+            <button id="new-profile-button" class="compact-button" type="button">
+              新建
+            </button>
+          </div>
+          <label class="sr-only" for="profile-search">搜索配置名称</label>
+          <input
+            id="profile-search"
+            class="rail-search"
+            type="search"
+            placeholder="搜索配置名称"
+            autocomplete="off"
+          />
+          <div id="profile-list" class="profile-list" aria-live="polite"></div>
+        </section>
+
+        <section class="pipeline-navigation" aria-labelledby="pipeline-title">
+          <div class="pipeline-copy">
+            <h2 id="pipeline-title">训练流水线</h2>
+            <p>按阶段配置并提交，运行在独立环境中。</p>
+          </div>
+          <nav id="stage-list" class="stage-list" aria-label="训练阶段"></nav>
+          <div class="stage-legend" aria-label="阶段状态说明">
+            <span><i class="state-complete"></i>已配置</span>
+            <span><i class="state-current"></i>当前</span>
+            <span><i class="state-pending"></i>待配置</span>
+          </div>
+        </section>
+      </aside>
+
+      <section class="configuration-workspace" aria-labelledby="workspace-title">
+        <header class="workspace-header">
+          <div>
+            <span id="workspace-stage-number" class="stage-number">06b</span>
+            <h1 id="workspace-title">Retrieval 阶段配置</h1>
+            <p id="workspace-description">配置检索阶段训练参数与资源。</p>
+          </div>
+          <div class="draft-identity">
+            <strong id="draft-identity-text">clawhub-full-4gpu · 草稿</strong>
+            <span id="draft-identity-help">保存后创建不可变新版本</span>
+          </div>
+        </header>
+
+        <div id="validation-banner" class="validation-banner loading" role="status">
+          <strong>正在检查配置</strong>
+          <span>读取当前数据集的有效默认值。</span>
+        </div>
+
+        <div class="form-toolbar">
+          <div>
+            <h2>配置档案</h2>
+            <p>字段来源和覆盖状态会随草稿实时更新。</p>
+          </div>
+          <div class="form-toolbar-actions">
+            <label class="switch-label">
+              <input id="only-overrides" type="checkbox" />
+              <span>仅看覆盖项</span>
+            </label>
+            <button id="compare-defaults" class="secondary-button" type="button">
+              与默认值比较
+            </button>
+          </div>
+        </div>
+
+        <div class="profile-fields">
+          <label>
+            <span>配置名称</span>
+            <input
+              id="profile-id"
+              type="text"
+              value="clawhub-full-4gpu"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label>
+            <span>备注（可选）</span>
+            <input
+              id="profile-notes"
+              type="text"
+              placeholder="为此版本添加备注"
+              maxlength="2000"
+            />
+          </label>
+        </div>
+
+        <div id="phase-switch" class="phase-switch" hidden>
+          <button type="button" data-stage="memorization">
+            <span>Memorization</span>
+            <small id="phase-memorization-value">—</small>
+          </button>
+          <button type="button" data-stage="alignment">
+            <span>Alignment</span>
+            <small id="phase-alignment-value">—</small>
+          </button>
+          <button type="button" data-stage="retrieval">
+            <span>Retrieval</span>
+            <small id="phase-retrieval-value">—</small>
+          </button>
+        </div>
+
+        <form id="configuration-form" novalidate>
+          <div id="field-sections" class="field-sections"></div>
+        </form>
+
+        <footer class="workspace-actions">
+          <button id="save-profile-button" class="secondary-button action" type="button">
+            仅保存新版本
+          </button>
+          <button id="submit-run-button" class="primary-button action" type="button">
+            保存新版本并提交独立任务
+          </button>
+          <button id="export-env-button" class="secondary-button action" type="button">
+            导出 .env
+          </button>
+          <p>
+            提交后将生成不可变配置快照并交由独立运行器执行；后续修改会创建新的配置版本。
+          </p>
+        </footer>
+      </section>
+
+      <aside class="right-rail">
+        <div class="contract-tabs" role="tablist" aria-label="运行配置">
+          <button
+            id="contract-tab"
+            class="active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="contract-panel"
+          >
+            运行契约
+          </button>
+          <button
+            id="snapshot-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="snapshot-panel"
+          >
+            配置快照
+          </button>
+        </div>
+
+        <section id="contract-panel" class="contract-panel" role="tabpanel">
+          <div class="contract-block">
+            <h2>配置档案</h2>
+            <dl class="key-value-list">
+              <div>
+                <dt>配置名称</dt>
+                <dd id="contract-profile">—</dd>
+              </div>
+              <div>
+                <dt>配置版本</dt>
+                <dd id="contract-version">提交时生成</dd>
+              </div>
+              <div>
+                <dt>覆盖默认值</dt>
+                <dd><span id="contract-overrides">0</span> 项</dd>
+              </div>
+              <div>
+                <dt>配置快照</dt>
+                <dd id="contract-config-path">提交时写入独立目录</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="contract-block">
+            <div class="block-heading">
+              <h2>生成命令</h2>
+              <button id="copy-command-button" class="text-button" type="button">
+                复制
+              </button>
+            </div>
+            <pre id="contract-command" class="command-preview">—</pre>
+          </div>
+
+          <div class="contract-block">
+            <h2>资源契约</h2>
+            <dl class="key-value-list">
+              <div>
+                <dt>GPUs</dt>
+                <dd id="contract-gpus">—</dd>
+              </div>
+              <div>
+                <dt>并行策略</dt>
+                <dd id="contract-deepspeed">—</dd>
+              </div>
+              <div>
+                <dt>精度</dt>
+                <dd id="contract-precision">—</dd>
+              </div>
+              <div>
+                <dt>Code 结构</dt>
+                <dd id="contract-codebook">—</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="contract-block">
+            <h2>输出契约</h2>
+            <dl class="key-value-list paths">
+              <div>
+                <dt>输出目录</dt>
+                <dd id="contract-run-dir">—</dd>
+              </div>
+              <div>
+                <dt>Checkpoint</dt>
+                <dd id="contract-checkpoint-dir">—</dd>
+              </div>
+              <div>
+                <dt>运行日志</dt>
+                <dd id="contract-log-dir">—</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="independence-callout">
+            <strong>独立任务 · 关闭页面不影响训练</strong>
+            <p>浏览器只保存与读取状态，训练由脱离 Web 服务的独立进程执行。</p>
+          </div>
+        </section>
+
+        <section id="snapshot-panel" class="snapshot-panel" role="tabpanel" hidden>
+          <div class="block-heading">
+            <div>
+              <h2>有效配置（只读）</h2>
+              <p>提交后冻结为不可变快照。</p>
+            </div>
+            <button id="copy-env-button" class="text-button" type="button">
+              复制
+            </button>
+          </div>
+          <pre id="snapshot-preview">正在解析配置…</pre>
+        </section>
+
+        <section class="current-run" aria-labelledby="current-run-title">
+          <div class="current-run-heading">
+            <div>
+              <h2 id="current-run-title">当前运行</h2>
+              <p>从持久化产物读取</p>
+            </div>
+            <button id="refresh-runs-button" class="text-button" type="button">
+              刷新
+            </button>
+          </div>
+          <div id="run-empty" class="run-empty">
+            <strong>尚未提交训练任务</strong>
+            <p>保存配置后可创建独立运行快照。</p>
+          </div>
+          <div id="run-detail" class="run-detail" hidden>
+            <div class="run-status-line">
+              <strong id="run-status">—</strong>
+              <span id="run-status-source">磁盘状态</span>
+            </div>
+            <dl class="key-value-list">
+              <div>
+                <dt>运行 ID</dt>
+                <dd id="run-id">—</dd>
+              </div>
+              <div>
+                <dt>配置版本</dt>
+                <dd id="run-profile-version">—</dd>
+              </div>
+              <div>
+                <dt>当前阶段</dt>
+                <dd id="run-stage">—</dd>
+              </div>
+              <div>
+                <dt>运行进度</dt>
+                <dd id="run-progress">—</dd>
+              </div>
+              <div>
+                <dt>Runner PID</dt>
+                <dd id="run-runner-pid">—</dd>
+              </div>
+              <div>
+                <dt>训练 PID</dt>
+                <dd id="run-training-pid">—</dd>
+              </div>
+              <div>
+                <dt>Exit code</dt>
+                <dd id="run-exit-code">—</dd>
+              </div>
+              <div>
+                <dt>最新 Checkpoint</dt>
+                <dd id="run-checkpoint">—</dd>
+              </div>
+              <div>
+                <dt>日志路径</dt>
+                <dd id="run-log-path">—</dd>
+              </div>
+              <div>
+                <dt>最后更新</dt>
+                <dd id="run-updated">—</dd>
+              </div>
+            </dl>
+            <button id="view-log-button" class="secondary-button full" type="button">
+              查看日志尾部
+            </button>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <dialog id="new-profile-dialog">
+      <form method="dialog" class="dialog-form" id="new-profile-form">
+        <header>
+          <div>
+            <span class="eyebrow">NEW CONFIGURATION</span>
+            <h2>新建配置</h2>
+          </div>
+          <button class="dialog-close" value="cancel" aria-label="关闭" type="submit">
+            关闭
+          </button>
+        </header>
+        <label>
+          <span>配置 ID</span>
+          <input
+            id="new-profile-id"
+            required
+            pattern="[a-z0-9][a-z0-9_-]{1,63}"
+            value="clawhub-full-4gpu"
+            autocomplete="off"
+          />
+          <small>使用小写字母、数字、短横线或下划线。</small>
+        </label>
+        <label>
+          <span>数据集</span>
+          <select id="new-profile-dataset">
+            <option value="clawhub">clawhub · 1,000 Skills</option>
+            <option value="light">light · 301 Skills</option>
+          </select>
+        </label>
+        <label>
+          <span>执行范围</span>
+          <select id="new-profile-command">
+            <option value="full">完整流程 · full</option>
+            <option value="prepare">01 · prepare</option>
+            <option value="train-tokenizer">02 · train-tokenizer</option>
+            <option value="export-codes">03 · export-codes</option>
+            <option value="build-router-data">04 · build-router-data</option>
+            <option value="train-memorization">05 · train-memorization</option>
+            <option value="train-retrieval">06 · train-retrieval</option>
+            <option value="evaluate">07 · evaluate</option>
+          </select>
+        </label>
+        <footer>
+          <button class="secondary-button" value="cancel" type="submit">取消</button>
+          <button id="create-draft-button" class="primary-button" value="default">
+            创建草稿
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="log-dialog" class="log-dialog">
+      <div class="dialog-form">
+        <header>
+          <div>
+            <span class="eyebrow">PERSISTED TRAIN LOG</span>
+            <h2 id="log-dialog-title">任务日志</h2>
+          </div>
+          <button id="close-log-dialog" class="dialog-close" type="button">
+            关闭
+          </button>
+        </header>
+        <pre id="run-log">正在读取日志…</pre>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

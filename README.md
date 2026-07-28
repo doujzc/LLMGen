@@ -79,6 +79,22 @@ bash scripts/router_pipeline.sh "$DATASET" paths
 
 每次训练或恢复前都建议用 `paths` 核对实际生效的数据、checkpoint 和输出目录。
 
+## 训练控制台
+
+激活安装了 LLMGen 的 Conda 环境后，可以通过独立开发者控制台管理参数和不可变
+配置版本：
+
+```bash
+conda activate llmgen
+bash scripts/serve_training_console.sh
+```
+
+默认地址为 `http://127.0.0.1:8090`。控制台通过既有
+`scripts/router_pipeline.sh` 提交 detached 任务；关闭浏览器或控制台服务不会
+终止已经启动的训练。完整操作和远程访问方式见
+[训练控制台说明](training_console/README.md)，架构边界见
+[设计文档](docs/training-console/design.md)。
+
 ## Embedding 预处理
 
 预处理通过 OpenAI-compatible API 调用 Embedding 模型。建议在独立 Conda 环境中

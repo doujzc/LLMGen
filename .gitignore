@@ -25,3 +25,4 @@ data_light/catalog.jsonl
 data_light/catalog_report.json
 outputs/
 runs/
+.llmgen/

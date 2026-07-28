@@ -35,10 +35,13 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["llmgen*", "training_console*"]
+exclude = ["tests*", "web_server*"]
 
 [tool.setuptools.package-data]
 "llmgen.vendor.toolweaver" = ["README.md"]
+"training_console" = ["README.md", "static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
