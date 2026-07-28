@@ -1,93 +1,165 @@
 # LLMGen：层级生成式 Agent Skill 路由算法
 
-本文给出 LLMGen 当前训练与推理算法的完整定义。目标是在一个固定候选集合中，根据用户请求选择一个或多个 Agent Skill，同时将语言模型的输出控制在很短的 token 序列内。算法由两个顺序执行的离线阶段组成：第一阶段为全部候选 Skill 构建并冻结层级离散 code，第二阶段训练语言模型从 Skill 文档或用户请求生成这些 code。推理时，模型在合法 code 空间内直接执行约束生成，再将 code 展开为候选 Skill。
+本文给出 LLMGen 当前训练与推理算法的完整定义。目标是在固定候选集合中，根据用户请求选择一个或多个 Agent Skill，并将语言模型的输出控制在很短的 token 序列内。
 
 本文只讨论算法，不涉及数据存储格式、训练脚本、分布式系统、硬件配置或服务部署。
 
 ## 1. 问题定义
 
-### 1.1 闭集多 Skill 路由
-
-给定唯一的候选 Skill 集合
+给定候选 Agent Skill 集合
 
 $$
 \mathcal S=\{s_i\}_{i=1}^{N},
 $$
 
-其中每个 Skill $s_i$ 具有名称、能力说明和完整文档 $d_i$。对于用户请求 $q$，定义完成该请求所需的目标 Skill 集合为
+其中每个 Skill $s_i$ 具有名称、能力说明和完整文档。对于用户请求
+$q$，目标是从 $\mathcal S$ 中选择完成该请求所需的一个或多个 Skill：
 
 $$
 \mathcal T(q)\subseteq\mathcal S,
 \qquad
-m_q=|\mathcal T(q)|.
+m_q=|\mathcal T(q)|,
+\qquad
+1\le m_q\le N.
 $$
 
-集合本身不规定生成顺序。令
+路由算法学习映射 $F:q\mapsto\widehat{\mathcal T}(q)$，使预测集合
+$\widehat{\mathcal T}(q)\subseteq\mathcal S$ 尽可能接近真实目标集合
+$\mathcal T(q)$。目标既包括 query 直接表达的能力，也包括未被明确提及、但完成用户任务所必需的能力。
+
+本文采用闭集设定：训练、验证、测试和推理共享同一个候选集合
+$\mathcal S$；不同数据划分只包含不同的用户请求，不对应不同的候选空间。
+
+## 2. 方法总览
+
+LLMGen 将 Skill 选择转换为短层级 code 的条件生成。算法不要求 LLM
+输出 Skill 名称，也不在推理时逐一比较全部候选；它先为每个候选
+Skill 建立固定 code，将构成 code 的 token 加入 LLM vocabulary，再让
+LLM 根据 query 直接生成一个或多个合法 code，最后通过 registry 将
+code 还原为 Skill。
+
+第 $\ell$ 层包含 $K_\ell$ 个原子 code token。Skill $s_i$ 的 $L$ 层
+code 定义为
 
 $$
-\Pi(q)
-\subseteq
-\operatorname{Perm}\!\left(\mathcal T(q)\right)
-$$
-
-表示该请求允许采用的序列化排列集合。对任意
-$\pi\in\Pi(q)$，将 $\pi$ 视为从位置集合
-$\{1,\ldots,m_q\}$ 到 $\mathcal T(q)$ 的双射，相应的具体有序监督为
-
-$$
-\mathcal Y_\pi(q)
-=
+\begin{aligned}
+c(s_i)
+&=
 \left(
-\pi(1),\pi(2),\ldots,\pi(m_q)
-\right).
+\tau_{a_i^{(1)}}^{(1)},\ldots,
+\tau_{a_i^{(L)}}^{(L)}
+\right),
+\qquad
+a_i^{(\ell)}\in\{0,\ldots,K_\ell-1\},
+\\
+\mathcal V_{\mathrm{code}}
+&=
+\mathop{\biguplus}_{\ell=1}^{L}\mathcal V_\ell,
+\qquad
+|\mathcal V_{\mathrm{code}}|
+=
+\sum_{\ell=1}^{L}K_\ell.
+\end{aligned}
 $$
 
-当 Skill 之间存在严格依赖时，$\Pi(q)$ 只包含满足依赖关系的拓扑序；当多个顺序在语义上等价时，$\Pi(q)$ 可以包含多个排列。因而，$\mathcal Y_\pi(q)$ 描述生成与选择顺序，不必等同于唯一执行顺序。
+在接收在线请求之前，code 构建器根据候选 Skill 及其共用关系产生
+code 词表、Skill-to-code 映射和反向 registry：
 
-目标 Skill 不要求在请求中被直接点名。只要某项能力是完成请求所必需的，它就应被纳入 $\mathcal T(q)$。因此，监督同时覆盖两类意图：
+$$
+(\mathcal V_{\mathrm{code}},c,\mathcal B)
+=
+\operatorname{CodeBuild}(\mathcal S,\mathcal D_{\mathrm{train}}).
+$$
 
-- 显式意图：请求直接表达了某项能力；
-- 隐式意图：请求只描述最终目标，但完成目标需要额外能力。
+这些 code token 是 LLM 的原子 token，而不是由多个普通文本 token
+拼出的字符串。设预训练 LLM 的原始 vocabulary 为
+$\mathcal V_{\mathrm{LLM}}$，扩充后的 Router vocabulary 为
 
-当前默认协议是闭集路由。训练、验证、测试和在线推理共享同一个候选集合 $\mathcal S$；不同数据划分只包含不同的 query，不对应不同的候选空间。第一阶段必须为 $\mathcal S$ 中的每个 Skill 建立 code，第二阶段和推理阶段都使用这份唯一映射。
+$$
+\mathcal V_{\mathrm{router}}
+=
+\mathcal V_{\mathrm{LLM}}
+\mathbin{\uplus}
+\mathcal V_{\mathrm{code}}.
+$$
 
-### 1.2 层级离散 Skill code
+LLM 的输入 embedding 矩阵和输出 projection 随 vocabulary 一同扩展，
+使模型能够像生成普通 token 一样生成每一层 code token。基于该词表
+得到的已训练 Router 记为 $P_{\theta_\star}$；其训练方法在第 3.2 节
+单独介绍，不属于本章的执行流程。
 
-直接生成 Skill 名称或完整描述会增加输出长度，也难以对大规模候选空间施加严格约束。LLMGen 为每个 Skill 分配一个固定长度为 $L$ 的层级离散 code。
+在线推理时，给定 query $q$，Router 在当前合法路径集合
+$\mathcal C_{\mathrm{act}}$ 的约束下自回归生成 code 路径：
 
-第 $\ell$ 层具有 $K_\ell$ 个互斥原子 token：
+$$
+\widehat{\mathbf C}(q)
+=
+\operatorname{ConstrainedGenerate}
+\left(
+P_{\theta_\star},q;
+\mathcal V_{\mathrm{router}},
+\mathcal C_{\mathrm{act}}
+\right),
+\qquad
+\widehat{\mathcal T}(q)
+=
+\bigcup_{\mathbf c\in\widehat{\mathbf C}(q)}
+\mathcal B(\mathbf c).
+$$
+
+单个 Skill 对应一条长度为 $L$ 的路径；多个 Skill 对应多条以换行符
+分隔的路径。例如，模型可以生成
+
+```text
+<SK_L1_12><SK_L2_37>
+<SK_L1_44><SK_L2_08>
+```
+
+再分别解码为“天气查询”和“地图导航”。约束解码在每一步屏蔽无法构成
+合法路径的 token，因此生成结果始终可由 $\mathcal B$ 解释。
+
+![LLMGen 整体执行与推理流程](assets/algorithm_overview.svg)
+
+**图 1：LLMGen 整体算法框架。** 候选 Skill 首先被映射为短层级
+code；code token 随后加入 LLM vocabulary；在线阶段，Router 在合法
+路径约束下生成一条或多条 code，并通过 registry 还原为 Skill。
+
+层级 code 构建、Router 参数训练和约束生成的具体算法分别见第 3.1、
+3.2 和 3.3 节。
+
+## 3. 具体算法介绍
+
+### 3.1 阶段一：层级 Skill code 构建
+
+记 $d_i$ 为 Skill $s_i$ 的完整文档。第 $\ell$ 层具有
+$K_\ell$ 个互斥原子 token：
 
 $$
 \mathcal V_\ell
 =
 \left\{
-\tau^{(\ell)}_0,
-\tau^{(\ell)}_1,
-\ldots,
+\tau^{(\ell)}_0,\ldots,
 \tau^{(\ell)}_{K_\ell-1}
 \right\},
 \qquad
 \ell=1,\ldots,L.
 $$
 
-不同层使用互不相交的 token 命名空间。Skill $s_i$ 的 code 定义为
+不同层使用互不相交的 token 命名空间。Skill $s_i$ 的固定长度 code 定义为
 
 $$
-\mathbf c_i
-=
 c(s_i)
 =
 \left(
 \tau^{(1)}_{a_i^{(1)}},
-\tau^{(2)}_{a_i^{(2)}},
 \ldots,
 \tau^{(L)}_{a_i^{(L)}}
 \right),
+\qquad
+a_i^{(\ell)}\in\{0,\ldots,K_\ell-1\}.
 $$
 
-其中 $a_i^{(\ell)}\in\{0,\ldots,K_\ell-1\}$。层数 $L$ 和各层分支数 $K_\ell$ 均可配置。
-
-定义完整路径空间与全部新增 code token 集合为
+完整路径空间和新增 token 集合分别为
 
 $$
 \mathcal C_{\mathrm{full}}
@@ -96,42 +168,31 @@ $$
 \qquad
 \mathcal V_{\mathrm{code}}
 =
-\mathop{\biguplus}_{\ell=1}^{L}\mathcal V_\ell,
+\mathop{\biguplus}_{\ell=1}^{L}\mathcal V_\ell.
 $$
 
-其中 $\biguplus$ 表示不同层 token 命名空间的不交并。于是该表示具有两项直接性质：
+因此
 
 $$
-\left|\mathcal C_{\mathrm{full}}\right|
+|\mathcal C_{\mathrm{full}}|
 =
 \prod_{\ell=1}^{L}K_\ell,
 \qquad
-\left|\mathcal V_{\mathrm{code}}\right|
+|\mathcal V_{\mathrm{code}}|
 =
 \sum_{\ell=1}^{L}K_\ell.
 $$
 
-即，完整路径空间随层数乘法扩张，而新增词表规模只按各层分支数之和增长。无论候选文档多长，模型表示一个 Skill 始终只需生成 $L$ 个 code token。
-
-### 1.3 Code registry 与碰撞
-
-层级 code 定义了从 Skill 到离散路径的映射
-
-$$
-c:\mathcal S\rightarrow\mathcal C,
-$$
-
-其中
+实际分配路径集合为
 
 $$
 \mathcal C
 =
 \{c(s_i):s_i\in\mathcal S\}
-\subseteq
-\mathcal V_1\times\cdots\times\mathcal V_L
+\subseteq\mathcal C_{\mathrm{full}},
 $$
 
-是实际被分配的合法路径集合。反向映射由 code registry 表示：
+反向 registry 定义为
 
 $$
 \mathcal B(\mathbf c)
@@ -139,180 +200,18 @@ $$
 \{s_i\in\mathcal S:c(s_i)=\mathbf c\}.
 $$
 
-$\mathcal B(\mathbf c)$ 称为路径 $\mathbf c$ 的碰撞桶。若
-$|\mathcal B(\mathbf c)|=1$，该路径唯一标识一个 Skill；若
-$|\mathcal B(\mathbf c)|>1$，仅根据生成 code 无法区分桶内成员。因此，第一阶段不仅要学习有语义结构的 code，还要尽量均衡使用各层 token 并减少完整路径碰撞。
+$\mathcal B(\mathbf c)$ 是路径 $\mathbf c$ 的碰撞桶。当
+$|\mathcal B(\mathbf c)|>1$ 时，仅根据 code 无法区分桶内 Skill。因此，第一阶段需要在保留语义与协同结构的同时，均衡使用各层 token 并尽量减少完整路径碰撞。
 
-### 1.4 生成式路由目标
+下面介绍学习式平衡编码如何构建并冻结
+$(\mathcal V_{\mathrm{code}},c,\mathcal B)$ 接口。
 
-设 $\boldsymbol\delta$ 为换行符在基础 tokenizer 下对应的 token 序列，$\mathtt{EOS}$ 为基础 tokenizer 已有的序列结束 token。对任意允许排列 $\pi\in\Pi(q)$，先对 $\mathcal Y_\pi(q)$ 中的完整 code 做稳定去重：从左到右保留每个 code 的首次出现，得到
+![学习式平衡层级 Skill code 构建](assets/chapter3/code_construction.svg)
 
-$$
-\overline{\mathcal C}_\pi(q)
-=
-\left(
-\mathbf c_{\pi,1},\ldots,\mathbf c_{\pi,r_\pi}
-\right),
-\qquad
-r_\pi\le m_q.
-$$
-
-Router 的监督序列化函数定义为
-
-$$
-\operatorname{Ser}(\mathcal Y_\pi(q))
-=
-\mathbf c_{\pi,1}
-\Vert\boldsymbol\delta\Vert
-\cdots
-\Vert\boldsymbol\delta\Vert
-\mathbf c_{\pi,r_\pi}
-\Vert\mathtt{EOS},
-$$
-
-其中 $\Vert$ 表示 token 序列拼接。稳定去重只在多个目标 Skill 共享同一 code 时发生。推理时，一条 code 通过 registry 展开为一个或多个桶内候选；碰撞桶可能引入目标集合之外的候选，因此 code 到精确 Skill 集合的恢复并非无损。
-
-给定自回归语言模型 $P_\theta$，学习目标是提高允许 code 序列的条件概率。对一次具体序列化 $\pi$，目标为
-
-$$
-\max_\theta
-P_\theta
-\left(
-\operatorname{Ser}(\mathcal Y_\pi(q))
-\mid q
-\right).
-$$
-
-算法最终需要同时解决三个问题：
-
-1. 为所有候选 Skill 构造短、均衡且尽量唯一的层级 code；
-2. 使语言模型从用户意图生成一个或多个正确 code；
-3. 在推理时排除未分配路径，并将合法 code 展开为原始候选 Skill。
-
-### 1.5 主要符号
-
-| 符号 | 含义 |
-|---|---|
-| $\mathcal S,N$ | 唯一候选 Skill 集合及其大小 |
-| $s_i,d_i$ | 第 $i$ 个 Skill 及其文档 |
-| $q,\mathcal T(q),m_q$ | 用户请求、目标 Skill 集合及其大小 |
-| $\Pi(q),\mathcal Y_\pi(q)$ | 允许的序列化排列集合及一次具体有序监督 |
-| $L,K_\ell$ | code 层数及第 $\ell$ 层分支数 |
-| $\mathcal V_\ell$ | 第 $\ell$ 层原子 code token 集 |
-| $c(s_i),\mathcal C$ | Skill 的完整 code 及已分配合法路径集 |
-| $\mathcal B(\mathbf c)$ | 路径 $\mathbf c$ 对应的碰撞桶 |
-| $f_{\mathrm{emb}}$ | 冻结的 Skill 文本表征函数 |
-| $d,d_e$ | Skill 语义向量维度及连续隐空间维度 |
-| $E_\phi,D_\psi$ | 连续编码器与解码器 |
-| $\mathbf C^{(\ell)}$ | 第 $\ell$ 层向量码本 |
-| $\boldsymbol\delta$ | 多条 code 之间的换行分隔 token 序列 |
-| $P_\theta$ | 自回归生成式 Router |
-
-## 2. 方法总览
-
-### 2.1 整体设计
-
-LLMGen 将多 Skill 选择转换为层级离散 code 的条件生成。完整算法按照“建立 code 空间、学习 query 到 code 的映射、在合法空间内生成并展开 Skill 候选”的顺序执行。
-
-第一离线阶段接收完整候选集合 $\mathcal S$、每个 Skill 的文档，以及训练 query 中出现的 Skill 共用关系。它为 $\mathcal S$ 中每个 Skill 生成一条长度为 $L$ 的 code，并输出固定的层级 token 词表、Skill-to-code 映射和 code-to-Skill registry。该映射一旦进入第二阶段便被冻结。
-
-第二离线阶段接收冻结的 code 映射、预训练语言模型以及 query-target Skill 监督。算法将 code token 加入语言模型词表，并通过三个连续的课程阶段训练 Router：先从 Skill 文档学习每个 Skill 对应的 code，再从单 Skill query 学习用户表达与 code 的对应关系，最后从复杂 query 学习完整的多 Skill code 序列。最终模型直接估计 $P_\theta(\mathbf y\mid q)$，其中 $\mathbf y$ 是由 code、换行符和 EOS 组成的短序列。
-
-推理阶段接收用户 query、训练后的 Router 和冻结 registry。算法首先从 registry 中取得全部当前合法 code，并据此构造前缀约束；随后让 Router 直接生成 code，不再调用文本 Embedding 模型，也不执行向量近邻检索；最后按生成顺序或 code 得分查询 registry，将路径展开为 Skill 候选。
-
-因此，两个离线阶段之间的唯一接口是冻结的离散 code 空间；离线训练与在线推理之间的接口是 Router、层级 token 词表和同版本 registry。
-
-### 2.2 两个离线阶段
-
-**阶段一：层级 Skill code 构建。**
-
-该阶段先将每个 Skill 文档编码为固定语义向量，再利用训练 query 的多 Skill 标签构造协同图。默认方法使用带协同图约束的多层残差量化模型学习连续码本，并通过 Sinkhorn 分配缓解 token 坍缩。码本训练结束后，算法冻结连续模型，在完整候选集合上执行一次层级容量平衡的硬分配，以获得最终离散 code。其输出是后续所有阶段共用的固定 code 空间。
-
-**阶段二：生成式 Router 学习。**
-
-该阶段不再修改 Skill code，而是学习自然语言输入到 code 序列的映射。三个课程阶段具有明确的依赖关系：
-
-1. Memorization：Skill 文档 $\rightarrow$ 单条 Skill code；
-2. Single-skill alignment：单 Skill query $\rightarrow$ 单条 Skill code；
-3. Multi-skill retrieval：复杂 query $\rightarrow$ 多条换行分隔的 Skill code。
-
-后一课程阶段始终以前一阶段的参数为初始化。最后一个阶段还混入部分 memorization 样本，使模型在学习多 Skill 组合时继续复习候选能力与固定 code 的对应关系。
-
-### 2.3 推理阶段
-
-推理提供两种语义不同的约束解码方式。
-
-**多 Skill Greedy 解码**生成一段完整自回归输出。模型每完成一条长度为 $L$ 的 code 后，自行决定输出 EOS，还是输出换行并继续生成下一条 code。因此，该模式同时预测 Skill 内容、Skill 数量和生成顺序。
-
-**单路径 Beam 解码**只搜索一条固定长度 code。给定 beam width
-$B_{\mathrm{beam}}$，每个 beam 都是一条独立路径，算法恰好生成 $L$ 个
-code token，并近似返回累计概率最高的 $B_{\mathrm{beam}}$ 条路径。该模式不生成换行或 EOS，也不是对 Greedy 多行输出的扩展。由于一条路径可能对应碰撞桶，它不能被直接视为一条唯一 Skill。
-
-两种模式都只允许生成 registry 中存在的完整路径。解码得到 code 后，算法先展开对应碰撞桶，再对 Skill 候选执行 top-$k$ 截断；因此，beam 数量控制 code 路径数，而 candidate top-$k$ 控制桶展开后的 Skill 数量。
-
-### 2.4 执行流程
-
-下图描述默认的学习式 code 构建分支及其后的统一训练与推理流程。
-
-```text
-离线阶段一：建立并冻结 Skill code 空间
-
-全部候选 Skill 文档 ──> 固定语义向量 ─────────┐
-训练 query 的目标 Skill ──> Skill 协同图 ─────┤
-                                               v
-                                  多层残差码本学习
-                                               │
-                                               v
-                              全候选集层级平衡硬分配
-                                               │
-                    ┌──────────────────────────┴─────────────────────────┐
-                    v                                                    v
-             层级 token 词表                                  Skill/code registry
-
-
-离线阶段二：学习 query 到 code 的生成映射
-
-预训练语言模型 + 冻结层级 token 词表
-                    │
-                    v
-      Memorization：Skill 文档 ──> 单 code
-                    │
-                    v
-      Alignment：单 Skill query ──> 单 code
-                    │
-                    v
-      Retrieval：复杂 query ──> 多 code 序列
-                    │
-                    v
-             生成式 Skill Router
-
-
-推理
-
-用户 query + Router + 同版本 registry
-                    │
-                    v
-       Greedy 多路径 / Beam 单路径（宽度 B_beam）
-                    │
-                    v
-              合法 code 路径
-                    │
-                    v
-         碰撞桶展开并截断 Skill 候选
-```
-
-### 2.5 可替换的 code 构建方式
-
-第一离线阶段提供两种互斥的 code 构建方式。
-
-- 默认方式是学习式平衡残差量化。它以 Skill 语义和协同关系为学习信号，使 code 倾向于保留相关结构，再通过全候选集硬分配控制利用率与碰撞；语义结构是优化目标，不是硬保证。
-- 备选方式是可解释 taxonomy 编码。它直接把人工层级标签映射到各层 token，路径含义可审计，并以 append-only 规则保持已有标签的稳定性。
-
-两种方式产生相同形式的固定长度 code、token 词表和 registry。因此，第二离线阶段及全部推理算法与 code 构建方式解耦。
-
-## 3. 具体算法介绍
-
-### 3.1 阶段一：层级 Skill code 构建
+**图 2：学习式平衡层级 Skill code 构建。** 冻结文本表征与去重后的
+Skill 协同图共同定义离线输入；图正则化残差量化学习连续码本；冻结
+码本后，对完整候选集合执行容量平衡的层级硬分配；raw 与 assigned
+两组指标共同决定 code 接口能否进入 Router 训练。
 
 #### 3.1.1 Skill 语义表征
 
@@ -738,7 +637,7 @@ $$
 
 且各层约束均可行时，最终叶节点最多包含一个 Skill；若容量不足或约束不可满足，则保留完整碰撞桶 $\mathcal B(\mathbf c)$，而不是丢弃候选。
 
-算法 1 总结默认的学习式 code 构建过程。
+算法 1 总结学习式 code 构建过程。
 
 ```text
 Algorithm 1: Learned Balanced Hierarchical Skill Coding
@@ -834,43 +733,63 @@ $$
 
 平衡后指标良好并不等价于连续码本学习健康，因为强制硬分配可以掩盖 raw code 坍缩。因此，两组指标都必须在 Router 训练前通过预设阈值。
 
-#### 3.1.8 可解释 taxonomy 编码
+### 3.2 阶段二：生成式 Router 学习
 
-当每个 Skill 具有至少 $L$ 层人工 taxonomy
+目标集合 $\mathcal T(q)$ 本身不规定输出顺序。令
 
 $$
-\mathbf h_i
+\Pi(q)
+\subseteq
+\operatorname{Perm}\!\left(\mathcal T(q)\right)
+$$
+
+表示允许的序列化排列集合。对任意 $\pi\in\Pi(q)$，将 $\pi$ 视为从
+$\{1,\ldots,m_q\}$ 到 $\mathcal T(q)$ 的双射，并定义有序监督
+
+$$
+\mathcal Y_\pi(q)
 =
 \left(
-h_i^{(1)},\ldots,h_i^{(L)}
-\right),
-$$
-
-可以跳过语义表征、协同图和残差量化，直接使用前缀局部映射
-
-$$
-\mu_p^{(\ell)}:
-h^{(\ell)}
-\rightarrow
-\{0,\ldots,K_\ell-1\}.
-$$
-
-在前缀 $p$ 下，已有标签始终复用原索引；新标签占用第一个未使用的 child index。由此得到
-
-$$
-a_i^{(\ell)}
-=
-\mu_{(a_i^{(1)},\ldots,a_i^{(\ell-1)})}^{(\ell)}
-\left(
-h_i^{(\ell)}
+\pi(1),\ldots,\pi(m_q)
 \right).
 $$
 
-映射采用 append-only 规则：删除 Skill 只使其路径从当前合法集合中消失，不回收已有标签的 token 语义。若某个前缀的 child 槽位耗尽，默认拒绝新增；显式允许 overflow 时，使用 codebook version、前缀和标签的稳定哈希映射到共享槽位，并由 registry 保留碰撞关系。
+设 $\boldsymbol\delta$ 为换行符在基础 tokenizer 下对应的 token 序列，
+$\mathtt{EOS}$ 为基础 tokenizer 已有的结束 token。将
+$\mathcal Y_\pi(q)$ 中各 Skill 的完整 code 按顺序稳定去重，得到
 
-Taxonomy 编码的优势是每层路径可直接解释，且未溢出时可以稳定增加或删除 Skill；其均衡性、容量利用率和碰撞率则依赖人工 taxonomy 的质量。Append-only 只保证 registry 中已有 code 不被重编号，并不使 Router 自动认识新 Skill；新增 Skill 后仍需提供相应 memorization 或 alignment 监督。无论选择哪种 code 构建方式，后续 Router 算法完全一致。
+$$
+\overline{\mathcal C}_\pi(q)
+=
+\left(
+\mathbf c_{\pi,1},\ldots,\mathbf c_{\pi,r_\pi}
+\right),
+\qquad
+r_\pi\le m_q.
+$$
 
-### 3.2 阶段二：生成式 Router 学习
+Router 的监督序列化函数为
+
+$$
+\operatorname{Ser}(\mathcal Y_\pi(q))
+=
+\mathbf c_{\pi,1}
+\Vert\boldsymbol\delta\Vert
+\cdots
+\Vert\boldsymbol\delta\Vert
+\mathbf c_{\pi,r_\pi}
+\Vert\mathtt{EOS}.
+$$
+
+稳定去重只在多个目标 Skill 共享同一完整 code 时发生。
+
+![生成式 Skill Router 学习](assets/chapter3/router_learning.svg)
+
+**图 3：生成式 Skill Router 学习。** 层级 code token 作为原子 token
+加入 LLM vocabulary；memorization、single-skill alignment 与
+multi-skill retrieval 共享同一序列化接口；训练仅监督 assistant 侧的
+code、换行与 EOS；三个课程阶段顺序初始化，并在 retrieval 阶段混入
+固定 memorization replay。所有数据划分始终引用同一候选集合。
 
 #### 3.2.1 扩展原子词表
 
@@ -942,11 +861,9 @@ $$
 
 Memorization 使用“将 Skill 文档映射到固定层级 code”的任务指令；alignment 和 retrieval 都使用“选择请求所需 Skill，并按行输出 code”的统一路由指令。任务指令和输入文本共同构成条件上下文 $X$。
 
-#### 3.2.3 多 Skill 目标序列
+#### 3.2.3 输出格式与长度
 
-对一次允许排列 $\pi\in\Pi(q)$，第 1.4 节已经定义稳定 code 去重结果
-$\overline{\mathcal C}_\pi(q)$ 及序列化函数
-$\operatorname{Ser}(\mathcal Y_\pi(q))$。记
+对一次允许排列 $\pi\in\Pi(q)$，记
 
 $$
 \mathbf y_{q,\pi}
@@ -997,7 +914,7 @@ $$
 
 #### 3.2.5 目标顺序增强
 
-对于同一请求，第 1.1 节定义的每个允许排列
+对于同一请求，本节开头定义的每个允许排列
 $\pi\in\Pi(q)$ 都可以形成独立监督样本：
 
 $$
@@ -1213,6 +1130,14 @@ Output:
 在默认闭集协议下，验证目标还应在训练监督中至少保留一个正例。该约束避免把“同一候选集上的 query 泛化”误变为“没有任何正监督的 unseen-target 泛化”。
 
 ### 3.3 推理：合法 code 空间内的自回归生成
+
+![合法 code 空间内的自回归 Skill 路由](assets/chapter3/constrained_inference.svg)
+
+**图 4：合法 code 空间内的自回归 Skill 路由。** 同版本 registry
+首先确定 active code 路径并构建前缀树，非法 next token 在每一步被
+屏蔽。Greedy 生成一个包含动态数量路径的完整序列；Beam 独立搜索并
+排序固定长度的单路径。两种模式最终都按路径顺序展开 registry
+碰撞桶，完成 Skill 去重后再应用 candidate top-$k$。
 
 #### 3.3.1 Active registry 与路径前缀树
 
@@ -1597,7 +1522,7 @@ $\prod_\ell K_\ell\ge N$，同时保持每个 Skill 只需两个生成 token。�
 
 删除 Skill 时，只需将其从 active registry 中移除。已有 code 不重新编号；如果对应碰撞桶为空，该路径不再进入约束 trie。
 
-对于学习式平衡编码，直接加入新 Skill 可能破坏全局容量与碰撞约束。默认处理方式是创建新的 codebook version，并在更新后的唯一候选集合上重新执行 code 分配和 Router 对齐。对于可解释 taxonomy 编码，只要相应前缀仍有空闲 child 槽位，新标签可以 append-only 加入而不移动已有路径；但 registry 可追加不代表 Router 已学会新映射，仍需对新增 Skill 执行 memorization 或 alignment 训练。
+直接加入新 Skill 可能破坏全局容量与碰撞约束。默认处理方式是创建新的 codebook version，并在更新后的唯一候选集合上重新执行 code 分配和 Router 对齐。
 
 ### 4.5 方法边界
 

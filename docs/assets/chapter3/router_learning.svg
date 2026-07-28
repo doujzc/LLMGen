@@ -1,0 +1,213 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:lang="zh-CN" width="1680" height="620" viewBox="0 0 1680 620" role="img" aria-labelledby="title desc">
+  <title id="title">生成式 Skill Router 学习</title>
+  <desc id="desc">扩充语言模型原子词表，构造 memorization、single-skill alignment 和 multi-skill retrieval 三类监督，以 target-only 自回归目标按三阶段课程训练，并保持唯一闭集候选空间。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-purple" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#059669"/>
+    </marker>
+    <style>
+      text { font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #111827; }
+      .panel-title { font-size: 21px; font-weight: 700; }
+      .phase { font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+      .label { font-size: 15px; font-weight: 650; }
+      .small { font-size: 13px; font-weight: 500; fill: #475569; }
+      .tiny { font-size: 11.5px; font-weight: 500; fill: #64748b; }
+      .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="1680" height="620" fill="#ffffff"/>
+  <rect x="20" y="20" width="330" height="580" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <rect x="370" y="20" width="540" height="580" rx="10" fill="#fafafa" stroke="#cbd5e1" stroke-width="1.4"/>
+  <rect x="930" y="20" width="370" height="580" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <rect x="1320" y="20" width="340" height="580" rx="10" fill="#fafafa" stroke="#cbd5e1" stroke-width="1.4"/>
+
+  <path d="M350 310 H362" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <path d="M910 310 H922" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <path d="M1300 310 H1312" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#arrow)"/>
+
+  <!-- (a) Atomic vocabulary -->
+  <rect x="42" y="42" width="62" height="22" rx="11" fill="#ede9fe"/>
+  <text x="73" y="57" text-anchor="middle" class="phase" fill="#6d28d9">TOKENS</text>
+  <text x="42" y="91" class="panel-title">(a) 原子词表扩充</text>
+
+  <rect x="45" y="130" width="120" height="102" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="105" y="156" text-anchor="middle" class="label">LLM tokens</text>
+  <rect x="59" y="177" width="40" height="27" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="79" y="195" text-anchor="middle" class="small">天气</text>
+  <rect x="105" y="177" width="40" height="27" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="125" y="195" text-anchor="middle" class="small">地图</text>
+  <text x="150" y="196" text-anchor="middle" class="small">…</text>
+
+  <text x="178" y="187" text-anchor="middle" font-size="25" fill="#64748b">+</text>
+
+  <rect x="191" y="130" width="134" height="102" rx="8" fill="#ffffff" stroke="#93c5fd" stroke-width="1.2"/>
+  <text x="258" y="156" text-anchor="middle" class="label">Code tokens</text>
+  <rect x="207" y="177" width="45" height="27" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="229.5" y="195" text-anchor="middle" class="mono">L1</text>
+  <rect x="260" y="177" width="45" height="27" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="282.5" y="195" text-anchor="middle" class="mono">L2</text>
+
+  <path d="M105 232 V254 H185 M258 232 V254 H185 V269" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <rect x="58" y="278" width="254" height="101" rx="8" fill="#ffffff" stroke="#a78bfa" stroke-width="1.4"/>
+  <text x="185" y="305" text-anchor="middle" class="label">Expanded vocabulary</text>
+  <rect x="78" y="325" width="39" height="27" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="97.5" y="343" text-anchor="middle" class="small">天气</text>
+  <rect x="123" y="325" width="39" height="27" rx="5" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="142.5" y="343" text-anchor="middle" class="small">地图</text>
+  <text x="174" y="344" text-anchor="middle" class="small">…</text>
+  <rect x="194" y="325" width="43" height="27" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="215.5" y="343" text-anchor="middle" class="mono">L1</text>
+  <rect x="245" y="325" width="43" height="27" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="266.5" y="343" text-anchor="middle" class="mono">L2</text>
+  <path d="M185 379 V407" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <rect x="85" y="416" width="200" height="105" rx="9" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="111" y="441" width="38" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa"/>
+  <rect x="166" y="441" width="38" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa"/>
+  <rect x="221" y="441" width="38" height="32" rx="5" fill="#ede9fe" stroke="#a78bfa"/>
+  <path d="M149 457 H166 M204 457 H221" fill="none" stroke="#7c3aed" stroke-width="1.8"/>
+  <text x="185" y="502" text-anchor="middle" class="label">Router LLM</text>
+  <text x="185" y="548" text-anchor="middle" class="small">每个 code token 对应唯一 token ID</text>
+
+  <!-- (b) Supervision -->
+  <rect x="392" y="42" width="53" height="22" rx="11" fill="#e0f2fe"/>
+  <text x="418.5" y="57" text-anchor="middle" class="phase" fill="#0369a1">DATA</text>
+  <text x="392" y="91" class="panel-title">(b) 三类路由监督</text>
+
+  <rect x="395" y="122" width="490" height="106" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <rect x="411" y="137" width="116" height="25" rx="12.5" fill="#ede9fe"/>
+  <text x="469" y="154" text-anchor="middle" class="phase" fill="#6d28d9">MEMORIZATION</text>
+  <rect x="411" y="175" width="128" height="36" rx="6" fill="#f8fafc" stroke="#cbd5e1"/>
+  <path d="M427 185 H520 M427 195 H509" fill="none" stroke="#64748b" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="475" y="220" text-anchor="middle" class="tiny">Skill 文档</text>
+  <path d="M548 193 H588" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <rect x="598" y="177" width="100" height="33" rx="6" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="648" y="198" text-anchor="middle" class="mono">L1 : a</text>
+  <rect x="708" y="177" width="100" height="33" rx="6" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="758" y="198" text-anchor="middle" class="mono">L2 : b</text>
+  <text x="843" y="198" text-anchor="middle" class="small">EOS</text>
+
+  <rect x="395" y="242" width="490" height="106" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <rect x="411" y="257" width="104" height="25" rx="12.5" fill="#dbeafe"/>
+  <text x="463" y="274" text-anchor="middle" class="phase" fill="#1d4ed8">ALIGNMENT</text>
+  <rect x="411" y="295" width="128" height="36" rx="18" fill="#eff6ff" stroke="#93c5fd"/>
+  <text x="475" y="318" text-anchor="middle" class="small">“明天天气如何？”</text>
+  <path d="M548 313 H588" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <rect x="598" y="297" width="100" height="33" rx="6" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="648" y="318" text-anchor="middle" class="mono">L1 : a</text>
+  <rect x="708" y="297" width="100" height="33" rx="6" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="758" y="318" text-anchor="middle" class="mono">L2 : b</text>
+  <text x="843" y="318" text-anchor="middle" class="small">EOS</text>
+
+  <rect x="395" y="362" width="490" height="136" rx="8" fill="#ffffff" stroke="#60a5fa" stroke-width="1.3"/>
+  <rect x="411" y="377" width="100" height="25" rx="12.5" fill="#dcfce7"/>
+  <text x="461" y="394" text-anchor="middle" class="phase" fill="#047857">RETRIEVAL</text>
+  <rect x="411" y="414" width="143" height="55" rx="8" fill="#f0fdf4" stroke="#86efac"/>
+  <text x="482.5" y="436" text-anchor="middle" class="small">“规划五一出游”</text>
+  <text x="482.5" y="457" text-anchor="middle" class="tiny">explicit + implicit</text>
+  <path d="M563 441 H595" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <rect x="605" y="400" width="90" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="650" y="420" text-anchor="middle" class="mono">L1 : a</text>
+  <rect x="704" y="400" width="90" height="30" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="749" y="420" text-anchor="middle" class="mono">L2 : b</text>
+  <line x1="612" y1="440" x2="787" y2="440" stroke="#cbd5e1" stroke-width="1.2"/>
+  <rect x="605" y="451" width="90" height="30" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="650" y="471" text-anchor="middle" class="mono">L1 : c</text>
+  <rect x="704" y="451" width="90" height="30" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="749" y="471" text-anchor="middle" class="mono">L2 : d</text>
+  <text x="838" y="446" text-anchor="middle" class="small">newline</text>
+
+  <rect x="413" y="522" width="454" height="50" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="491" y="552" text-anchor="middle" class="label">顺序增强</text>
+  <rect x="570" y="534" width="111" height="27" rx="5" fill="#eff6ff"/>
+  <text x="625.5" y="552" text-anchor="middle" class="mono">A → B</text>
+  <text x="700" y="552" text-anchor="middle" class="small">+</text>
+  <rect x="721" y="534" width="111" height="27" rx="5" fill="#eff6ff"/>
+  <text x="776.5" y="552" text-anchor="middle" class="mono">B → A</text>
+
+  <!-- (c) Target-only objective -->
+  <rect x="952" y="42" width="50" height="22" rx="11" fill="#fef3c7"/>
+  <text x="977" y="57" text-anchor="middle" class="phase" fill="#92400e">LOSS</text>
+  <text x="952" y="91" class="panel-title">(c) Target-only 自回归目标</text>
+
+  <rect x="955" y="127" width="320" height="220" rx="9" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="1115" y="155" text-anchor="middle" class="label">Causal sequence</text>
+  <rect x="974" y="178" width="126" height="36" rx="6" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="1037" y="201" text-anchor="middle" class="small">instruction</text>
+  <rect x="1109" y="178" width="105" height="36" rx="6" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <text x="1161.5" y="201" text-anchor="middle" class="small">query</text>
+  <line x1="1225" y1="172" x2="1225" y2="222" stroke="#94a3b8" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <text x="1251" y="201" text-anchor="middle" class="small">→</text>
+
+  <path d="M985 254 H1251" fill="none" stroke="#94a3b8" stroke-width="1.4" marker-end="url(#arrow)"/>
+  <rect x="974" y="269" width="44" height="33" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="996" y="290" text-anchor="middle" class="mono">L1</text>
+  <rect x="1024" y="269" width="44" height="33" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="1046" y="290" text-anchor="middle" class="mono">L2</text>
+  <rect x="1074" y="269" width="44" height="33" rx="5" fill="#fef3c7" stroke="#f59e0b"/>
+  <text x="1096" y="290" text-anchor="middle" class="mono">NL</text>
+  <rect x="1124" y="269" width="44" height="33" rx="5" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="1146" y="290" text-anchor="middle" class="mono">L1</text>
+  <rect x="1174" y="269" width="44" height="33" rx="5" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="1196" y="290" text-anchor="middle" class="mono">L2</text>
+  <rect x="1224" y="269" width="44" height="33" rx="5" fill="#dcfce7" stroke="#10b981"/>
+  <text x="1246" y="290" text-anchor="middle" class="mono">EOS</text>
+  <text x="1094" y="328" text-anchor="middle" class="small" fill="#059669">✓ token loss</text>
+
+  <rect x="972" y="370" width="286" height="72" rx="8" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="1017" y="399" text-anchor="middle" class="phase" fill="#64748b">MASK</text>
+  <text x="1120" y="399" text-anchor="middle" class="small">prompt labels</text>
+  <path d="M986 414 H1242" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="1017" y="433" text-anchor="middle" class="phase" fill="#047857">LOSS</text>
+  <text x="1120" y="433" text-anchor="middle" class="small">code + newline + EOS</text>
+
+  <rect x="972" y="470" width="286" height="86" rx="8" fill="#ffffff" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="1115" y="497" text-anchor="middle" class="label">Training distribution</text>
+  <text x="1115" y="521" text-anchor="middle" class="small">full-vocabulary softmax</text>
+  <text x="1115" y="544" text-anchor="middle" class="small">no trie / grammar mask</text>
+
+  <!-- (d) Curriculum and closed set -->
+  <rect x="1342" y="42" width="73" height="22" rx="11" fill="#dcfce7"/>
+  <text x="1378.5" y="57" text-anchor="middle" class="phase" fill="#047857">SCHEDULE</text>
+  <text x="1342" y="91" class="panel-title">(d) 课程训练与闭集约束</text>
+
+  <rect x="1360" y="126" width="260" height="68" rx="8" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.3"/>
+  <text x="1490" y="153" text-anchor="middle" class="label">1 · Memorization</text>
+  <text x="1490" y="178" text-anchor="middle" class="small">document → one code</text>
+  <path d="M1490 194 V216" fill="none" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrow-purple)"/>
+
+  <rect x="1360" y="225" width="260" height="68" rx="8" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.3"/>
+  <text x="1490" y="252" text-anchor="middle" class="label">2 · Alignment</text>
+  <text x="1490" y="277" text-anchor="middle" class="small">single query → one code</text>
+  <path d="M1490 293 V315" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+  <rect x="1360" y="324" width="260" height="78" rx="8" fill="#f0fdf4" stroke="#34d399" stroke-width="1.4"/>
+  <text x="1490" y="351" text-anchor="middle" class="label">3 · Retrieval</text>
+  <text x="1490" y="376" text-anchor="middle" class="small">multi query → multiple codes</text>
+  <rect x="1533" y="380" width="70" height="18" rx="9" fill="#ede9fe"/>
+  <text x="1568" y="393" text-anchor="middle" class="tiny">+ replay</text>
+  <path d="M1360 160 C1328 160 1328 389 1352 389" fill="none" stroke="#7c3aed" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow-purple)"/>
+  <path d="M1490 402 V421" fill="none" stroke="#059669" stroke-width="1.8" marker-end="url(#arrow-green)"/>
+  <rect x="1420" y="428" width="140" height="37" rx="18.5" fill="#ecfdf5" stroke="#10b981"/>
+  <text x="1490" y="452" text-anchor="middle" class="label">Router θ*</text>
+
+  <rect x="1348" y="493" width="284" height="82" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="1490" y="516" text-anchor="middle" class="label">Single closed candidate set</text>
+  <rect x="1364" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
+  <text x="1389.5" y="552" text-anchor="middle" class="tiny">train q</text>
+  <rect x="1422" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
+  <text x="1447.5" y="552" text-anchor="middle" class="tiny">val q</text>
+  <rect x="1480" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
+  <text x="1505.5" y="552" text-anchor="middle" class="tiny">test q</text>
+  <path d="M1538 547 H1555" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect x="1563" y="532" width="52" height="31" rx="6" fill="#dcfce7" stroke="#34d399"/>
+  <text x="1589" y="552" text-anchor="middle" class="mono">S</text>
+</svg>
