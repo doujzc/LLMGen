@@ -21,6 +21,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_ROUTES = {
     "/": STATIC_DIR / "index.html",
     "/static/app.js": STATIC_DIR / "app.js",
+    "/static/skill-router-mark.svg": STATIC_DIR / "skill-router-mark.svg",
     "/static/styles.css": STATIC_DIR / "styles.css",
 }
 

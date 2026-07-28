@@ -305,38 +305,6 @@ async function showSkill(skillOrId, context = "main") {
   }
 }
 
-function renderPaths(paths, beamMode = false) {
-  const container = $("#paths");
-  container.replaceChildren();
-  paths.forEach((path, index) => {
-    const row = textNode("article", "path-row");
-    row.append(
-      textNode(
-        "span",
-        "path-number",
-        `${beamMode ? "CODE" : "PATH"} ${String(index + 1).padStart(2, "0")}`,
-      ),
-    );
-    const tokens = textNode("div", "tokens");
-    (path.code_tokens || []).forEach((token) => {
-      tokens.append(textNode("code", "token", token));
-    });
-    row.append(
-      tokens,
-      textNode(
-        "span",
-        "path-skill-count",
-        `${(path.skills || []).length} decoded Skills`,
-      ),
-      textNode("span", "path-score", formatScore(path.score)),
-    );
-    container.append(row);
-  });
-  const unit = beamMode ? "code" : "path";
-  $("#path-count").textContent =
-    `${paths.length} ${unit}${paths.length === 1 ? "" : "s"}`;
-}
-
 function renderCandidates(candidates) {
   const container = $("#candidate-rows");
   container.replaceChildren();
@@ -362,8 +330,23 @@ function renderCandidates(candidates) {
     const nameLine = textNode("span", "candidate-name-line");
     nameLine.append(
       textNode("strong", "candidate-name", candidate.name || candidate.skill_id),
-      textNode("span", "domain-text", candidate.domain || "未分类"),
     );
+    const meta = textNode("span", "candidate-meta");
+    meta.append(
+      textNode("span", "candidate-domain", candidate.domain || "未分类"),
+    );
+    const codePath = textNode("span", "candidate-code-path");
+    const tokens = skillTokens(candidate);
+    if (tokens.length) {
+      tokens.forEach((token) => {
+        codePath.append(textNode("code", "candidate-token", token));
+      });
+    } else {
+      codePath.append(
+        textNode("code", "candidate-token", candidate.code_text || "NO CODE"),
+      );
+    }
+    meta.append(codePath);
     copy.append(
       nameLine,
       textNode(
@@ -373,12 +356,17 @@ function renderCandidates(candidates) {
           candidate.description ||
           candidate.skill_id,
       ),
+      meta,
+    );
+    const score = textNode("span", "candidate-score-block");
+    score.append(
+      textNode("strong", "candidate-score", formatScore(candidate.score)),
+      textNode("small", "candidate-score-label", "model score"),
     );
     row.append(
       textNode("span", "candidate-rank", String(index + 1).padStart(2, "0")),
       copy,
-      textNode("code", "candidate-code", candidate.code_text),
-      textNode("span", "candidate-score", formatScore(candidate.score)),
+      score,
     );
     row.addEventListener("click", () => showSkill(candidate, "main"));
     container.append(row);
@@ -416,21 +404,13 @@ function renderResult(result, { batch = false } = {}) {
   $("#decode-summary").textContent = beamMode
     ? `Beam Search · Top ${beamWidth} codes`
     : "Greedy Autoregressive";
-  $("#raw-output-label").textContent = beamMode
-    ? "查看 Top-K 单行 Code 输出"
-    : "查看原始自回归输出";
-  $("#paths-heading").textContent = beamMode ? "Code 候选" : "生成 Code 路径";
   $("#candidate-hint").textContent = beamMode
-    ? "按 Beam 的 Code 排名展开为 Skill"
-    : "同一路径内按候选原始顺序展开";
-  $("#result-subtitle").textContent = beamMode
-    ? `单行 Code Top ${beamWidth} 解码后的候选`
-    : `多路径自回归解码后的候选`;
-  $("#result-query").textContent = result.query;
-  $("#generated-text").textContent = result.generated_text || "(empty)";
+    ? "按 Beam 概率排序，Code 路径随候选一并展示"
+    : "按生成顺序与模型得分展开，Code 路径随候选一并展示";
+  const candidateCount = (result.candidates || []).length;
+  $("#result-subtitle").textContent =
+    `${candidateCount} 个候选 Skill · 点击候选查看详情`;
   renderCandidates(result.candidates || []);
-  renderPaths(result.paths || [], beamMode);
-  $("#raw-json").textContent = JSON.stringify(result, null, 2);
 }
 
 function renderSingleResult(result) {

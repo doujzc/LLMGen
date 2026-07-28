@@ -324,3 +324,19 @@ def test_web_api_health_catalog_and_inference() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_web_serves_skill_router_brand_mark() -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_class(StubRuntime()))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urlopen(base + "/static/skill-router-mark.svg", timeout=2) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "image/svg+xml"
+            assert b"Skill Router branching mark" in response.read()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

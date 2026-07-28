@@ -1,15 +1,13 @@
 # Product Design QA
 
 - Source visual truth: `/mnt/c/Users/T/.codex/generated_images/019fa26f-688c-7353-a674-6a1ba2cd7d6e/call_neZqW7Va1nxwO4l9vcZb76JL.png`
-- Implementation screenshot: `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-router-implemented.png`
+- Implementation screenshot: `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-results-skills-only.png`
 - Full catalog screenshot: `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/llmgen-catalog-implemented.png`
 - Viewport: 1440 × 1024
 - State: completed single-query Greedy Autoregressive route; 10 Skill candidates,
-  4 Code paths, first candidate selected with inline detail
+  each with inline Code tokens; first candidate selected with inline detail
 - Full-view comparison:
-  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/design-qa-comparison.png`
-- Focused center comparison:
-  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/design-qa-focus-center.png`
+  `/mnt/c/Users/T/.codex/visualizations/2026/07/27/019fa26f-688c-7353-a674-6a1ba2cd7d6e/design-qa-skills-only-comparison.png`
 
 ## Findings
 
@@ -21,17 +19,17 @@ No actionable P0, P1, or P2 issues remain.
   and mobile widths.
 - Spacing and layout rhythm: the three-pane workbench, compact top bar, numbered
   sections, continuous surfaces, and restrained dividers match the selected
-  direction. The requested product change is intentional: decoded Skill candidates
-  now dominate the center pane, while Code paths occupy a compact two-row strip.
+  direction. The center pane is now exclusively a ranked Skill list; Query and
+  standalone Code regions were removed, and each Skill carries its own Code tokens.
 - Colors and visual tokens: warm ivory surfaces, near-black text, vermilion
   selection/action states, muted gray metadata, and green scores/status remain
   consistent with the reference. Contrast is sufficient in inspected states.
 - Image quality and asset fidelity: the selected visual contains no photographic
-  or illustrative assets. The existing LG text mark is preserved; the interface
-  does not replace target imagery or icons with placeholder/CSS artwork.
+  or illustrative assets. The ambiguous LG badge was replaced with a dedicated
+  input-to-branches Skill Router mark and matching browser favicon.
 - Copy and content: every visible method label now says
   `Greedy Autoregressive`; Beam Search, batch input, Top K controls, model metrics,
-  candidate details, and raw-output access remain available.
+  candidate Code tokens, and Skill details remain available.
 - Interaction and accessibility: keyboard focus styles, semantic buttons, tabs,
   labels, loading/empty/result states, reduced-motion handling, and Escape/keyboard
   routing behavior are present. Browser checks found no console errors or page-level
@@ -45,13 +43,13 @@ No actionable P0, P1, or P2 issues remain.
 
 ## Comparison history
 
-1. Initial implementation placed the candidate list first but left the compact
-   Code section below the first viewport (P2 discoverability).
-2. The Code section was moved directly below the Query summary, compressed into
-   a two-column strip, and its raw output moved into disclosure. The candidate list
-   still owns the majority of the center pane.
-3. Post-fix capture and focused comparison show the requested hierarchy with no
-   remaining P0/P1/P2 mismatch.
+1. The first candidate-focused implementation retained Query and a compact
+   standalone Code block in the result pane.
+2. The revised requirement removed both blocks and the raw JSON disclosure.
+   Code tokens moved into each candidate row beside its domain metadata.
+3. Browser verification confirms 10 candidates, two tokens per candidate,
+   selected-detail linkage, no stale result blocks, no console errors, and no
+   page-level horizontal overflow.
 
 ## Open questions
 
@@ -60,7 +58,8 @@ None.
 ## Implementation checklist
 
 - [x] Candidate Skills are the primary center-pane output.
-- [x] Code paths remain visible in a compact supporting region.
+- [x] Route results contain no duplicated Query or standalone Code section.
+- [x] Every candidate Skill displays its own hierarchical Code tokens.
 - [x] Greedy copy is renamed to Greedy Autoregressive.
 - [x] Full-page candidate directory loads the unique complete candidate set.
 - [x] Hierarchical Code tree filters the same candidate collection.

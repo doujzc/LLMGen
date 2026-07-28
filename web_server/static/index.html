@@ -5,13 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
     <title>LLMGen Skill Router Lab</title>
+    <link rel="icon" type="image/svg+xml" href="/static/skill-router-mark.svg" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="LLMGen 首页">
-          <span class="brand-mark">LG</span>
+        <a class="brand" href="/" aria-label="Skill Router Lab 首页">
+          <img
+            class="brand-mark"
+            src="/static/skill-router-mark.svg"
+            alt=""
+            width="42"
+            height="42"
+          />
           <span class="brand-copy">
             <strong>Skill Router Lab</strong>
             <small>LLMGen · Manual evaluation console</small>
@@ -157,7 +164,7 @@
               <span class="empty-index">03</span>
               <h2>等待第一次路由</h2>
               <p>
-                候选 Skill 会成为这里的主结果；生成的 Code 路径保留为紧凑的解码依据。
+                路由完成后，这里会按模型得分展示候选 Skill。
               </p>
             </div>
 
@@ -173,7 +180,7 @@
                   <span class="step">03</span>
                   <div>
                     <h2>路由结果</h2>
-                    <p id="result-subtitle">按模型得分查看候选 Skill</p>
+                    <p id="result-subtitle">按模型排序核对候选 Skill</p>
                   </div>
                 </div>
                 <div class="result-meta">
@@ -199,47 +206,21 @@
                 </div>
               </div>
 
-              <div class="query-output">
-                <span class="block-label">QUERY</span>
-                <p id="result-query"></p>
-              </div>
-
-              <section class="code-section" aria-labelledby="paths-heading">
-                <div class="section-title code-title">
-                  <div>
-                    <h3 id="paths-heading">生成 Code 路径</h3>
-                    <span>作为 Skill 解码依据</span>
-                  </div>
-                  <span id="path-count" class="count-label">0 paths</span>
-                </div>
-                <div id="paths" class="path-list"></div>
-                <details class="generated-details">
-                  <summary id="raw-output-label">查看原始自回归输出</summary>
-                  <pre id="generated-text"></pre>
-                </details>
-              </section>
-
               <section class="candidate-section" aria-labelledby="candidates-heading">
                 <div class="section-title">
                   <div>
                     <h3 id="candidates-heading">候选 Skills</h3>
-                    <span id="candidate-hint">同一路径内按候选原始顺序展开</span>
+                    <span id="candidate-hint">Code 路径随候选一并展示</span>
                   </div>
                   <span id="candidate-count" class="count-label">0 candidates</span>
                 </div>
                 <div class="candidate-columns" aria-hidden="true">
                   <span>Rank</span>
-                  <span>Skill / 能力说明</span>
-                  <span>Code</span>
+                  <span>候选 Skill / Code 路径</span>
                   <span>Score</span>
                 </div>
                 <div id="candidate-rows" class="candidate-rows"></div>
               </section>
-
-              <details class="raw-details">
-                <summary>查看完整 JSON</summary>
-                <pre id="raw-json"></pre>
-              </details>
             </div>
           </section>
 
