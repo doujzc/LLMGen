@@ -203,15 +203,30 @@ $$
 $\mathcal B(\mathbf c)$ 是路径 $\mathbf c$ 的碰撞桶。当
 $|\mathcal B(\mathbf c)|>1$ 时，仅根据 code 无法区分桶内 Skill。因此，第一阶段需要在保留语义与协同结构的同时，均衡使用各层 token 并尽量减少完整路径碰撞。
 
-下面介绍学习式平衡编码如何构建并冻结
-$(\mathcal V_{\mathrm{code}},c,\mathcal B)$ 接口。
+下面从两个互补视角介绍如何构建
+$(\mathcal V_{\mathrm{code}},c,\mathcal B)$ 接口。图 2 固定所有参数，
+说明单个 Skill 如何经过逐层残差量化得到一个 code；图 3 则自包含地
+给出码本训练所需的数据、平衡量化前向、联合目标和参数更新闭环。
+这里的“前向计算”指第一阶段离线 tokenizer 的索引计算，而不是
+第 3.3 节的在线 Router 推理。
 
-![学习式平衡层级 Skill code 构建](assets/chapter3/code_construction.svg)
+![层级 Skill code 的前向计算](assets/chapter3/rqvae_primer.svg)
 
-**图 2：学习式平衡层级 Skill code 构建。** 冻结文本表征与去重后的
-Skill 协同图共同定义离线输入；图正则化残差量化学习连续码本；冻结
-码本后，对完整候选集合执行容量平衡的层级硬分配；raw 与 assigned
-两组指标共同决定 code 接口能否进入 Router 训练。
+**图 2：层级 Skill code 的前向计算。** Skill 文档依次经过冻结的文本
+表征器和编码器得到初始残差；每层计算当前残差到该层码本的距离，选择
+一个索引并减去对应码本向量；$L$ 个索引最终被序列化为 $L$ 个原子
+token。训练后先对完整候选集合执行与训练相同的逐层 Sinkhorn，得到
+raw code；最终 registry 还可在相同逐层距离上执行容量平衡匹配。
+
+![图正则化残差码本的训练流程](assets/chapter3/code_construction.svg)
+
+**图 3：图正则化残差码本的训练流程。** Skill 文档经冻结文本表征器
+得到语义向量，多 Skill 目标构成加权协同图；边感知采样同时产生
+mini-batch 向量与 induced edges。每层残差量化先计算距离矩阵，再以
+Sinkhorn 获得 batch 平衡分配并硬化为 code index；选中向量用于残差
+递推和语义重构。重构、残差量化与图平滑组成联合目标，反向传播仅更新
+编码器、解码器和各层码本。训练后的全候选硬分配与质量门控分别见
+第 3.1.6 节和第 3.1.7 节。
 
 #### 3.1.1 Skill 语义表征
 
@@ -266,7 +281,12 @@ $$
 
 #### 3.1.3 多层残差量化
 
-默认 code 构建器采用图正则化残差量化自编码器。编码器先将语义向量压缩到连续隐空间：
+默认 code 构建器采用图正则化残差量化自编码器，其冻结参数后的前向
+递推见图 2。本文为每一层配置独立码本：第 $\ell$ 层只量化前
+$\ell-1$ 层尚未解释的残差；各层选中向量之和用于语义重构，而选中
+索引按层排列后直接构成离散 code。
+
+编码器先将语义向量压缩到连续隐空间：
 
 $$
 \mathbf z_i
@@ -429,7 +449,15 @@ a_i^{(\ell)}
 \Pi_{ik}^{(\ell)}.
 $$
 
-当 $\epsilon_\ell=0$ 时，该层退化为普通残差最近邻分配。Sinkhorn 只约束当前 batch 的软质量分布，不保证全候选集合上的硬索引严格均衡，因此它不能替代训练完成后的全局硬分配。
+当 $\epsilon_\ell=0$ 时，该层退化为普通残差最近邻分配。训练时
+Sinkhorn 作用于当前 mini-batch；训练后生成 raw code 时，先分批计算
+encoder latent，再汇总完整候选集合并以相同的距离归一化、温度和迭代
+次数执行一次逐层 Sinkhorn。后一步不能按导出 batch 分开，否则同一
+Skill 的 code 会随 batch size 和同批样本变化。
+
+即使输入是完整候选集合，Sinkhorn 也只约束软质量分布，其逐行
+$\arg\max$ 后的硬索引不保证严格满足 floor/ceil 容量和前缀内唯一性，
+因此仍不能替代需要这些确定性保证的最终全局硬分配。
 
 #### 3.1.5 图正则化量化目标
 
@@ -524,7 +552,8 @@ $$
 
 训练 batch 采用边感知采样：先随机采样基础 Skill，再按边权为其中的 Skill 采样协同邻居，最后随机补齐 batch。该采样提高有效协同边进入 $\mathcal E_B$ 的概率，但不改变上述目标。
 
-训练期间的 raw code 评估关闭 Sinkhorn，使用逐层残差最近邻。默认模型选择按
+训练期间的 raw code 评估会收集完整候选集合的 latent，并使用与训练
+相同的逐层 Sinkhorn。默认模型选择按
 
 $$
 \left(
@@ -659,13 +688,15 @@ Output:
 5:     sample an edge-aware mini-batch
 6:     assign each residual with per-level Sinkhorn balancing
 7:     update E, D, and codebooks using L_code
-8: select the model by raw collision rate and then L_code
-9: freeze E, D, and all codebooks
-10: obtain final indices by hierarchical capacity-balanced hard assignment
-11: render every index tuple as L level-specific code tokens
-12: group all Skills by complete code to construct registry B
-13: validate raw-code and final-code quality
-14: return V_code, c, B
+8:     evaluate full-catalog raw codes with the same per-level Sinkhorn
+9: select the model by raw collision rate and then L_code
+10: freeze E, D, and all codebooks
+11: recompute full-catalog raw codes with per-level Sinkhorn
+12: optionally obtain final indices by hierarchical capacity-balanced hard assignment
+13: render every index tuple as L level-specific code tokens
+14: group all Skills by complete code to construct registry B
+15: validate raw-code and final-code quality
+16: return V_code, c, B
 ```
 
 #### 3.1.7 Code 质量判据
@@ -726,12 +757,15 @@ B_{\max}
 |\mathcal B(\mathbf c)|.
 $$
 
-质量检查包含两组指标：
+实现同时记录三种视图：
 
-- raw 指标：对冻结码本执行普通残差最近邻得到，用于判断连续码本是否坍缩；
-- assigned 指标：对最终层级平衡分配得到，用于判断 Router 的实际预测空间是否均衡且可辨识。
+- nearest 诊断：逐 Skill 残差最近邻，仅用于观察码本几何是否坍缩；
+- raw 指标：对完整候选集合执行训练同构的逐层 Sinkhorn 得到，是 checkpoint 选择和 raw 质量门的依据；
+- assigned 指标：对实际输出的最终分配得到，用于判断 Router 的预测空间是否均衡且可辨识。
 
-平衡后指标良好并不等价于连续码本学习健康，因为强制硬分配可以掩盖 raw code 坍缩。因此，两组指标都必须在 Router 训练前通过预设阈值。
+最终硬分配指标良好并不等价于连续码本学习健康，因为容量约束可以掩盖
+码本坍缩。因此，Router 训练前必须让 raw Sinkhorn 和最终 assigned
+指标通过预设阈值，并同时保留 nearest 诊断用于定位异常。
 
 ### 3.2 阶段二：生成式 Router 学习
 
@@ -785,11 +819,14 @@ $$
 
 ![生成式 Skill Router 学习](assets/chapter3/router_learning.svg)
 
-**图 3：生成式 Skill Router 学习。** 层级 code token 作为原子 token
+**图 4：生成式 Skill Router 学习。** 层级 code token 作为原子 token
 加入 LLM vocabulary；memorization、single-skill alignment 与
-multi-skill retrieval 共享同一序列化接口；训练仅监督 assistant 侧的
-code、换行与 EOS；三个课程阶段顺序初始化，并在 retrieval 阶段混入
-固定 memorization replay。所有数据划分始终引用同一候选集合。
+multi-skill retrieval 共享同一序列化接口。子图 (b) 描述三类监督样本
+的输入与目标，子图 (d) 则仅描述参数状态的顺序继承：
+$\theta_0\rightarrow\theta_{\mathrm{mem}}\rightarrow
+\theta_{\mathrm{align}}\rightarrow\theta^*$。训练只监督 assistant 侧的
+code、换行与 EOS，并在最终 retrieval 阶段混入固定 memorization
+replay；所有数据划分始终引用同一候选集合。
 
 #### 3.2.1 扩展原子词表
 
@@ -1133,11 +1170,13 @@ Output:
 
 ![合法 code 空间内的自回归 Skill 路由](assets/chapter3/constrained_inference.svg)
 
-**图 4：合法 code 空间内的自回归 Skill 路由。** 同版本 registry
-首先确定 active code 路径并构建前缀树，非法 next token 在每一步被
-屏蔽。Greedy 生成一个包含动态数量路径的完整序列；Beam 独立搜索并
-排序固定长度的单路径。两种模式最终都按路径顺序展开 registry
-碰撞桶，完成 Skill 去重后再应用 candidate top-$k$。
+**图 5：合法 code 空间内的自回归 Skill 路由。** 同版本 registry
+首先确定 active code 路径并构建前缀树。Router LLM
+$p_{\theta^*}$ 接收用户 query，在每个自回归位置产生全词表 logits；
+前缀树随后将非法 next token 屏蔽为 $-\infty$。Greedy 生成一个包含
+动态数量路径的完整序列；Beam 独立搜索并排序固定长度的单路径。两种
+模式最终都按路径顺序展开 registry 碰撞桶，完成 Skill 去重后再应用
+candidate top-$k$。
 
 #### 3.3.1 Active registry 与路径前缀树
 
@@ -1534,3 +1573,81 @@ $\prod_\ell K_\ell\ge N$，同时保持每个 Skill 只需两个生成 token。�
 4. 对所有目标排列做无差别增强会提高顺序鲁棒性，但会弱化输出顺序作为唯一执行依赖的含义。
 5. 有限宽度 Beam 是单路径 Top-$B_{\mathrm{beam}}$ 的近似搜索，不产生多路径组合。
 6. 碰撞桶内没有二阶段语义消歧，精确 Skill 选择的上限由第一阶段 code 唯一性决定。
+
+
+
+## 5 存在的问题
+
+### 5.1 增量修改
+
+完整重建会重新训练层级 tokenizer、全局分配 code，并执行 Router 的全部
+课程阶段，适合候选集合发生较大变化时使用。对于日常的少量候选增删，
+系统提供冻结 codebook 的低成本增量路径。设第 $t$ 个版本的 active
+候选集合和合法路径集合分别为
+
+$$
+\mathcal S_{\mathrm{act}}^{(t)}
+\quad\text{和}\quad
+\mathcal C_{\mathrm{act}}^{(t)}.
+$$
+
+增量操作只产生一份新的 candidate-state overlay；Stage 1 encoder、各层
+codebook、code token 词表以及所有已有 Skill 的 code 均保持冻结。overlay
+记录 active Skill-to-code 映射、碰撞桶、合法路径和父版本 hash，推理侧始终
+从这一份状态重建约束 trie，不会并存多套候选空间。
+
+| 操作 | 主要计算 | 参数更新 | 典型时延 |
+|---|---|---|---|
+| 增加 Skill | 文档 embedding、冻结码本赋码、少量样本对齐 | 可选的小规模 LoRA | 分钟级 |
+| 删除 Skill | 更新 active registry、碰撞桶和 trie | 无 | 实时 |
+
+对于新增 Skill $s_{\mathrm{new}}$，先使用与原索引一致的 embedding 模型和
+冻结 encoder 得到连续表示，再在不修改旧路径的前提下选择最近的空闲完整
+路径：
+
+$$
+c(s_{\mathrm{new}})
+=
+\mathop{\arg\min}_{\mathbf a\in
+\mathcal C_{\mathrm{full}}\setminus
+\mathcal C_{\mathrm{act}}^{(t)}}
+\left\|
+E_\phi\!\left(f_{\mathrm{emb}}(d_{\mathrm{new}})\right)
+-
+\sum_{\ell=1}^{L}\mathbf e_{a^{(\ell)}}^{(\ell)}
+\right\|_2^2.
+$$
+
+实现以有限宽度 beam 近似搜索该空闲路径。完成赋码后，将新 Skill 加入
+overlay，并可用一条文档 Memorization 样本和少量直接 query 做增量 LoRA，
+使 Router 学会生成新 code。包含 embedding、样本构造和小规模参数对齐的
+完整新增流程为分钟级；只更新索引会更快，但更依赖原 Router 对新能力的
+零样本泛化。
+
+删除 $s_r$ 不执行 embedding、码本计算或模型训练：
+
+$$
+\mathcal S_{\mathrm{act}}^{(t+1)}
+=
+\mathcal S_{\mathrm{act}}^{(t)}
+\setminus\{s_r\}.
+$$
+
+系统直接重建对应碰撞桶和合法路径集合。若同一路径仍有其他 Skill，则保留
+该 trie path；若桶变空，则立即移除该 path。因此索引侧删除属于实时操作，
+服务进程中的状态传播时间由具体部署方式决定。
+
+这种方法以“旧 code 稳定”为优先目标，并不等价于重新求解全局最优分配。
+长期连续增量后会逐渐出现三个问题：空闲路径越来越少且未必与新增 Skill
+语义匹配；候选分布和协同图已经变化，但冻结 codebook 无法重新平衡；多轮
+仅面向新增样本的 LoRA 可能造成旧能力遗忘或预测分布偏移。因此，候选变化
+比例较大、碰撞/拥挤程度上升，或固定回归集上的 Recall@K、code accuracy
+持续下降时，需要定期执行完整重训：基于最新唯一候选集合重建协同图和
+codebook、重新做全局平衡分配，再运行完整 Router 课程并发布新的版本化
+registry。增量更新用于缩短日常变更时延，周期性重训负责消除长期累积误差。
+
+### 5.2 依赖于训练数据
+
+观察了未找到目标候选的 case，发现集中于两类：
+- 直接指定候选名
+- 某个 skill 描述比较宽泛 / 抽象，功能不明确

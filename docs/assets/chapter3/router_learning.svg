@@ -18,6 +18,7 @@
       .label { font-size: 15px; font-weight: 650; }
       .small { font-size: 13px; font-weight: 500; fill: #475569; }
       .tiny { font-size: 11.5px; font-weight: 500; fill: #64748b; }
+      .formula { font-family: "Times New Roman", "Noto Sans CJK SC", serif; font-size: 13px; }
       .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11.5px; font-weight: 600; }
     </style>
   </defs>
@@ -174,40 +175,53 @@
   <text x="1115" y="521" text-anchor="middle" class="small">full-vocabulary softmax</text>
   <text x="1115" y="544" text-anchor="middle" class="small">no trie / grammar mask</text>
 
-  <!-- (d) Curriculum and closed set -->
-  <rect x="1342" y="42" width="73" height="22" rx="11" fill="#dcfce7"/>
-  <text x="1378.5" y="57" text-anchor="middle" class="phase" fill="#047857">SCHEDULE</text>
-  <text x="1342" y="91" class="panel-title">(d) 课程训练与闭集约束</text>
+  <!-- (d) Parameter-state flow and replay -->
+  <rect x="1342" y="42" width="66" height="22" rx="11" fill="#dcfce7"/>
+  <text x="1375" y="57" text-anchor="middle" class="phase" fill="#047857">STATES</text>
+  <text x="1342" y="91" class="panel-title">(d) 参数继承与 Replay</text>
 
-  <rect x="1360" y="126" width="260" height="68" rx="8" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.3"/>
-  <text x="1490" y="153" text-anchor="middle" class="label">1 · Memorization</text>
-  <text x="1490" y="178" text-anchor="middle" class="small">document → one code</text>
-  <path d="M1490 194 V216" fill="none" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrow-purple)"/>
+  <line x1="1388" y1="144" x2="1388" y2="470" stroke="#cbd5e1" stroke-width="3"/>
 
-  <rect x="1360" y="225" width="260" height="68" rx="8" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.3"/>
-  <text x="1490" y="252" text-anchor="middle" class="label">2 · Alignment</text>
-  <text x="1490" y="277" text-anchor="middle" class="small">single query → one code</text>
-  <path d="M1490 293 V315" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <circle cx="1388" cy="137" r="22" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.3"/>
+  <text x="1388" y="143" text-anchor="middle" class="mono">θ₀</text>
+  <text x="1423" y="133" class="label">Initialized Router</text>
+  <text x="1423" y="154" class="tiny">base LLM + new code tokens</text>
 
-  <rect x="1360" y="324" width="260" height="78" rx="8" fill="#f0fdf4" stroke="#34d399" stroke-width="1.4"/>
-  <text x="1490" y="351" text-anchor="middle" class="label">3 · Retrieval</text>
-  <text x="1490" y="376" text-anchor="middle" class="small">multi query → multiple codes</text>
-  <rect x="1533" y="380" width="70" height="18" rx="9" fill="#ede9fe"/>
-  <text x="1568" y="393" text-anchor="middle" class="tiny">+ replay</text>
-  <path d="M1360 160 C1328 160 1328 389 1352 389" fill="none" stroke="#7c3aed" stroke-width="1.7" stroke-dasharray="5 4" marker-end="url(#arrow-purple)"/>
-  <path d="M1490 402 V421" fill="none" stroke="#059669" stroke-width="1.8" marker-end="url(#arrow-green)"/>
-  <rect x="1420" y="428" width="140" height="37" rx="18.5" fill="#ecfdf5" stroke="#10b981"/>
-  <text x="1490" y="452" text-anchor="middle" class="label">Router θ*</text>
+  <path d="M1388 159 V217" fill="none" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrow-purple)"/>
+  <rect x="1352" y="178" width="72" height="25" rx="12.5" fill="#ede9fe"/>
+  <text x="1388" y="195" text-anchor="middle" class="mono">D_mem</text>
 
-  <rect x="1348" y="493" width="284" height="82" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
-  <text x="1490" y="516" text-anchor="middle" class="label">Single closed candidate set</text>
-  <rect x="1364" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
-  <text x="1389.5" y="552" text-anchor="middle" class="tiny">train q</text>
-  <rect x="1422" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
-  <text x="1447.5" y="552" text-anchor="middle" class="tiny">val q</text>
-  <rect x="1480" y="535" width="51" height="25" rx="12.5" fill="#f1f5f9"/>
-  <text x="1505.5" y="552" text-anchor="middle" class="tiny">test q</text>
-  <path d="M1538 547 H1555" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
-  <rect x="1563" y="532" width="52" height="31" rx="6" fill="#dcfce7" stroke="#34d399"/>
-  <text x="1589" y="552" text-anchor="middle" class="mono">S</text>
+  <circle cx="1388" cy="239" r="22" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.4"/>
+  <text x="1388" y="245" text-anchor="middle" class="mono">θ_mem</text>
+  <text x="1423" y="235" class="label">Catalog grounding</text>
+  <text x="1423" y="256" class="tiny">all Skill documents mapped to codes</text>
+
+  <path d="M1388 261 V319" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <rect x="1348" y="280" width="80" height="25" rx="12.5" fill="#dbeafe"/>
+  <text x="1388" y="297" text-anchor="middle" class="mono">D_align</text>
+
+  <circle cx="1388" cy="341" r="22" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.4"/>
+  <text x="1388" y="347" text-anchor="middle" class="mono">θ_align</text>
+  <text x="1423" y="337" class="label">Query alignment</text>
+  <text x="1423" y="358" class="tiny">single-query phrasing aligned to codes</text>
+
+  <path d="M1388 363 V454" fill="none" stroke="#059669" stroke-width="1.8" marker-end="url(#arrow-green)"/>
+  <rect x="1346" y="402" width="84" height="27" rx="13.5" fill="#dcfce7"/>
+  <text x="1388" y="420" text-anchor="middle" class="mono">D_final</text>
+
+  <rect x="1502" y="378" width="126" height="59" rx="8" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="1565" y="401" text-anchor="middle" class="label">Replay Rρ</text>
+  <text x="1565" y="422" text-anchor="middle" class="tiny">fixed-seed sample</text>
+  <path d="M1424 190 C1588 190 1638 264 1565 370" fill="none" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arrow-purple)"/>
+  <path d="M1502 408 H1438" fill="none" stroke="#7c3aed" stroke-width="1.6" marker-end="url(#arrow-purple)"/>
+  <text x="1494" y="451" text-anchor="middle" class="tiny">D_final = D_ret ∪ Rρ</text>
+
+  <circle cx="1388" cy="476" r="23" fill="#ecfdf5" stroke="#10b981" stroke-width="1.5"/>
+  <text x="1388" y="482" text-anchor="middle" class="mono">θ*</text>
+  <text x="1423" y="472" class="label">Multi-skill Router</text>
+  <text x="1423" y="493" class="tiny">each stage initializes the next</text>
+
+  <rect x="1348" y="526" width="284" height="53" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="1490" y="548" text-anchor="middle" class="label">Closed-set invariant</text>
+  <text x="1490" y="568" text-anchor="middle" class="formula">targets(D_mem ∪ D_align ∪ D_ret) ⊆ S</text>
 </svg>

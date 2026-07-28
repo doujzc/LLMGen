@@ -80,7 +80,8 @@ SHA-256，恢复训练和加载索引时会拒绝源码漂移。新机器只需 
 - edge-aware sampler，确保协同边真正进入 batch；
 - reconstruction、residual VQ、稀疏图损失的联合反向传播；
 - optimizer、scheduler、AMP、RNG 和断点恢复的完整 checkpoint；
-- codebook 冻结后，以逐层残差最近邻为新 / test skill 编码；
+- codebook 冻结后，对完整候选集使用训练同构的逐层 Sinkhorn 生成 raw
+  code；单 Skill 增量新增仍采用逐层残差最近邻；
 - code 到 skill 的一对多关系由外部 registry 管理。
 
 ToolWeaver 本身不是动态目录协议。这里的“冻结 codebook + registry 增删 + 版本化迁移”是为动态 Skill 集合增加的系统层设计，不能表述为论文原生能力。
@@ -308,8 +309,11 @@ L_total = L_reconstruction
 ```
 
 需要平衡的层在训练 assignment 时运行 ToolWeaver 的 Sinkhorn。默认采用论文代码
-常见的 `last` 配置（只平衡末层），也可给每层非零 epsilon。导出与新增 skill 时
-固定 `use_sk=False`，只做 `L` 次最近码字查找，不把 Sinkhorn 带入在线路径。
+常见的 `last` 配置（只平衡末层），也可给每层非零 epsilon。训练结束后，
+encoder 可以分批计算 latent，但 raw code 必须汇总完整候选集并以相同
+`sk_epsilons`、`sk_iters` 执行一次逐层 Sinkhorn，不能按导出 batch
+独立分配。单 Skill 增量新增不具备平衡分配所需的集合上下文，因此仍固定
+`use_sk=False`，执行 `L` 次最近码字查找。
 
 ### 8.3 动态新增
 

@@ -1,0 +1,195 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:lang="zh-CN" width="1600" height="600" viewBox="0 0 1600 600" role="img" aria-labelledby="title desc">
+  <title id="title">层级 Skill code 的前向计算</title>
+  <desc id="desc">冻结文本表征、编码器和残差码本后，Skill 文档先变为连续隐向量；每一层根据当前残差计算到码本向量的距离，选择一个索引并更新残差；各层索引最终序列化为固定长度的 Skill code。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#475569"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="9" markerHeight="9" refX="7.5" refY="4.5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#2563eb"/>
+    </marker>
+    <style>
+      text { font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #111827; }
+      .panel-title { font-size: 21px; font-weight: 700; }
+      .phase { font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+      .label { font-size: 15px; font-weight: 650; }
+      .small { font-size: 13px; font-weight: 500; fill: #475569; }
+      .tiny { font-size: 11.5px; font-weight: 500; fill: #64748b; }
+      .math { font-family: "Times New Roman", "Noto Sans CJK SC", serif; font-size: 17px; font-style: italic; }
+      .formula { font-family: "Times New Roman", "Noto Sans CJK SC", serif; font-size: 15px; }
+      .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 650; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="600" fill="#ffffff"/>
+  <rect x="20" y="20" width="300" height="560" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+  <rect x="340" y="20" width="870" height="560" rx="10" fill="#fafafa" stroke="#cbd5e1" stroke-width="1.4"/>
+  <rect x="1230" y="20" width="350" height="560" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.4"/>
+
+  <path d="M320 300 H332" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#arrow)"/>
+  <path d="M1210 300 H1222" fill="none" stroke="#94a3b8" stroke-width="2.2" marker-end="url(#arrow)"/>
+
+  <!-- (a) Frozen representation stack -->
+  <rect x="42" y="42" width="67" height="22" rx="11" fill="#e0f2fe"/>
+  <text x="75.5" y="57" text-anchor="middle" class="phase" fill="#0369a1">REPRESENT</text>
+  <text x="42" y="91" class="panel-title">(a) Skill 转为连续向量</text>
+
+  <rect x="48" y="125" width="108" height="90" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <path d="M68 148 H136 M68 165 H126 M68 182 H133" fill="none" stroke="#64748b" stroke-width="3" stroke-linecap="round"/>
+  <text x="102" y="204" text-anchor="middle" class="small">文档 dᵢ</text>
+  <path d="M156 170 H179" fill="none" stroke="#475569" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <rect x="187" y="125" width="105" height="90" rx="8" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.3"/>
+  <rect x="204" y="140" width="70" height="20" rx="10" fill="#dbeafe"/>
+  <text x="239" y="154" text-anchor="middle" class="phase" fill="#1d4ed8">FROZEN</text>
+  <text x="239.5" y="179" text-anchor="middle" class="label">f<tspan baseline-shift="sub" font-size="10">emb</tspan></text>
+  <text x="239.5" y="201" text-anchor="middle" class="tiny">text encoder</text>
+
+  <path d="M170 215 V239" fill="none" stroke="#2563eb" stroke-width="1.7" marker-end="url(#arrow-blue)"/>
+  <rect x="100" y="249" width="140" height="52" rx="26" fill="#ffffff" stroke="#93c5fd" stroke-width="1.3"/>
+  <rect x="119" y="271" width="10" height="14" rx="2" fill="#bfdbfe"/>
+  <rect x="134" y="260" width="10" height="25" rx="2" fill="#60a5fa"/>
+  <rect x="149" y="267" width="10" height="18" rx="2" fill="#2563eb"/>
+  <text x="199" y="281" text-anchor="middle" class="math">xᵢ</text>
+
+  <path d="M170 301 V325" fill="none" stroke="#475569" stroke-width="1.7" marker-end="url(#arrow)"/>
+  <rect x="72" y="335" width="196" height="84" rx="8" fill="#f5f3ff" stroke="#a78bfa" stroke-width="1.3"/>
+  <rect x="91" y="350" width="64" height="20" rx="10" fill="#ede9fe"/>
+  <text x="123" y="364" text-anchor="middle" class="phase" fill="#6d28d9">FROZEN</text>
+  <text x="187" y="365" class="label">Encoder E<tspan baseline-shift="sub" font-size="10">φ</tspan></text>
+  <text x="170" y="396" text-anchor="middle" class="small">投影到量化隐空间</text>
+  <path d="M170 419 V445" fill="none" stroke="#7c3aed" stroke-width="1.7" marker-end="url(#arrow)"/>
+
+  <rect x="100" y="455" width="140" height="58" rx="29" fill="#ffffff" stroke="#a78bfa" stroke-width="1.3"/>
+  <circle cx="128" cy="484" r="8" fill="#7c3aed"/>
+  <circle cx="149" cy="472" r="6" fill="#a78bfa"/>
+  <circle cx="151" cy="496" r="5" fill="#c4b5fd"/>
+  <text x="202" y="490" text-anchor="middle" class="math">zᵢ</text>
+  <text x="170" y="542" text-anchor="middle" class="small">令初始残差 rᵢ⁰ = zᵢ</text>
+
+  <!-- (b) Residual quantization forward -->
+  <rect x="362" y="42" width="75" height="22" rx="11" fill="#ede9fe"/>
+  <text x="399.5" y="57" text-anchor="middle" class="phase" fill="#6d28d9">FORWARD</text>
+  <text x="362" y="91" class="panel-title">(b) 逐层选择码本向量并更新残差</text>
+
+  <rect x="365" y="110" width="820" height="54" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.1"/>
+  <text x="775" y="143" text-anchor="middle" class="formula">
+    Dᵢₖ<tspan baseline-shift="super" font-size="10">(ℓ)</tspan> = ‖rᵢ<tspan baseline-shift="super" font-size="10">(ℓ−1)</tspan> − eₖ<tspan baseline-shift="super" font-size="10">(ℓ)</tspan>‖²
+    <tspan dx="28">→</tspan>
+    <tspan dx="28">select aᵢ</tspan><tspan baseline-shift="super" font-size="10">(ℓ)</tspan>
+    <tspan dx="28">→</tspan>
+    <tspan dx="28">rᵢ</tspan><tspan baseline-shift="super" font-size="10">(ℓ)</tspan> = rᵢ<tspan baseline-shift="super" font-size="10">(ℓ−1)</tspan> − e<tspan baseline-shift="sub" font-size="10">aᵢ</tspan><tspan baseline-shift="super" font-size="10">(ℓ)</tspan>
+  </text>
+
+  <!-- Level 1 -->
+  <rect x="365" y="188" width="235" height="265" rx="9" fill="#ffffff" stroke="#60a5fa" stroke-width="1.3"/>
+  <rect x="383" y="205" width="65" height="24" rx="12" fill="#dbeafe"/>
+  <text x="415.5" y="222" text-anchor="middle" class="phase" fill="#1d4ed8">LEVEL 1</text>
+  <text x="524" y="222" text-anchor="middle" class="formula">input rᵢ⁰</text>
+  <text x="482.5" y="257" text-anchor="middle" class="small">compare with C¹</text>
+  <circle cx="401" cy="290" r="10" fill="#dbeafe" stroke="#60a5fa"/>
+  <circle cx="442" cy="290" r="10" fill="#dbeafe" stroke="#60a5fa"/>
+  <circle cx="483" cy="290" r="14" fill="#2563eb" stroke="#1d4ed8" stroke-width="2"/>
+  <circle cx="524" cy="290" r="10" fill="#dbeafe" stroke="#60a5fa"/>
+  <circle cx="565" cy="290" r="10" fill="#dbeafe" stroke="#60a5fa"/>
+  <text x="401" y="315" text-anchor="middle" class="tiny">3</text>
+  <text x="442" y="315" text-anchor="middle" class="tiny">8</text>
+  <text x="483" y="315" text-anchor="middle" class="tiny" fill="#1d4ed8">12</text>
+  <text x="524" y="315" text-anchor="middle" class="tiny">19</text>
+  <text x="565" y="315" text-anchor="middle" class="tiny">27</text>
+  <rect x="424" y="331" width="117" height="34" rx="17" fill="#eff6ff"/>
+  <text x="482.5" y="353" text-anchor="middle" class="formula">aᵢ¹ = 12</text>
+  <line x1="385" y1="382" x2="580" y2="382" stroke="#e2e8f0"/>
+  <text x="482.5" y="408" text-anchor="middle" class="formula">rᵢ¹ = rᵢ⁰ − e₁₂¹</text>
+  <rect x="385" y="431" width="174" height="6" rx="3" fill="#bfdbfe"/>
+
+  <path d="M600 320 H628" fill="none" stroke="#475569" stroke-width="1.8" marker-end="url(#arrow)"/>
+  <text x="614" y="309" text-anchor="middle" class="tiny">r¹</text>
+
+  <!-- Level 2 -->
+  <rect x="636" y="188" width="235" height="265" rx="9" fill="#ffffff" stroke="#22d3ee" stroke-width="1.3"/>
+  <rect x="654" y="205" width="65" height="24" rx="12" fill="#cffafe"/>
+  <text x="686.5" y="222" text-anchor="middle" class="phase" fill="#0e7490">LEVEL 2</text>
+  <text x="795" y="222" text-anchor="middle" class="formula">input rᵢ¹</text>
+  <text x="753.5" y="257" text-anchor="middle" class="small">compare with C²</text>
+  <circle cx="672" cy="290" r="10" fill="#cffafe" stroke="#22d3ee"/>
+  <circle cx="713" cy="290" r="14" fill="#0891b2" stroke="#0e7490" stroke-width="2"/>
+  <circle cx="754" cy="290" r="10" fill="#cffafe" stroke="#22d3ee"/>
+  <circle cx="795" cy="290" r="10" fill="#cffafe" stroke="#22d3ee"/>
+  <circle cx="836" cy="290" r="10" fill="#cffafe" stroke="#22d3ee"/>
+  <text x="672" y="315" text-anchor="middle" class="tiny">2</text>
+  <text x="713" y="315" text-anchor="middle" class="tiny" fill="#0e7490">7</text>
+  <text x="754" y="315" text-anchor="middle" class="tiny">15</text>
+  <text x="795" y="315" text-anchor="middle" class="tiny">23</text>
+  <text x="836" y="315" text-anchor="middle" class="tiny">31</text>
+  <rect x="695" y="331" width="117" height="34" rx="17" fill="#ecfeff"/>
+  <text x="753.5" y="353" text-anchor="middle" class="formula">aᵢ² = 7</text>
+  <line x1="656" y1="382" x2="851" y2="382" stroke="#e2e8f0"/>
+  <text x="753.5" y="408" text-anchor="middle" class="formula">rᵢ² = rᵢ¹ − e₇²</text>
+  <rect x="656" y="431" width="110" height="6" rx="3" fill="#a5f3fc"/>
+
+  <text x="908" y="317" text-anchor="middle" font-size="28" font-weight="700" fill="#94a3b8">⋯</text>
+  <text x="908" y="342" text-anchor="middle" class="tiny">repeat</text>
+
+  <!-- Level L -->
+  <rect x="945" y="188" width="235" height="265" rx="9" fill="#ffffff" stroke="#a78bfa" stroke-width="1.3"/>
+  <rect x="963" y="205" width="65" height="24" rx="12" fill="#ede9fe"/>
+  <text x="995.5" y="222" text-anchor="middle" class="phase" fill="#6d28d9">LEVEL L</text>
+  <text x="1097" y="222" text-anchor="middle" class="formula">input rᵢᴸ⁻¹</text>
+  <text x="1062.5" y="257" text-anchor="middle" class="small">compare with Cᴸ</text>
+  <circle cx="981" cy="290" r="10" fill="#ede9fe" stroke="#a78bfa"/>
+  <circle cx="1022" cy="290" r="10" fill="#ede9fe" stroke="#a78bfa"/>
+  <circle cx="1063" cy="290" r="10" fill="#ede9fe" stroke="#a78bfa"/>
+  <circle cx="1104" cy="290" r="14" fill="#7c3aed" stroke="#6d28d9" stroke-width="2"/>
+  <circle cx="1145" cy="290" r="10" fill="#ede9fe" stroke="#a78bfa"/>
+  <text x="981" y="315" text-anchor="middle" class="tiny">…</text>
+  <text x="1022" y="315" text-anchor="middle" class="tiny">…</text>
+  <text x="1063" y="315" text-anchor="middle" class="tiny">…</text>
+  <text x="1104" y="315" text-anchor="middle" class="tiny" fill="#6d28d9">aᴸ</text>
+  <text x="1145" y="315" text-anchor="middle" class="tiny">…</text>
+  <rect x="1004" y="331" width="117" height="34" rx="17" fill="#f5f3ff"/>
+  <text x="1062.5" y="353" text-anchor="middle" class="formula">select aᵢᴸ</text>
+  <line x1="965" y1="382" x2="1160" y2="382" stroke="#e2e8f0"/>
+  <text x="1062.5" y="408" text-anchor="middle" class="formula">rᵢᴸ = rᵢᴸ⁻¹ − e<tspan baseline-shift="sub" font-size="10">aᴸ</tspan>ᴸ</text>
+  <rect x="965" y="431" width="52" height="6" rx="3" fill="#ddd6fe"/>
+
+  <rect x="365" y="477" width="815" height="69" rx="9" fill="#ffffff" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="390" y="503" class="phase" fill="#6d28d9">RESULT OF THE RECURRENCE</text>
+  <text x="775" y="527" text-anchor="middle" class="formula">
+    zᵢ ≈ e₁₂¹ + e₇² + ⋯ + e<tspan baseline-shift="sub" font-size="10">aᴸ</tspan>ᴸ
+    <tspan dx="50">and</tspan>
+    <tspan dx="20">(aᵢ¹,aᵢ²,…,aᵢᴸ) = (12,7,…,aᵢᴸ)</tspan>
+  </text>
+
+  <!-- (c) Serialize indices -->
+  <rect x="1252" y="42" width="68" height="22" rx="11" fill="#dcfce7"/>
+  <text x="1286" y="57" text-anchor="middle" class="phase" fill="#047857">SERIALIZE</text>
+  <text x="1252" y="91" class="panel-title">(c) 索引组成层级 Code</text>
+
+  <rect x="1258" y="122" width="294" height="147" rx="9" fill="#ffffff" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="1280" y="149" class="phase" fill="#92400e">SELECTION RULE</text>
+  <rect x="1280" y="166" width="250" height="35" rx="7" fill="#f8fafc" stroke="#cbd5e1"/>
+  <text x="1293" y="188" class="small">Full-set raw</text>
+  <text x="1515" y="188" text-anchor="end" class="formula">Sinkhorn(Dᵢₖ)</text>
+  <rect x="1280" y="211" width="250" height="39" rx="7" fill="#fffbeb" stroke="#fbbf24"/>
+  <text x="1293" y="235" class="small">Final registry</text>
+  <text x="1515" y="235" text-anchor="end" class="tiny">catalog-balanced match</text>
+
+  <text x="1405" y="295" text-anchor="middle" class="small">one selected index per level</text>
+  <rect x="1277" y="313" width="72" height="36" rx="8" fill="#dbeafe"/>
+  <text x="1313" y="336" text-anchor="middle" class="formula">aᵢ¹=12</text>
+  <text x="1362" y="336" text-anchor="middle" class="formula">,</text>
+  <rect x="1375" y="313" width="72" height="36" rx="8" fill="#cffafe"/>
+  <text x="1411" y="336" text-anchor="middle" class="formula">aᵢ²=7</text>
+  <text x="1462" y="336" text-anchor="middle" class="formula">,…,</text>
+  <rect x="1482" y="313" width="52" height="36" rx="8" fill="#ede9fe"/>
+  <text x="1508" y="336" text-anchor="middle" class="formula">aᵢᴸ</text>
+
+  <path d="M1405 349 V378" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arrow-blue)"/>
+  <rect x="1277" y="388" width="256" height="47" rx="9" fill="#eff6ff" stroke="#60a5fa" stroke-width="1.3"/>
+  <text x="1405" y="417" text-anchor="middle" class="formula">(τ₁₂¹, τ₇², …, τₐᴸᴸ)</text>
+  <text x="1405" y="461" text-anchor="middle" class="small">默认 L = 2 时：</text>
+  <rect x="1301" y="477" width="208" height="43" rx="21.5" fill="#ecfdf5" stroke="#10b981" stroke-width="1.4"/>
+  <text x="1405" y="504" text-anchor="middle" class="mono">&lt;L1_12&gt;&lt;L2_7&gt;</text>
+  <text x="1405" y="548" text-anchor="middle" class="tiny">固定 L 个原子 token；不生成 Skill 名称文本</text>
+</svg>
