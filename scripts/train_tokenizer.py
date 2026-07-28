@@ -25,6 +25,7 @@ from llmgen.neural.toolweaver import (  # noqa: E402
     ToolWeaverStage1Trainer,
     code_assignment_metrics,
     load_toolweaver_rqvae,
+    sinkhorn_residual_codes,
 )
 
 
@@ -172,7 +173,7 @@ def encode_embeddings(
     normalize: bool,
 ) -> np.ndarray:
     model.eval()
-    rows = []
+    encoded_rows = []
     for start in range(0, len(embeddings), batch_size):
         values = np.array(
             embeddings[start : start + batch_size], dtype=np.float32, copy=True
@@ -181,9 +182,22 @@ def encode_embeddings(
             norms = np.linalg.norm(values, axis=1, keepdims=True)
             values = np.divide(values, norms, out=np.zeros_like(values), where=norms > 0)
         tensor = torch.from_numpy(np.ascontiguousarray(values)).to(device)
-        indices = model.get_indices(tensor, use_sk=False)
-        rows.append(indices.reshape(-1, num_levels).cpu().numpy())
-    return np.concatenate(rows).astype(np.int64, copy=False)
+        encoded_rows.append(
+            model.encoder(tensor).detach().float().cpu().numpy()
+        )
+    quantizers = tuple(model.rq.vq_layers)
+    if len(quantizers) != num_levels:
+        raise ValueError("num_levels does not match the trained RQ-VAE")
+    sk_iters = {int(quantizer.sk_iters) for quantizer in quantizers}
+    if len(sk_iters) != 1:
+        raise ValueError("all RQ-VAE levels must use the same sk_iters")
+    return sinkhorn_residual_codes(
+        np.concatenate(encoded_rows, axis=0),
+        [quantizer.embedding.weight.detach() for quantizer in quantizers],
+        sk_epsilons=[float(quantizer.sk_epsilon) for quantizer in quantizers],
+        sk_iters=sk_iters.pop(),
+        device=device,
+    )
 
 
 def export_assignments(
@@ -224,6 +238,10 @@ def export_assignments(
         "num_levels": config.num_levels,
         "branching_factors": list(config.num_emb_list),
         "token_format": config.token_format,
+        "assignment_mode": "sinkhorn",
+        "assignment_scope": "full_catalog",
+        "sk_epsilons": list(config.sk_epsilons),
+        "sk_iters": config.sk_iters,
         "ordered_skill_ids_sha256": source["ordered_skill_ids_sha256"],
         "buckets": dict(buckets),
     }
@@ -362,6 +380,12 @@ def main() -> None:
         "data": source,
         "code_metrics": code_assignment_metrics(codes, model_config.num_emb_list),
         "num_buckets": len(registry["buckets"]),
+        "code_assignment": {
+            "mode": "sinkhorn",
+            "scope": "full_catalog",
+            "sk_epsilons": list(model_config.sk_epsilons),
+            "sk_iters": model_config.sk_iters,
+        },
     }
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"

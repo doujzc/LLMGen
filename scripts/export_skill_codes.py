@@ -18,6 +18,7 @@ from llmgen.neural.toolweaver import (
     code_assignment_metrics,
     load_toolweaver_rqvae,
     residual_nearest_codes,
+    sinkhorn_residual_codes,
 )
 from llmgen.skillret import (
     all_code_tokens,
@@ -51,12 +52,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--assignment-mode",
-        choices=("nearest", "balanced_hierarchical"),
-        default="nearest",
+        choices=("sinkhorn", "nearest", "balanced_hierarchical"),
+        default="sinkhorn",
         help=(
-            "nearest reproduces ordinary RQ inference; balanced_hierarchical "
-            "uses learned distances with global floor/ceil balance and "
-            "prefix-local uniqueness constraints."
+            "sinkhorn uses the training-time assignment over the complete split; "
+            "nearest is a legacy unbalanced override; balanced_hierarchical adds "
+            "global floor/ceil balance and prefix-local uniqueness constraints."
         ),
     )
     parser.add_argument("--assignment-exact-group-size", type=int, default=2048)
@@ -180,6 +181,8 @@ def _export_split(
     min_raw_level_utilization: Sequence[float],
     min_raw_normalized_entropy: float,
 ) -> dict[str, Any]:
+    if assignment_mode not in {"sinkhorn", "nearest", "balanced_hierarchical"}:
+        raise ValueError(f"unsupported assignment_mode: {assignment_mode}")
     ids = [str(row["skill_id"]) for row in read_jsonl(catalog_path)]
     actual_order_hash = ordered_ids_sha256(ids)
     if expected_order_hash and actual_order_hash != expected_order_hash:
@@ -209,21 +212,45 @@ def _export_split(
                 model.encoder(batch).detach().float().cpu().numpy()
             )
     encoded = np.concatenate(encoded_rows, axis=0)
+    quantizers = tuple(model.rq.vq_layers)
+    if len(quantizers) != len(branching_factors):
+        raise ValueError("checkpoint RQ levels do not match branching_factors")
     codebooks = [
         quantizer.embedding.weight.detach().float().cpu().numpy()
-        for quantizer in model.rq.vq_layers
+        for quantizer in quantizers
     ]
-    raw_indices = residual_nearest_codes(encoded, codebooks)
+    sk_iters = {int(quantizer.sk_iters) for quantizer in quantizers}
+    if len(sk_iters) != 1:
+        raise ValueError("all RQ-VAE levels must use the same sk_iters")
+    sk_epsilons = [float(quantizer.sk_epsilon) for quantizer in quantizers]
+    raw_indices = sinkhorn_residual_codes(
+        encoded,
+        codebooks,
+        sk_epsilons=sk_epsilons,
+        sk_iters=sk_iters.pop(),
+        device=device,
+    )
+    nearest_indices = residual_nearest_codes(encoded, codebooks)
+    raw_assignment_diagnostics = {
+        "mode": "sinkhorn",
+        "scope": "full_split",
+        "sk_epsilons": sk_epsilons,
+        "sk_iters": int(quantizers[0].sk_iters),
+    }
     if assignment_mode == "balanced_hierarchical":
         all_indices_array, assignment_diagnostics = balanced_hierarchical_codes(
             encoded,
             codebooks,
             exact_group_size=assignment_exact_group_size,
         )
+    elif assignment_mode == "nearest":
+        all_indices_array = nearest_indices
+        assignment_diagnostics = {"mode": "nearest"}
     else:
         all_indices_array = raw_indices
-        assignment_diagnostics = {"mode": "nearest"}
+        assignment_diagnostics = dict(raw_assignment_diagnostics)
     raw_metrics = code_assignment_metrics(raw_indices, branching_factors)
+    nearest_metrics = code_assignment_metrics(nearest_indices, branching_factors)
     assigned_metrics = code_assignment_metrics(all_indices_array, branching_factors)
     violations = _quality_violations(
         metrics=assigned_metrics,
@@ -265,6 +292,8 @@ def _export_split(
         "branching_factors": branching_factors,
         "token_format": token_format,
         "assignment_mode": assignment_mode,
+        "raw_assignment_mode": "sinkhorn",
+        "raw_assignment_scope": "full_split",
         "ordered_skill_ids_sha256": actual_order_hash,
         "buckets": {key: sorted(value) for key, value in sorted(buckets.items())},
     }
@@ -279,7 +308,12 @@ def _export_split(
             **_collision_metrics(registry["buckets"], len(ids)),
             **assigned_metrics,
         },
-        "raw_nearest_metrics": raw_metrics,
+        "raw_sinkhorn_metrics": raw_metrics,
+        "nearest_diagnostic_metrics": nearest_metrics,
+        # Backward-compatible field name; it now explicitly remains a diagnostic
+        # and is not the source of the raw quality gate.
+        "raw_nearest_metrics": nearest_metrics,
+        "raw_assignment_diagnostics": raw_assignment_diagnostics,
         "assignment_diagnostics": assignment_diagnostics,
         "quality_gate": {
             "enforced": enforce_quality_gate,
@@ -420,13 +454,20 @@ def main() -> None:
         "branching_factors": branching_factors,
         "token_format": token_format,
         "assignment_mode": args.assignment_mode,
+        "raw_assignment_mode": "sinkhorn",
+        "raw_assignment_scope": "full_split",
+        "sk_epsilons": [
+            float(quantizer.sk_epsilon) for quantizer in model.rq.vq_layers
+        ],
+        "sk_iters": int(model.rq.vq_layers[0].sk_iters),
         "normalize_embeddings": normalize_embeddings,
         "num_virtual_tokens": len(tokens),
         "virtual_tokens": str(virtual_tokens_path),
         "exported_splits": list(args.splits),
         "splits": split_artifacts,
         "incremental_contract": (
-            "test skills encoded by frozen encoder and codebooks"
+            "test skills jointly assigned over the complete split by frozen "
+            "encoder and codebooks"
             if "test" in args.splits
             else "shared closed candidate set; no unseen-skill code export"
         ),

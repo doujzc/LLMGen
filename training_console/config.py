@@ -495,7 +495,7 @@ FIELDS = (
         "code",
         "Code 分配",
         kind="select",
-        options=("nearest", "balanced_hierarchical"),
+        options=("sinkhorn", "nearest", "balanced_hierarchical"),
         source="configs/closedset.env",
     ),
     _field(
