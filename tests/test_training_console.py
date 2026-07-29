@@ -110,6 +110,7 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
     assert clawhub["defaults"]["BRANCHING_FACTORS"] == "128 128"
     assert light["defaults"]["BRANCHING_FACTORS"] == "32 16"
     assert clawhub["defaults"]["ROUTER_FINETUNE_MODE"] == "full"
+    assert clawhub["defaults"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert clawhub["secrets"]["OPENAI_API_KEY"]["persisted"] is False
     fields = {field["key"]: field for field in clawhub["fields"]}
     for key in (
@@ -266,6 +267,17 @@ def test_validation_rejects_unknown_values_newlines_and_gpu_mismatch() -> None:
     assert invalid_rate.value.errors[0]["field"] == (
         "CODE_MAX_RAW_COLLISION_RATE"
     )
+
+    with pytest.raises(ConfigValidationError) as duplicate_gpu:
+        resolver.validate(
+            "clawhub",
+            "full",
+            {
+                "CUDA_VISIBLE_DEVICES": "2,2",
+                "ROUTER_NUM_GPUS": "2",
+            },
+        )
+    assert duplicate_gpu.value.errors[0]["field"] == "CUDA_VISIBLE_DEVICES"
 
 
 def test_runtime_environment_is_allowlisted_frozen_and_excludes_secrets() -> None:
@@ -552,6 +564,8 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
             },
         )
         assert run["status"] == "saved"
+        assert run["configured_gpus"] == ["0", "1", "2", "3"]
+        assert run["cuda_device_order"] == "PCI_BUS_ID"
         assert Path(run["config_path"]).is_file()
         assert Path(run["env_path"]).is_file()
         assert Path(run["log_path"]).exists() is False
@@ -599,6 +613,9 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert 'id="run-exit-code"' in page
         assert 'id="monitor-page"' in page
         assert 'id="monitor-stop-button"' in page
+        assert 'id="gpu-requested-devices"' in page
+        assert 'id="gpu-runtime-devices"' in page
+        assert 'id="gpu-observed-devices"' in page
         assert "训练运行中心" in page
 
         with urlopen(base + "/static/styles.css", timeout=5) as response:
@@ -615,6 +632,8 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert "delete state.draft.overrides[candidate.key]" not in app
         assert '(field.visible_stages || []).includes(state.activeStage)' in app
         assert 'postJson("/api/runs/stop"' in app
+        assert "gpuMatchesRunAssignment" in app
+        assert "gpuProcessesForRun" in app
 
         _, validated = _request(
             base + "/api/validate",
@@ -736,6 +755,8 @@ def test_detached_runner_survives_without_a_web_request_owner(
         "\"${BASH_ENV:-}\" \"${PYTHONPATH:-}\" "
         "\"${PREPARE_SCRIPT:-}\" \"${ROUTER_EXTRA_ARGS:-}\"\n"
         "  printf 'secret=%s\\n' \"${OPENAI_API_KEY:-}\"\n"
+        "  printf 'gpu=%s;%s\\n' "
+        "\"${CUDA_DEVICE_ORDER:-}\" \"${CUDA_VISIBLE_DEVICES:-}\"\n"
         "  printf 'started\\n'\n"
         "} > \"$RUN_DIR/marker.txt\"\n"
         "sleep 0.6\n"
@@ -743,6 +764,22 @@ def test_detached_runner_survives_without_a_web_request_owner(
         encoding="utf-8",
     )
     pipeline.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$1\" in\n"
+        "  --query-gpu=*)\n"
+        "    printf '0, GPU-zero, 00000000:01:00.0, Test GPU, 0, 0, 1000, 30\\n'\n"
+        "    printf '1, GPU-one, 00000000:02:00.0, Test GPU, 0, 0, 1000, 31\\n'\n"
+        "    ;;\n"
+        "  --query-compute-apps=*) ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
     state_root = tmp_path / "state"
     artifact_dir = tmp_path / "artifacts"
     store = StateStore(state_root)
@@ -750,8 +787,18 @@ def test_detached_runner_survives_without_a_web_request_owner(
         profile_id="detached-test",
         dataset="clawhub",
         command="full",
-        overrides={"RUN_DIR": str(artifact_dir)},
-        resolved={"RUN_DIR": str(artifact_dir)},
+        overrides={
+            "CUDA_VISIBLE_DEVICES": "1",
+            "ROUTER_NUM_GPUS": "1",
+            "RUN_DIR": str(artifact_dir),
+        },
+        resolved={
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+            "CUDA_VISIBLE_DEVICES": "1",
+            "DEVICE": "cuda",
+            "ROUTER_NUM_GPUS": "1",
+            "RUN_DIR": str(artifact_dir),
+        },
     )
     injection_marker = tmp_path / "bash-env-was-sourced"
     injection_script = tmp_path / "inject.sh"
@@ -766,6 +813,10 @@ def test_detached_runner_survives_without_a_web_request_owner(
     monkeypatch.setenv("NCCL_DEBUG", "INFO")
     monkeypatch.setenv("OMP_NUM_THREADS", "7")
     monkeypatch.setenv("OPENAI_API_KEY", "known-openai-secret")
+    monkeypatch.setenv(
+        "PATH",
+        f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+    )
     service = TrainingConsoleService(
         repo_root=fake_repo,
         state_root=state_root,
@@ -799,9 +850,21 @@ def test_detached_runner_survives_without_a_web_request_owner(
         "safe=INFO,7\n"
         "blocked=,,,\n"
         "secret=known-openai-secret\n"
+        "gpu=PCI_BUS_ID;GPU-one\n"
         "started\n"
         "finished\n"
     )
+    assert observed["configured_gpus"] == ["1"]
+    assert observed["runtime_visible_devices"] == "GPU-one"
+    assert observed["gpu_binding_verified"] is True
+    assert observed["gpu_bindings"] == [
+        {
+            "index": "1",
+            "name": "Test GPU",
+            "requested": "1",
+            "uuid": "GPU-one",
+        }
+    ]
     assert not injection_marker.exists()
     raw_log = Path(observed["log_path"]).read_text(
         encoding="utf-8"

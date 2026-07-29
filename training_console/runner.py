@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 from .config import ALLOWED_KEYS, DATASETS, PIPELINE_COMMANDS
+from .gpu import probe_gpu_metrics, resolve_cuda_visible_devices
 from .store import (
     StateStore,
     child_process_environment,
@@ -178,6 +179,19 @@ def run(args: argparse.Namespace) -> int:
         os.environ,
     )
     env.update(resolved)
+    gpu_resolution: dict[str, Any] | None = None
+    if resolved.get("DEVICE", "").startswith("cuda"):
+        env["CUDA_DEVICE_ORDER"] = resolved.get(
+            "CUDA_DEVICE_ORDER",
+            "PCI_BUS_ID",
+        )
+        requested_gpus = resolved.get("CUDA_VISIBLE_DEVICES", "")
+        if requested_gpus:
+            gpu_resolution = resolve_cuda_visible_devices(
+                requested_gpus,
+                probe_gpu_metrics(include_processes=False),
+            )
+            env["CUDA_VISIBLE_DEVICES"] = gpu_resolution["runtime_value"]
     argv = [
         "bash",
         "scripts/router_pipeline.sh",
@@ -195,6 +209,14 @@ def run(args: argparse.Namespace) -> int:
         started_at=utc_now(),
         command_argv=argv,
         progress_text="独立运行器已加载不可变运行快照",
+        gpu_bindings=(
+            gpu_resolution["bindings"] if gpu_resolution is not None else []
+        ),
+        runtime_visible_devices=env.get("CUDA_VISIBLE_DEVICES", ""),
+        gpu_binding_verified=bool(
+            gpu_resolution and gpu_resolution["verified"]
+        ),
+        cuda_device_order=env.get("CUDA_DEVICE_ORDER", ""),
     )
     if _stop_requested(store, args.run_id):
         _mark_stopped(
@@ -214,6 +236,12 @@ def run(args: argparse.Namespace) -> int:
                 f"\n[training-console] run_id={args.run_id}\n"
                 f"[training-console] config={run_meta['config_path']}\n"
                 f"[training-console] argv={argv!r}\n"
+                "[training-console] "
+                f"CUDA_DEVICE_ORDER={env.get('CUDA_DEVICE_ORDER', '')}\n"
+                "[training-console] requested CUDA_VISIBLE_DEVICES="
+                f"{resolved.get('CUDA_VISIBLE_DEVICES', '')}\n"
+                "[training-console] runtime CUDA_VISIBLE_DEVICES="
+                f"{env.get('CUDA_VISIBLE_DEVICES', '')}\n"
             ).encode("utf-8")
         )
         process = subprocess.Popen(
@@ -231,6 +259,7 @@ def run(args: argparse.Namespace) -> int:
         args.run_id,
         status="running",
         training_pid=process.pid,
+        training_pgid=process.pid,
         progress_text="训练进程已脱离 Web 服务运行",
     )
     offset = 0

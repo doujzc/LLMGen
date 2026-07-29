@@ -455,6 +455,23 @@ def env_text(resolved: Mapping[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def gpu_contract(resolved: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the non-secret GPU assignment recorded with each run."""
+
+    configured_gpus = [
+        token.strip()
+        for token in str(resolved.get("CUDA_VISIBLE_DEVICES", "")).split(",")
+        if token.strip()
+    ]
+    return {
+        "configured_gpus": configured_gpus,
+        "configured_num_gpus": str(resolved.get("ROUTER_NUM_GPUS", "")),
+        "cuda_device_order": str(
+            resolved.get("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        ),
+    }
+
+
 def pid_alive(pid: Any) -> bool:
     """Return whether a local PID exists without changing its state."""
 
@@ -716,6 +733,7 @@ class StateStore:
                 "stage": "等待独立运行器",
                 "runner_pid": None,
                 "training_pid": None,
+                "training_pgid": None,
                 "created_at": utc_now(),
                 "started_at": None,
                 "finished_at": None,
@@ -730,6 +748,10 @@ class StateStore:
                 "runner_log_path": str(runner_log_path),
                 "run_dir": str(run_dir),
                 "artifact_run_dir": str(resolved.get("RUN_DIR", "")),
+                **gpu_contract(resolved),
+                "gpu_bindings": [],
+                "runtime_visible_devices": "",
+                "gpu_binding_verified": False,
             }
             _atomic_write_json(run_dir / "run.json", run_payload)
         return run_payload
@@ -749,6 +771,14 @@ class StateStore:
         if not path.is_file():
             raise FileNotFoundError(f"运行不存在：{run_id}")
         payload = _read_json(path)
+        if "configured_gpus" not in payload:
+            try:
+                config = _read_json(Path(payload["config_path"]))
+                resolved = config.get("resolved", {})
+                if isinstance(resolved, dict):
+                    payload.update(gpu_contract(resolved))
+            except (KeyError, OSError, ValueError, json.JSONDecodeError):
+                pass
         if observe:
             payload = dict(payload)
             payload["runner_alive"] = pid_alive(payload.get("runner_pid"))

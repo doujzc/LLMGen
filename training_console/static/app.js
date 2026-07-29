@@ -680,6 +680,9 @@ function renderContract() {
   $("#contract-gpus").textContent = contract
     ? `${contract.gpus.join(", ") || "未指定"} (${contract.num_gpus || "—"} GPUs)`
     : "—";
+  $("#contract-gpu-order").textContent = contract
+    ? `${contract.cuda_device_order || "PCI_BUS_ID"} · 数字编号运行时绑定 UUID`
+    : "—";
   $("#contract-deepspeed").textContent = contract?.deepspeed || "—";
   $("#contract-precision").textContent = contract?.precision || "—";
   $("#contract-codebook").textContent = contract
@@ -954,6 +957,62 @@ function selectedRun() {
   );
 }
 
+function configuredGpuIds(run) {
+  return Array.isArray(run?.configured_gpus)
+    ? run.configured_gpus.map(String)
+    : [];
+}
+
+function gpuMatchesRunAssignment(run, gpu) {
+  if (!run || !gpu) return false;
+  const gpuIndex = String(gpu.index);
+  const gpuUuid = String(gpu.uuid || "");
+  const bindings = Array.isArray(run.gpu_bindings) ? run.gpu_bindings : [];
+  if (
+    bindings.some(
+      (binding) =>
+        String(binding.index || "") === gpuIndex ||
+        (gpuUuid && String(binding.uuid || "") === gpuUuid),
+    )
+  ) {
+    return true;
+  }
+  return configuredGpuIds(run).some(
+    (token) =>
+      token === gpuIndex ||
+      (gpuUuid && (gpuUuid.startsWith(token) || token.startsWith(gpuUuid))),
+  );
+}
+
+function gpuProcessesForRun(run, gpu) {
+  if (!run || !Array.isArray(gpu?.processes)) return [];
+  const processGroup = Number(run.training_pgid || run.training_pid || 0);
+  const trainingPid = Number(run.training_pid || 0);
+  if (!processGroup && !trainingPid) return [];
+  return gpu.processes.filter((process) => {
+    const pid = Number(process.pid || 0);
+    const processGroupId = Number(process.process_group_id || 0);
+    return (
+      (processGroup && processGroupId === processGroup) ||
+      (trainingPid && pid === trainingPid)
+    );
+  });
+}
+
+function assignedGpusForRun(run, gpus = state.health?.gpus || []) {
+  return gpus.filter((gpu) => gpuMatchesRunAssignment(run, gpu));
+}
+
+function observedGpusForRun(run, gpus = state.health?.gpus || []) {
+  return gpus.filter((gpu) => gpuProcessesForRun(run, gpu).length);
+}
+
+function shortGpuToken(token) {
+  const value = String(token || "");
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 8)}…${value.slice(-6)}`;
+}
+
 function runDuration(run) {
   const started = new Date(run.started_at || run.created_at || "");
   if (Number.isNaN(started.getTime())) return "—";
@@ -1012,11 +1071,40 @@ function renderMonitorSummary() {
 
   const gpus = state.health?.gpus || [];
   const gpuCount = state.health?.gpu_count;
-  $("#monitor-gpu-count").textContent =
+  const run = selectedRun();
+  const configuredCount = configuredGpuIds(run).length;
+  const hostCount =
     gpuCount === null || gpuCount === undefined ? "—" : String(gpuCount);
+  $("#monitor-gpu-count").textContent = run
+    ? `${configuredCount || "—"} / ${hostCount}`
+    : hostCount;
   if (!gpus.length) {
     $("#monitor-gpu-summary").textContent =
       gpuCount === 0 ? "未检测到 NVIDIA GPU" : "等待 nvidia-smi";
+    return;
+  }
+  if (run) {
+    const assigned = assignedGpusForRun(run, gpus);
+    const observed = observedGpusForRun(run, gpus);
+    const breached = observed.filter(
+      (gpu) => !gpuMatchesRunAssignment(run, gpu),
+    );
+    if (breached.length) {
+      $("#monitor-gpu-summary").textContent =
+        `检测到越界占用 · GPU ${breached.map((gpu) => gpu.index).join(", ")}`;
+      return;
+    }
+    if (observed.length) {
+      $("#monitor-gpu-summary").textContent =
+        `实际占用 GPU ${observed.map((gpu) => gpu.index).join(", ")}`;
+      return;
+    }
+    if (assigned.length) {
+      $("#monitor-gpu-summary").textContent =
+        `已分配 GPU ${assigned.map((gpu) => gpu.index).join(", ")} · 等待 CUDA`;
+      return;
+    }
+    $("#monitor-gpu-summary").textContent = "任务 GPU 契约尚未解析";
     return;
   }
   const averageUtilization = Math.round(
@@ -1120,6 +1208,68 @@ function renderGpuBoard() {
   const board = $("#gpu-board");
   board.replaceChildren();
   const gpus = state.health?.gpus || [];
+  const run = selectedRun();
+  const requested = configuredGpuIds(run);
+  const observed = observedGpusForRun(run, gpus);
+  const breached = observed.filter(
+    (gpu) => !gpuMatchesRunAssignment(run, gpu),
+  );
+  $("#gpu-requested-devices").textContent = run
+    ? requested.length
+      ? requested.map((token) => `GPU ${token}`).join(" · ")
+      : "未记录"
+    : "未选择任务";
+  const bindings = Array.isArray(run?.gpu_bindings) ? run.gpu_bindings : [];
+  $("#gpu-runtime-devices").textContent = run
+    ? bindings.length
+      ? bindings
+          .map((binding) =>
+            binding.index
+              ? `GPU ${binding.index} → ${shortGpuToken(binding.uuid)}`
+              : shortGpuToken(binding.uuid || binding.requested),
+          )
+          .join(" · ")
+      : run.runtime_visible_devices
+        ? String(run.runtime_visible_devices)
+            .split(",")
+            .map(shortGpuToken)
+            .join(" · ")
+        : "等待 Runner 解析"
+    : "—";
+  $("#gpu-observed-devices").textContent = run
+    ? observed.length
+      ? observed
+          .map((gpu) => {
+            const processes = gpuProcessesForRun(run, gpu);
+            return `GPU ${gpu.index} · PID ${processes
+              .map((process) => process.pid)
+              .join("/")}`;
+          })
+          .join(" · ")
+      : PROCESS_RUN_STATUSES.has(run.status)
+        ? "等待本任务创建 CUDA 进程"
+        : "当前无本任务 CUDA 进程"
+    : "—";
+  const contractStatus = $("#gpu-panel-updated");
+  if (!run) {
+    contractStatus.textContent = "请选择运行";
+    contractStatus.className = "health-label neutral";
+  } else if (breached.length) {
+    contractStatus.textContent =
+      `越界占用 GPU ${breached.map((gpu) => gpu.index).join(", ")}`;
+    contractStatus.className = "health-label negative";
+  } else if (observed.length) {
+    contractStatus.textContent = "运行绑定已核验";
+    contractStatus.className = "health-label positive";
+  } else if (PROCESS_RUN_STATUSES.has(run.status)) {
+    contractStatus.textContent = run.gpu_binding_verified
+      ? "UUID 绑定已生效 · 等待 CUDA"
+      : "等待 GPU 绑定核验";
+    contractStatus.className = "health-label pending";
+  } else {
+    contractStatus.textContent = "运行已结束";
+    contractStatus.className = "health-label neutral";
+  }
   if (!gpus.length) {
     board.append(
       element(
@@ -1134,12 +1284,38 @@ function renderGpuBoard() {
   }
   gpus.forEach((gpu) => {
     const card = element("article", "gpu-card");
+    const assigned = gpuMatchesRunAssignment(run, gpu);
+    const runProcesses = gpuProcessesForRun(run, gpu);
+    const occupied = runProcesses.length > 0;
+    card.classList.toggle("assigned", assigned);
+    card.classList.toggle("observed", occupied && assigned);
+    card.classList.toggle("breached", occupied && !assigned);
+    card.classList.toggle("host-only", Boolean(run) && !assigned && !occupied);
     const heading = element("div", "gpu-card-heading");
+    const identity = element("div", "gpu-card-identity");
+    const badge = element(
+      "span",
+      "gpu-contract-badge",
+      !run
+        ? "整机"
+        : occupied && assigned
+          ? "本任务占用"
+          : occupied
+            ? "越界占用"
+            : assigned
+              ? "已分配"
+              : "其他 GPU",
+    );
+    identity.append(element("strong", "", `GPU ${gpu.index}`), badge);
     heading.append(
-      element("strong", "", `GPU ${gpu.index}`),
+      identity,
       element("span", "", `${gpu.temperature_c}°C`),
     );
-    const name = element("span", "gpu-name", gpu.name);
+    const name = element(
+      "span",
+      "gpu-name",
+      `${gpu.name} · ${gpu.pci_bus_id || "PCI —"}`,
+    );
     const memoryPercent =
       gpu.memory_total_mib > 0
         ? Math.round((gpu.memory_used_mib / gpu.memory_total_mib) * 100)
@@ -1167,9 +1343,21 @@ function renderGpuBoard() {
     const memoryBar = element("span");
     memoryBar.style.width = `${memoryPercent}%`;
     memoryTrack.append(memoryBar);
+    const processLine = element(
+      "span",
+      "gpu-process-line",
+      occupied
+        ? `本任务 PID ${runProcesses
+            .map((process) => process.pid)
+            .join(", ")}`
+        : assigned
+          ? "任务已绑定，等待 CUDA 上下文"
+          : "不属于当前任务契约",
+    );
     card.append(
       heading,
       name,
+      processLine,
       utilization,
       utilizationTrack,
       memory,

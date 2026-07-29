@@ -17,6 +17,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from .config import ALLOWED_KEYS, ConfigResolver, ConfigValidationError, DATASETS
+from .gpu import probe_gpu_metrics
 from .store import (
     StateStore,
     child_process_environment,
@@ -150,50 +151,6 @@ def parse_args() -> argparse.Namespace:
         help="Save run snapshots without launching processes (UI/QA use only).",
     )
     return parser.parse_args()
-
-
-def probe_gpu_metrics() -> list[dict[str, Any]] | None:
-    """Return a lightweight NVIDIA GPU snapshot without importing torch."""
-
-    try:
-        completed = subprocess.run(
-            [
-                "nvidia-smi",
-                (
-                    "--query-gpu=index,name,utilization.gpu,memory.used,"
-                    "memory.total,temperature.gpu"
-                ),
-                "--format=csv,noheader,nounits",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-            timeout=2,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-    if completed.returncode != 0:
-        return None
-    rows: list[dict[str, Any]] = []
-    for raw_line in completed.stdout.splitlines():
-        parts = [part.strip() for part in raw_line.split(",", 5)]
-        if len(parts) != 6:
-            continue
-        try:
-            rows.append(
-                {
-                    "index": parts[0],
-                    "name": parts[1],
-                    "utilization": int(parts[2]),
-                    "memory_used_mib": int(parts[3]),
-                    "memory_total_mib": int(parts[4]),
-                    "temperature_c": int(parts[5]),
-                }
-            )
-        except ValueError:
-            continue
-    return rows
 
 
 def probe_gpu_count() -> int | None:

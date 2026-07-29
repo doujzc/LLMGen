@@ -1872,11 +1872,77 @@ input::placeholder {
   margin-top: 15px;
 }
 
+.gpu-contract-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 15px 0 0;
+  border: 1px solid var(--line);
+  background:
+    linear-gradient(135deg, rgba(182, 61, 26, 0.035) 25%, transparent 25%) 0 0 / 8px 8px,
+    var(--surface);
+}
+
+.gpu-contract-strip > div {
+  min-width: 0;
+  padding: 9px 10px;
+  border-right: 1px solid var(--line);
+}
+
+.gpu-contract-strip > div:last-child {
+  border-right: 0;
+}
+
+.gpu-contract-strip dt {
+  color: var(--muted);
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gpu-contract-strip dd {
+  min-width: 0;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font: 650 8px/1.45 "SFMono-Regular", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gpu-card {
   min-width: 0;
   padding: 10px;
   border: 1px solid var(--line);
   background: var(--surface-soft);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+}
+
+.gpu-card.assigned {
+  border-color: rgba(182, 61, 26, 0.48);
+  background:
+    linear-gradient(135deg, rgba(237, 93, 47, 0.065), transparent 46%),
+    var(--surface);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.gpu-card.observed {
+  border-color: rgba(42, 107, 74, 0.58);
+  box-shadow:
+    inset 3px 0 0 var(--green),
+    0 8px 24px rgba(42, 107, 74, 0.08);
+}
+
+.gpu-card.breached {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+
+.gpu-card.host-only {
+  opacity: 0.48;
 }
 
 .gpu-card-heading,
@@ -1887,8 +1953,40 @@ input::placeholder {
   gap: 8px;
 }
 
+.gpu-card-identity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .gpu-card-heading strong {
   font: 700 9px/1 "SFMono-Regular", Consolas, monospace;
+}
+
+.gpu-contract-badge {
+  padding: 2px 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.gpu-card.assigned .gpu-contract-badge {
+  border-color: rgba(182, 61, 26, 0.42);
+  color: var(--accent-dark);
+}
+
+.gpu-card.observed .gpu-contract-badge {
+  border-color: rgba(42, 107, 74, 0.45);
+  color: var(--green);
+}
+
+.gpu-card.breached .gpu-contract-badge {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .gpu-card-heading span,
@@ -1904,6 +2002,24 @@ input::placeholder {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gpu-process-line {
+  display: block;
+  margin-top: 7px;
+  overflow: hidden;
+  color: var(--muted);
+  font: 600 7px/1.4 "SFMono-Regular", Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-card.observed .gpu-process-line {
+  color: var(--green);
+}
+
+.gpu-card.breached .gpu-process-line {
+  color: var(--danger);
 }
 
 .gpu-reading {
@@ -2439,6 +2555,19 @@ dialog::backdrop {
 
   .gpu-board {
     grid-template-columns: 1fr;
+  }
+
+  .gpu-contract-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-contract-strip > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .gpu-contract-strip > div:last-child {
+    border-bottom: 0;
   }
 
   .log-controls {

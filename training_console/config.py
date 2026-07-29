@@ -205,12 +205,29 @@ FIELDS = (
         required=True,
     ),
     _field(
+        "CUDA_DEVICE_ORDER",
+        "CUDA 编号顺序",
+        "base",
+        "运行环境",
+        kind="select",
+        options=("PCI_BUS_ID", "FASTEST_FIRST"),
+        help=(
+            "默认使用 PCI_BUS_ID；控制台还会把 nvidia-smi 数字编号"
+            "解析为 GPU UUID，避免物理卡映射歧义。"
+        ),
+        advanced=True,
+        required=True,
+    ),
+    _field(
         "CUDA_VISIBLE_DEVICES",
         "可见 GPU",
         "base",
         "运行环境",
         kind="gpu_csv",
-        help="逗号分隔，例如 0,1,2,3。",
+        help=(
+            "逗号分隔的 nvidia-smi GPU 编号或 GPU UUID，例如 4,5,6,7；"
+            "运行时数字编号会绑定为稳定 UUID。"
+        ),
         required=True,
     ),
     _field(
@@ -1149,8 +1166,13 @@ def _normalize_value(spec: FieldSpec, raw: Any) -> str:
         raise ValueError(f"必须是：{', '.join(spec.options)}")
     if spec.kind == "gpu_csv":
         tokens = [token.strip() for token in value.split(",") if token.strip()]
-        if not tokens or any(not re.fullmatch(r"[A-Za-z0-9_.:-]+", token) for token in tokens):
+        if not tokens or any(
+            not re.fullmatch(r"[A-Za-z0-9_.:-]+", token)
+            for token in tokens
+        ):
             raise ValueError("必须是逗号分隔的 GPU 标识")
+        if len(set(tokens)) != len(tokens):
+            raise ValueError("GPU 标识不能重复")
         return ",".join(tokens)
     if spec.kind == "number_list":
         tokens = value.split()
@@ -1497,6 +1519,7 @@ class ConfigResolver:
             "log_dir": "",
             "gpus": visible_gpus,
             "num_gpus": resolved.get("ROUTER_NUM_GPUS", ""),
+            "cuda_device_order": resolved.get("CUDA_DEVICE_ORDER", ""),
             "deepspeed": resolved.get("ROUTER_DEEPSPEED_CONFIG", ""),
             "precision": resolved.get("ROUTER_PRECISION", ""),
             "num_levels": resolved.get("NUM_LEVELS", ""),

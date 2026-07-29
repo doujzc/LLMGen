@@ -44,7 +44,7 @@
 
       <dl class="header-metrics">
         <div>
-          <dt>可用 GPU</dt>
+          <dt>整机 / 配置 GPU</dt>
           <dd id="metric-gpus">—</dd>
         </div>
         <div>
@@ -255,6 +255,10 @@
                 <dd id="contract-gpus">—</dd>
               </div>
               <div>
+                <dt>编号语义</dt>
+                <dd id="contract-gpu-order">—</dd>
+              </div>
+              <div>
                 <dt>并行策略</dt>
                 <dd id="contract-deepspeed">—</dd>
               </div>
@@ -420,9 +424,9 @@
             <small>最近 100 次运行</small>
           </div>
           <div>
-            <dt>GPU 遥测</dt>
+            <dt>任务 / 整机 GPU</dt>
             <dd id="monitor-gpu-count">—</dd>
-            <small id="monitor-gpu-summary">等待 nvidia-smi</small>
+            <small id="monitor-gpu-summary">等待任务 GPU 契约</small>
           </div>
         </dl>
       </header>
@@ -558,10 +562,24 @@
                 <div class="panel-title">
                   <div>
                     <span class="eyebrow">DEVICE BOARD</span>
-                    <h3 id="gpu-panel-title">GPU 状态</h3>
+                    <h3 id="gpu-panel-title">任务 GPU 契约</h3>
                   </div>
-                  <span id="gpu-panel-updated">实时快照</span>
+                  <span id="gpu-panel-updated">等待绑定信息</span>
                 </div>
+                <dl class="gpu-contract-strip">
+                  <div>
+                    <dt>请求设备</dt>
+                    <dd id="gpu-requested-devices">—</dd>
+                  </div>
+                  <div>
+                    <dt>Runtime 绑定</dt>
+                    <dd id="gpu-runtime-devices">—</dd>
+                  </div>
+                  <div>
+                    <dt>实际占用</dt>
+                    <dd id="gpu-observed-devices">等待 CUDA 进程</dd>
+                  </div>
+                </dl>
                 <div id="gpu-board" class="gpu-board"></div>
               </section>
             </div>

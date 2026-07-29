@@ -195,7 +195,8 @@ export-web
 - 主区域展示选中任务的状态、profile revision、流水线位置和可解析进度；
 - 运行遥测展示阶段、持续时间、runner/training PID、exit code、checkpoint
   与产物目录；
-- GPU 面板通过独立的 `nvidia-smi` 只读探测展示利用率、显存和温度；
+- GPU 面板通过独立的 `nvidia-smi` 只读探测展示利用率、显存和温度，并区分
+  任务请求设备、Runtime UUID 绑定、本任务进程组的实际占用和整机其他 GPU；
 - 日志面板每 3 秒有界读取已脱敏的 `train.log` 尾部，支持跟随底部和手动刷新；
 - 活跃任务提供显式二次确认的“停止训练”，停止中禁止重复提交；
 - 配置页面右侧只保留当前任务摘要，不再承担完整监控职责。
@@ -211,6 +212,8 @@ export-web
 - 所有字段通过类型和枚举校验；
 - 数据集、命令和路径合法；
 - GPU 数量与 `CUDA_VISIBLE_DEVICES` 一致；
+- 数字 GPU 编号按 `nvidia-smi` 索引解析为稳定 UUID，且默认使用
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`；
 - 控制台对可直接确认的本地依赖给出警告；数据质量门禁和阶段输入检查仍由
   现有 CLI 权威执行，并写入独立任务日志；
 - 用户能看到最终命令和输出目录。
@@ -241,7 +244,8 @@ configs/<dataset>.env
 | `RUN_DIR` | path | 本次训练运行目录 |
 | `PYTHON` | path | Python 可执行文件 |
 | `DEVICE` | string | 默认 `cuda` |
-| `CUDA_VISIBLE_DEVICES` | csv | 例如 `0,1,2,3` |
+| `CUDA_DEVICE_ORDER` | enum | 默认 `PCI_BUS_ID` |
+| `CUDA_VISIBLE_DEVICES` | csv | `nvidia-smi` 编号或 GPU UUID |
 | `SKIP_PREPARE` | bool | 完整流程是否跳过已有预处理 |
 
 `RUN_DIR` 是训练产物的单一工作目录根：
