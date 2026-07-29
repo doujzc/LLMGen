@@ -138,6 +138,9 @@ SKIP_PREPARE=1 bash scripts/router_pipeline.sh "$DATASET" full
 Memorization、单 Skill Retrieval Alignment、多 Skill Retrieval 和闭集评估。
 `light` 的扩充版数据默认使用 10 个 Memorization epochs、1 个 Alignment epoch
 和 1 个 Retrieval epoch；`clawhub` 的默认值由对应配置文件定义。
+闭集 Retrieval 默认按 `80%` 多 Skill、`15%` Alignment、`5%` Memorization
+混合；后两项可分别用 `ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION` 和
+`ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION` 覆盖。
 
 分阶段调试：
 

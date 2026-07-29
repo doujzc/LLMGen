@@ -111,6 +111,14 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
     assert light["defaults"]["BRANCHING_FACTORS"] == "32 16"
     assert clawhub["defaults"]["ROUTER_FINETUNE_MODE"] == "full"
     assert clawhub["defaults"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert (
+        clawhub["defaults"]["ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"]
+        == "0.15"
+    )
+    assert (
+        clawhub["defaults"]["ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"]
+        == "0.05"
+    )
     assert clawhub["secrets"]["OPENAI_API_KEY"]["persisted"] is False
     fields = {field["key"]: field for field in clawhub["fields"]}
     for key in (

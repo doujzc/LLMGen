@@ -55,11 +55,18 @@ if [[ ! -f "$MODEL_DIR/router_manifest.json" ]]; then
   CHECKPOINT_EXPORT_DIR="${ROUTER_CHECKPOINT_EXPORT_DIR:-$RUN_DIR/exports/${CHECKPOINT_PHASE}-${CHECKPOINT_NAME}}"
 
   REPLAY_ARGS=()
-  if [[ "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0.0" ]]; then
+  if [[ "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0.0" ]]; then
+    skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+    REPLAY_ARGS+=(
+      --alignment-replay-data "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+      --alignment-replay-fraction "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
+    )
+  fi
+  if [[ "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0.0" ]]; then
     skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
-    REPLAY_ARGS=(
-      --replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
-      --replay-fraction "$ROUTER_RETRIEVAL_REPLAY_FRACTION"
+    REPLAY_ARGS+=(
+      --memorization-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
+      --memorization-replay-fraction "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"
     )
   fi
 
@@ -99,13 +106,22 @@ TRAINING_DATA="$ROUTER_DATA_DIR/${MODEL_PHASE}_train.jsonl"
 skillret_require_file "$TRAINING_DATA"
 
 FINAL_REPLAY_ARGS=()
-if [[ "$MODEL_PHASE" == "retrieval" && "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0.0" ]]; then
-  skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
-  FINAL_REPLAY_ARGS=(
-    --replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
-    --replay-fraction "$ROUTER_RETRIEVAL_REPLAY_FRACTION"
-    --seed "$ROUTER_SEED"
+if [[ "$MODEL_PHASE" == "retrieval" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0.0" ]]; then
+  skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+  FINAL_REPLAY_ARGS+=(
+    --alignment-replay-data "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+    --alignment-replay-fraction "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
   )
+fi
+if [[ "$MODEL_PHASE" == "retrieval" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0.0" ]]; then
+  skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
+  FINAL_REPLAY_ARGS+=(
+    --memorization-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
+    --memorization-replay-fraction "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"
+  )
+fi
+if (( ${#FINAL_REPLAY_ARGS[@]} > 0 )); then
+  FINAL_REPLAY_ARGS+=(--seed "$ROUTER_SEED")
 fi
 
 "$PYTHON" scripts/export_router_bundle.py \

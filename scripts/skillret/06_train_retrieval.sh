@@ -64,15 +64,23 @@ if [[ -n "$ROUTER_RESUME_RETRIEVAL" ]]; then
 fi
 
 REPLAY_ARGS=()
-if [[ "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_REPLAY_FRACTION" != "0.0" ]]; then
+if [[ "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0.0" ]]; then
+  skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+  REPLAY_ARGS+=(
+    --retrieval-alignment-replay-data "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
+    --retrieval-alignment-replay-fraction "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
+  )
+fi
+if [[ "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0.0" ]]; then
   skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
-  REPLAY_ARGS=(
-    --retrieval-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
-    --retrieval-replay-fraction "$ROUTER_RETRIEVAL_REPLAY_FRACTION"
+  REPLAY_ARGS+=(
+    --retrieval-memorization-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
+    --retrieval-memorization-replay-fraction "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"
   )
 fi
 
-skillret_print_step "06b" "multi-skill autoregressive retrieval training"
+skillret_print_step "06b" \
+  "multi-Skill retrieval with alignment/memorization replay"
 "${ROUTER_LAUNCH[@]}" scripts/train_router.py \
   "${MODEL_ARGS[@]}" \
   "${ROUTER_COMMON_ARGS[@]}" \

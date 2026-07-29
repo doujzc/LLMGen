@@ -157,6 +157,9 @@ def test_materialize_completed_checkpoint_for_web(
     tokens = index / "virtual_tokens.txt"
     training_data = tmp_path / "router_data" / "retrieval_train.jsonl"
     replay_data = tmp_path / "router_data" / "memorization_train.jsonl"
+    alignment_replay_data = (
+        tmp_path / "router_data" / "retrieval_alignment_train.jsonl"
+    )
     training_data.parent.mkdir()
     _write_jsonl(catalog, CATALOG)
     _write_jsonl(codes, CODE_ROWS)
@@ -171,7 +174,12 @@ def test_materialize_completed_checkpoint_for_web(
                     ["<L1_0>", "<L2_0>"],
                 ],
                 "target_skill_ids": ["s1", "s2"],
-            }
+            },
+            {
+                "phase": "retrieval",
+                "target_paths": [["<L1_0>", "<L2_0>"]],
+                "target_skill_ids": ["s1"],
+            },
         ],
     )
     _write_jsonl(
@@ -181,6 +189,16 @@ def test_materialize_completed_checkpoint_for_web(
                 "phase": "memorization",
                 "target_paths": [["<L1_1>", "<L2_1>"]],
                 "target_skill_ids": ["s3"],
+            }
+        ],
+    )
+    _write_jsonl(
+        alignment_replay_data,
+        [
+            {
+                "phase": "retrieval",
+                "target_paths": [["<L1_0>", "<L2_0>"]],
+                "target_skill_ids": ["s2"],
             }
         ],
     )
@@ -213,7 +231,7 @@ def test_materialize_completed_checkpoint_for_web(
         training_data_path=training_data,
         validation_data_path=None,
         replay_data_path=replay_data,
-        replay_fraction=0.5,
+        replay_fraction=0.25,
         phase="retrieval",
         num_levels=2,
         max_length=1024,
@@ -221,6 +239,8 @@ def test_materialize_completed_checkpoint_for_web(
         template_manifest_path=template_manifest,
         base_model_name_or_path="Qwen/Qwen3-1.7B",
         trust_remote_code=False,
+        alignment_replay_data_path=alignment_replay_data,
+        alignment_replay_fraction=0.25,
     )
 
     assert result["global_step"] == 50
@@ -236,11 +256,15 @@ def test_materialize_completed_checkpoint_for_web(
     assert manifest["checkpoint_export"]["inference_mode"] == "full"
     assert manifest["generation_contract"]["max_target_paths"] == 1
     assert manifest["examples"] == {
-        "train": 2,
-        "primary_train": 1,
-        "replay": 1,
+        "train": 4,
+        "primary_train": 2,
+        "replay": 2,
+        "replay_by_source": {"alignment": 1, "memorization": 1},
         "validation": 0,
     }
+    assert manifest["replay_fraction_actual"] == 0.5
+    assert manifest["replay_sources"]["alignment"]["repeat_factor"] == 1.0
+    assert manifest["replay_sources"]["memorization"]["repeat_factor"] == 1.0
     assert restored["skills"]["s3"]["train_target_count"] == 1
 
 

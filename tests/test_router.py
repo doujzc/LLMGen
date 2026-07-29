@@ -21,6 +21,7 @@ from llmgen.router import (
     encode_target_only_example,
     grouped_train_validation_split,
     mix_replay_rows,
+    mix_replay_sources,
     normalize_code_rows,
     qrels_by_query,
     query_code_path_metrics,
@@ -249,6 +250,59 @@ def test_replay_mixture_is_deterministic_and_respects_fraction() -> None:
     mixed, replay_count = first
     assert replay_count == 2
     assert len(mixed) == 10
+
+
+def test_replay_mixture_cycles_small_source_to_reach_fraction() -> None:
+    primary = [{"source": "primary", "id": index} for index in range(80)]
+    replay = [{"source": "replay", "id": index} for index in range(2)]
+
+    mixed, replay_count = mix_replay_rows(
+        primary,
+        replay,
+        replay_fraction=0.2,
+        seed=11,
+    )
+
+    assert len(mixed) == 100
+    assert replay_count == 20
+    assert sum(row["source"] == "replay" for row in mixed) == 20
+    assert {
+        row["id"] for row in mixed if row["source"] == "replay"
+    } == {0, 1}
+
+
+def test_three_way_replay_mixture_is_80_15_5() -> None:
+    primary = [{"source": "retrieval", "id": index} for index in range(80)]
+    alignment = [{"source": "alignment", "id": index} for index in range(3)]
+    memorization = [{"source": "memorization", "id": 0}]
+
+    mixed, counts = mix_replay_sources(
+        primary,
+        (
+            ("alignment", alignment, 0.15),
+            ("memorization", memorization, 0.05),
+        ),
+        seed=17,
+    )
+
+    assert len(mixed) == 100
+    assert counts == {"alignment": 15, "memorization": 5}
+    assert {
+        source: sum(row["source"] == source for row in mixed)
+        for source in ("retrieval", "alignment", "memorization")
+    } == {"retrieval": 80, "alignment": 15, "memorization": 5}
+
+
+def test_replay_sources_reject_fraction_sum_of_one() -> None:
+    with pytest.raises(RouterDataError, match="total replay fraction"):
+        mix_replay_sources(
+            [{"source": "primary"}],
+            (
+                ("alignment", [{"source": "alignment"}], 0.75),
+                ("memorization", [{"source": "memorization"}], 0.25),
+            ),
+            seed=1,
+        )
 
 
 def test_trie_requires_exactly_l_tokens_then_eos() -> None:

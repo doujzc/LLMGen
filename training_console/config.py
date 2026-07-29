@@ -731,8 +731,16 @@ FIELDS = (
         kind="float",
     ),
     _field(
-        "ROUTER_RETRIEVAL_REPLAY_FRACTION",
-        "Replay 比例",
+        "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION",
+        "Alignment Replay 比例",
+        "retrieval",
+        "阶段超参数",
+        kind="float",
+        source="configs/closedset.env",
+    ),
+    _field(
+        "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION",
+        "Memorization Replay 比例",
         "retrieval",
         "阶段超参数",
         kind="float",

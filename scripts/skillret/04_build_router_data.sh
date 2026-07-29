@@ -9,7 +9,12 @@ skillret_require_file "$INDEX_DIR/train_codes.jsonl"
 skillret_require_file "$INDEX_DIR/virtual_tokens.txt"
 
 ALIGNMENT_ARGS=()
-if [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]; then
+if {
+  [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]
+} || {
+  [[ "${ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION:-0}" != "0" &&
+    "${ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION:-0}" != "0.0" ]]
+}; then
   skillret_require_file "$PROCESSED_DIR/queries_alignment.jsonl"
   skillret_require_file "$PROCESSED_DIR/qrels_alignment.jsonl"
   ALIGNMENT_ARGS=(

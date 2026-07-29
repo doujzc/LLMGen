@@ -14,14 +14,14 @@ import json
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Sequence
 
 from llmgen.router import (
     RouterDataError,
     code_token_id_map,
     encode_target_only_example,
     load_virtual_tokens,
-    mix_replay_rows,
+    mix_replay_sources,
     read_jsonl,
 )
 from llmgen.router_bundle import dump_router_decoder_artifacts
@@ -70,10 +70,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval-train")
     parser.add_argument("--retrieval-validation")
     parser.add_argument(
+        "--retrieval-memorization-replay-data",
         "--retrieval-replay-data",
+        dest="retrieval_memorization_replay_data",
         help="Optional memorization_train.jsonl replayed during retrieval SFT.",
     )
-    parser.add_argument("--retrieval-replay-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--retrieval-memorization-replay-fraction",
+        "--retrieval-replay-fraction",
+        dest="retrieval_memorization_replay_fraction",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--retrieval-alignment-replay-data",
+        help="Optional retrieval_alignment_train.jsonl replayed during retrieval SFT.",
+    )
+    parser.add_argument(
+        "--retrieval-alignment-replay-fraction",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--num-levels", type=int, required=True)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--memorization-system-prompt", default=MEMORIZATION_SYSTEM_PROMPT)
@@ -447,21 +464,55 @@ def _run_phase(
     model: Any,
     token_ids: dict[str, int],
     training_args: Any | None = None,
-    replay_path: str | None = None,
-    replay_fraction: float = 0.0,
+    replay_inputs: Sequence[tuple[str, str | None, float]] = (),
     replay_system_prompt: str | None = None,
     output_subdir: str | None = None,
 ) -> None:
     primary_train_rows = read_jsonl(train_path)
     if not primary_train_rows:
         raise RouterDataError(f"{phase} training data is empty")
-    replay_rows = read_jsonl(replay_path) if replay_path else []
-    train_rows, replay_examples = mix_replay_rows(
+    loaded_replay_sources = [
+        (name, read_jsonl(path) if path else [], fraction)
+        for name, path, fraction in replay_inputs
+    ]
+    train_rows, replay_counts = mix_replay_sources(
         primary_train_rows,
-        replay_rows,
-        replay_fraction=replay_fraction,
+        loaded_replay_sources,
         seed=args.seed,
     )
+    replay_examples = sum(replay_counts.values())
+    replay_fraction = sum(fraction for _, _, fraction in replay_inputs)
+    replay_sources: dict[str, dict[str, Any]] = {}
+    for (name, path, fraction), (_, rows, _) in zip(
+        replay_inputs,
+        loaded_replay_sources,
+        strict=True,
+    ):
+        if not path:
+            continue
+        examples = replay_counts[name]
+        replay_sources[name] = {
+            "data": str(Path(path).resolve()),
+            "data_sha256": sha256_file(path),
+            "source_rows": len(rows),
+            "examples": examples,
+            "fraction_requested": fraction,
+            "fraction_actual": examples / max(len(train_rows), 1),
+            "repeat_factor": examples / max(len(rows), 1),
+        }
+    if args.local_rank in (-1, 0):
+        mixture = [
+            "primary="
+            f"{len(primary_train_rows)} "
+            f"({len(primary_train_rows) / len(train_rows):.2%})"
+        ]
+        mixture.extend(
+            f"{name}={metadata['examples']} "
+            f"({metadata['fraction_actual']:.2%})"
+            for name, metadata in replay_sources.items()
+        )
+        mixture.append(f"total={len(train_rows)}")
+        print(f"[{phase}] training mixture: " + ", ".join(mixture), flush=True)
     validation_rows = read_jsonl(validation_path) if validation_path else []
     Dataset = _dataset_class(torch)
     train_dataset = Dataset(
@@ -568,10 +619,13 @@ def _run_phase(
             "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
             "train_data": str(Path(train_path).resolve()),
             "train_data_sha256": sha256_file(train_path),
-            "replay_data": str(Path(replay_path).resolve()) if replay_path else None,
-            "replay_data_sha256": sha256_file(replay_path) if replay_path else None,
+            "replay_data": replay_sources.get("memorization", {}).get("data"),
+            "replay_data_sha256": replay_sources.get("memorization", {}).get(
+                "data_sha256"
+            ),
             "replay_fraction_requested": replay_fraction,
             "replay_fraction_actual": replay_examples / max(len(train_rows), 1),
+            "replay_sources": replay_sources,
             "validation_data": (
                 str(Path(validation_path).resolve()) if validation_path else None
             ),
@@ -609,7 +663,11 @@ def _run_phase(
                 "deepspeed": deepspeed_metadata,
             },
             "system_prompt": system_prompt,
-            "replay_system_prompt": replay_system_prompt,
+            "replay_system_prompt": (
+                replay_system_prompt
+                if replay_counts.get("memorization", 0)
+                else None
+            ),
             "max_length": args.max_length,
             "generation_contract": {
                 "mode": (
@@ -624,6 +682,7 @@ def _run_phase(
                 "train": len(train_rows),
                 "primary_train": len(primary_train_rows),
                 "replay": replay_examples,
+                "replay_by_source": replay_counts,
                 "validation": len(validation_rows),
             },
         }
@@ -689,13 +748,30 @@ def main() -> None:
         raise RouterDataError(
             "save_steps must be a multiple of eval_steps when validation is enabled"
         )
-    if not 0.0 <= args.retrieval_replay_fraction < 1.0:
-        raise RouterDataError("--retrieval-replay-fraction must be in [0, 1)")
-    if bool(args.retrieval_replay_data) != (args.retrieval_replay_fraction > 0.0):
-        raise RouterDataError(
-            "set both --retrieval-replay-data and a positive "
-            "--retrieval-replay-fraction, or neither"
-        )
+    replay_arguments = (
+        (
+            "alignment",
+            args.retrieval_alignment_replay_data,
+            args.retrieval_alignment_replay_fraction,
+        ),
+        (
+            "memorization",
+            args.retrieval_memorization_replay_data,
+            args.retrieval_memorization_replay_fraction,
+        ),
+    )
+    for name, path, fraction in replay_arguments:
+        if not 0.0 <= fraction < 1.0:
+            raise RouterDataError(
+                f"--retrieval-{name}-replay-fraction must be in [0, 1)"
+            )
+        if bool(path) != (fraction > 0.0):
+            raise RouterDataError(
+                f"set both --retrieval-{name}-replay-data and a positive "
+                f"--retrieval-{name}-replay-fraction, or neither"
+            )
+    if sum(fraction for _, _, fraction in replay_arguments) >= 1.0:
+        raise RouterDataError("total retrieval replay fraction must be less than 1")
     if args.adapter_name_or_path and args.lora:
         raise RouterDataError("use either --adapter-name-or-path or --lora, not both")
     if args.deepspeed and args.stage == "both":
@@ -777,8 +853,7 @@ def main() -> None:
             model=model,
             token_ids=token_ids,
             training_args=deepspeed_training_args,
-            replay_path=None,
-            replay_fraction=0.0,
+            replay_inputs=(),
             replay_system_prompt=None,
             output_subdir=args.phase_output_subdir,
         )
@@ -799,8 +874,7 @@ def main() -> None:
             model=model,
             token_ids=token_ids,
             training_args=deepspeed_training_args,
-            replay_path=args.retrieval_replay_data,
-            replay_fraction=args.retrieval_replay_fraction,
+            replay_inputs=replay_arguments,
             replay_system_prompt=args.memorization_system_prompt,
             output_subdir=args.phase_output_subdir,
         )

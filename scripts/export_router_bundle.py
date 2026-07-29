@@ -17,7 +17,7 @@ from llmgen.router import (
     RouterDataError,
     code_token_id_map,
     load_virtual_tokens,
-    mix_replay_rows,
+    mix_replay_sources,
     read_jsonl,
 )
 from llmgen.router_bundle import (
@@ -60,8 +60,24 @@ def parse_args() -> argparse.Namespace:
         help="Router phase training JSONL used to annotate target supervision.",
     )
     parser.add_argument("--validation-data")
-    parser.add_argument("--replay-data")
-    parser.add_argument("--replay-fraction", type=float, default=0.0)
+    parser.add_argument(
+        "--memorization-replay-data",
+        "--replay-data",
+        dest="replay_data",
+    )
+    parser.add_argument(
+        "--memorization-replay-fraction",
+        "--replay-fraction",
+        dest="replay_fraction",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument("--alignment-replay-data")
+    parser.add_argument(
+        "--alignment-replay-fraction",
+        type=float,
+        default=0.0,
+    )
     parser.add_argument("--phase", choices=("memorization", "retrieval"))
     parser.add_argument(
         "--tokenizer-source",
@@ -268,6 +284,8 @@ def _checkpoint_manifest(
     validation_data_path: Path | None,
     replay_data_path: Path | None,
     replay_fraction: float,
+    alignment_replay_data_path: Path | None,
+    alignment_replay_fraction: float,
     seed: int,
     decoder_artifacts: dict[str, Any],
 ) -> dict[str, Any]:
@@ -279,13 +297,56 @@ def _checkpoint_manifest(
     primary_rows = read_jsonl(training_data_path)
     if not primary_rows:
         raise RouterDataError("checkpoint export training data is empty")
-    replay_rows = read_jsonl(replay_data_path) if replay_data_path is not None else []
-    mixed_rows, replay_examples = mix_replay_rows(
+    alignment_replay_rows = (
+        read_jsonl(alignment_replay_data_path)
+        if alignment_replay_data_path is not None
+        else []
+    )
+    memorization_replay_rows = (
+        read_jsonl(replay_data_path)
+        if replay_data_path is not None
+        else []
+    )
+    mixed_rows, replay_counts = mix_replay_sources(
         primary_rows,
-        replay_rows,
-        replay_fraction=replay_fraction,
+        (
+            (
+                "alignment",
+                alignment_replay_rows,
+                alignment_replay_fraction,
+            ),
+            ("memorization", memorization_replay_rows, replay_fraction),
+        ),
         seed=seed,
     )
+    replay_examples = sum(replay_counts.values())
+    replay_sources = {}
+    for name, path, rows, fraction in (
+        (
+            "alignment",
+            alignment_replay_data_path,
+            alignment_replay_rows,
+            alignment_replay_fraction,
+        ),
+        (
+            "memorization",
+            replay_data_path,
+            memorization_replay_rows,
+            replay_fraction,
+        ),
+    ):
+        if path is None:
+            continue
+        examples = replay_counts[name]
+        replay_sources[name] = {
+            "data": str(path),
+            "data_sha256": sha256_file(path),
+            "source_rows": len(rows),
+            "examples": examples,
+            "fraction_requested": fraction,
+            "fraction_actual": examples / len(mixed_rows),
+            "repeat_factor": examples / max(len(rows), 1),
+        }
     validation_rows = (
         read_jsonl(validation_data_path)
         if validation_data_path is not None
@@ -321,8 +382,11 @@ def _checkpoint_manifest(
                 if replay_data_path is not None
                 else None
             ),
-            "replay_fraction_requested": replay_fraction,
+            "replay_fraction_requested": (
+                replay_fraction + alignment_replay_fraction
+            ),
             "replay_fraction_actual": replay_examples / len(mixed_rows),
+            "replay_sources": replay_sources,
             "validation_data": (
                 str(validation_data_path)
                 if validation_data_path is not None
@@ -358,7 +422,9 @@ def _checkpoint_manifest(
                 )
             ),
             "replay_system_prompt": (
-                MEMORIZATION_SYSTEM_PROMPT if replay_examples else None
+                MEMORIZATION_SYSTEM_PROMPT
+                if replay_counts.get("memorization", 0)
+                else None
             ),
             "max_length": max_length,
             "generation_contract": {
@@ -374,6 +440,7 @@ def _checkpoint_manifest(
                 "train": len(mixed_rows),
                 "primary_train": len(primary_rows),
                 "replay": replay_examples,
+                "replay_by_source": replay_counts,
                 "validation": len(validation_rows),
             },
             "checkpoint_export": {
@@ -418,6 +485,8 @@ def materialize_checkpoint_bundle(
     template_manifest_path: str | Path | None,
     base_model_name_or_path: str | None,
     trust_remote_code: bool,
+    alignment_replay_data_path: str | Path | None = None,
+    alignment_replay_fraction: float = 0.0,
 ) -> dict[str, Any]:
     source = Path(checkpoint_dir).expanduser().resolve()
     destination = Path(output_dir).expanduser().resolve()
@@ -435,6 +504,11 @@ def materialize_checkpoint_bundle(
     replay_data_path = (
         Path(replay_data_path).expanduser().resolve()
         if replay_data_path is not None
+        else None
+    )
+    alignment_replay_data_path = (
+        Path(alignment_replay_data_path).expanduser().resolve()
+        if alignment_replay_data_path is not None
         else None
     )
     template_manifest_path = (
@@ -457,12 +531,22 @@ def materialize_checkpoint_bundle(
         raise RouterDataError(f"unsupported checkpoint phase: {phase!r}")
     if num_levels < 1 or max_length <= num_levels + 1:
         raise RouterDataError("invalid num_levels/max_length for checkpoint export")
-    if not 0.0 <= replay_fraction < 1.0:
-        raise RouterDataError("replay_fraction must be in [0, 1)")
-    if bool(replay_data_path) != (replay_fraction > 0.0):
-        raise RouterDataError(
-            "set both replay_data_path and a positive replay_fraction, or neither"
-        )
+    for name, path, fraction in (
+        ("memorization", replay_data_path, replay_fraction),
+        (
+            "alignment",
+            alignment_replay_data_path,
+            alignment_replay_fraction,
+        ),
+    ):
+        if not 0.0 <= fraction < 1.0:
+            raise RouterDataError(f"{name} replay fraction must be in [0, 1)")
+        if bool(path) != (fraction > 0.0):
+            raise RouterDataError(
+                f"set both {name} replay data and a positive fraction, or neither"
+            )
+    if replay_fraction + alignment_replay_fraction >= 1.0:
+        raise RouterDataError("total replay fraction must be less than 1")
     required_files = [
         catalog_path,
         codes_path,
@@ -474,6 +558,8 @@ def materialize_checkpoint_bundle(
         required_files.append(validation_data_path)
     if replay_data_path is not None:
         required_files.append(replay_data_path)
+    if alignment_replay_data_path is not None:
+        required_files.append(alignment_replay_data_path)
     if template_manifest_path is not None:
         required_files.append(template_manifest_path)
     for path in required_files:
@@ -508,15 +594,30 @@ def materialize_checkpoint_bundle(
             trust_remote_code=trust_remote_code,
         )
         primary_supervision_rows = read_jsonl(training_data_path)
-        replay_supervision_rows = (
+        memorization_replay_supervision_rows = (
             read_jsonl(replay_data_path)
             if replay_data_path is not None
             else []
         )
-        effective_supervision_rows, _ = mix_replay_rows(
+        alignment_replay_supervision_rows = (
+            read_jsonl(alignment_replay_data_path)
+            if alignment_replay_data_path is not None
+            else []
+        )
+        effective_supervision_rows, _ = mix_replay_sources(
             primary_supervision_rows,
-            replay_supervision_rows,
-            replay_fraction=replay_fraction,
+            (
+                (
+                    "alignment",
+                    alignment_replay_supervision_rows,
+                    alignment_replay_fraction,
+                ),
+                (
+                    "memorization",
+                    memorization_replay_supervision_rows,
+                    replay_fraction,
+                ),
+            ),
             seed=seed,
         )
         decoder_artifacts = dump_router_decoder_artifacts(
@@ -547,6 +648,8 @@ def materialize_checkpoint_bundle(
             validation_data_path=validation_data_path,
             replay_data_path=replay_data_path,
             replay_fraction=replay_fraction,
+            alignment_replay_data_path=alignment_replay_data_path,
+            alignment_replay_fraction=alignment_replay_fraction,
             seed=seed,
             decoder_artifacts=decoder_artifacts,
         )
@@ -582,6 +685,8 @@ def attach_decoder_artifacts(
     replay_data_path: str | Path | None = None,
     replay_fraction: float = 0.0,
     seed: int = 42,
+    alignment_replay_data_path: str | Path | None = None,
+    alignment_replay_fraction: float = 0.0,
 ) -> dict[str, Any]:
     model_dir = Path(model_dir)
     if not model_dir.is_dir():
@@ -598,28 +703,76 @@ def attach_decoder_artifacts(
             f"router training data does not exist: {training_data}; "
             "pass --training-data with its current location"
         )
-    replay_data = replay_data_path or manifest.get("replay_data")
-    if replay_data and not Path(replay_data).is_file():
-        raise RouterDataError(
-            f"router replay data does not exist: {replay_data}; "
-            "pass --replay-data with its current location"
-        )
+    manifest_replay_sources = manifest.get("replay_sources")
+    structured_replay = (
+        manifest_replay_sources
+        if isinstance(manifest_replay_sources, dict)
+        else None
+    )
     if replay_data_path is None:
-        replay_fraction = float(
-            manifest.get("replay_fraction_requested", replay_fraction)
+        memorization_source = (
+            structured_replay.get("memorization")
+            if structured_replay is not None
+            else None
         )
-    if not 0.0 <= replay_fraction < 1.0:
-        raise RouterDataError("replay_fraction must be in [0, 1)")
-    if bool(replay_data) != (replay_fraction > 0.0):
-        raise RouterDataError(
-            "set both replay data and a positive replay fraction, or neither"
-        )
+        if isinstance(memorization_source, dict):
+            replay_data_path = memorization_source.get("data")
+            replay_fraction = float(
+                memorization_source.get("fraction_requested", 0.0)
+            )
+        elif structured_replay is None:
+            replay_data_path = manifest.get("replay_data")
+            replay_fraction = float(
+                manifest.get("replay_fraction_requested", replay_fraction)
+            )
+    if alignment_replay_data_path is None and structured_replay is not None:
+        alignment_source = structured_replay.get("alignment")
+        if isinstance(alignment_source, dict):
+            alignment_replay_data_path = alignment_source.get("data")
+            alignment_replay_fraction = float(
+                alignment_source.get("fraction_requested", 0.0)
+            )
+    for name, path, fraction in (
+        ("memorization", replay_data_path, replay_fraction),
+        (
+            "alignment",
+            alignment_replay_data_path,
+            alignment_replay_fraction,
+        ),
+    ):
+        if path and not Path(path).is_file():
+            raise RouterDataError(
+                f"router {name} replay data does not exist: {path}; "
+                f"pass --{name}-replay-data with its current location"
+            )
+        if not 0.0 <= fraction < 1.0:
+            raise RouterDataError(f"{name} replay fraction must be in [0, 1)")
+        if bool(path) != (fraction > 0.0):
+            raise RouterDataError(
+                f"set both {name} replay data and a positive fraction, or neither"
+            )
+    if replay_fraction + alignment_replay_fraction >= 1.0:
+        raise RouterDataError("total replay fraction must be less than 1")
     effective_supervision_rows = None
     if training_data:
-        effective_supervision_rows, _ = mix_replay_rows(
+        effective_supervision_rows, _ = mix_replay_sources(
             read_jsonl(training_data),
-            read_jsonl(replay_data) if replay_data else [],
-            replay_fraction=replay_fraction,
+            (
+                (
+                    "alignment",
+                    (
+                        read_jsonl(alignment_replay_data_path)
+                        if alignment_replay_data_path
+                        else []
+                    ),
+                    alignment_replay_fraction,
+                ),
+                (
+                    "memorization",
+                    read_jsonl(replay_data_path) if replay_data_path else [],
+                    replay_fraction,
+                ),
+            ),
             seed=seed,
         )
     supervision_phase = phase or manifest.get("phase")
@@ -684,6 +837,8 @@ def main() -> None:
             template_manifest_path=args.template_manifest,
             base_model_name_or_path=args.base_model_name_or_path,
             trust_remote_code=args.trust_remote_code,
+            alignment_replay_data_path=args.alignment_replay_data,
+            alignment_replay_fraction=args.alignment_replay_fraction,
         )
     else:
         result = attach_decoder_artifacts(
@@ -697,6 +852,8 @@ def main() -> None:
             replay_data_path=args.replay_data,
             replay_fraction=args.replay_fraction,
             seed=args.seed,
+            alignment_replay_data_path=args.alignment_replay_data,
+            alignment_replay_fraction=args.alignment_replay_fraction,
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

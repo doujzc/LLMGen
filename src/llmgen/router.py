@@ -543,24 +543,99 @@ def mix_replay_rows(
     replay_fraction: float,
     seed: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Mix deterministic replay examples into a phase's primary SFT rows."""
+    """Mix one deterministic, repeat-sampled replay source into primary rows."""
 
-    if not 0.0 <= replay_fraction < 1.0:
-        raise RouterDataError("replay_fraction must be in [0, 1)")
+    mixed, counts = mix_replay_sources(
+        primary_rows,
+        (("replay", replay_rows, replay_fraction),),
+        seed=seed,
+    )
+    return mixed, counts["replay"]
+
+
+def mix_replay_sources(
+    primary_rows: Sequence[Mapping[str, Any]],
+    replay_sources: Sequence[
+        tuple[str, Sequence[Mapping[str, Any]], float]
+    ],
+    *,
+    seed: int,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Mix named replay sources to requested final-dataset fractions.
+
+    Each source is shuffled and cycled as many times as necessary, so a small
+    replay dataset can still reach its configured fraction. The allocation and
+    final row order are deterministic for a fixed seed.
+    """
+
     primary = [dict(row) for row in primary_rows]
-    if replay_fraction == 0.0:
-        return primary, 0
+    normalized_sources: list[
+        tuple[str, Sequence[Mapping[str, Any]], float]
+    ] = []
+    counts: dict[str, int] = {}
+    seen_names: set[str] = set()
+    for name, rows, fraction in replay_sources:
+        if not name or name in seen_names:
+            raise RouterDataError(f"replay source name must be unique: {name!r}")
+        seen_names.add(name)
+        if not 0.0 <= fraction < 1.0:
+            raise RouterDataError(
+                f"{name} replay fraction must be in [0, 1)"
+            )
+        if fraction > 0.0 and not rows:
+            raise RouterDataError(
+                f"{name} replay fraction is positive but replay data is empty"
+            )
+        normalized_sources.append((name, rows, fraction))
+        counts[name] = 0
+
+    total_fraction = sum(source[2] for source in normalized_sources)
+    if total_fraction >= 1.0:
+        raise RouterDataError("total replay fraction must be less than 1")
+    if total_fraction == 0.0:
+        return primary, counts
     if not primary:
         raise RouterDataError("primary replay mixture is empty")
-    if not replay_rows:
-        raise RouterDataError("replay_fraction is positive but replay data is empty")
-    requested = max(1, round(len(primary) * replay_fraction / (1.0 - replay_fraction)))
-    replay = [dict(row) for row in replay_rows]
-    random.Random(seed).shuffle(replay)
-    selected = replay[: min(requested, len(replay))]
+
+    requested_total = max(
+        1,
+        round(len(primary) * total_fraction / (1.0 - total_fraction)),
+    )
+    exact_counts = [
+        requested_total * fraction / total_fraction
+        for _, _, fraction in normalized_sources
+    ]
+    allocated = [math.floor(value) for value in exact_counts]
+    remaining = requested_total - sum(allocated)
+    allocation_order = sorted(
+        range(len(normalized_sources)),
+        key=lambda index: (
+            -(exact_counts[index] - allocated[index]),
+            index,
+        ),
+    )
+    for index in allocation_order[:remaining]:
+        allocated[index] += 1
+
+    selected: list[dict[str, Any]] = []
+    for source_index, ((name, rows, _), requested) in enumerate(
+        zip(normalized_sources, allocated, strict=True)
+    ):
+        counts[name] = requested
+        if requested == 0:
+            continue
+        source = [dict(row) for row in rows]
+        source_random = random.Random(seed + source_index)
+        while requested > 0:
+            cycle = [dict(row) for row in source]
+            source_random.shuffle(cycle)
+            take = min(requested, len(cycle))
+            selected.extend(cycle[:take])
+            requested -= take
+
     mixed = [*primary, *selected]
     random.Random(seed + 1).shuffle(mixed)
-    return mixed, len(selected)
+    return mixed, counts
 
 
 class TokenTrie:
