@@ -22,13 +22,16 @@ COVERAGE_ROUNDS="${COVERAGE_ROUNDS:-5}"
 COVERAGE_OVERSAMPLE_FACTOR="${COVERAGE_OVERSAMPLE_FACTOR:-3.0}"
 SKIP_BASE_WORKFLOWS="${SKIP_BASE_WORKFLOWS:-0}"
 QUERY_VARIANTS="${QUERY_VARIANTS:-3}"
+QUERY_BATCH_SIZE="${QUERY_BATCH_SIZE:-4}"
 IMPLICIT_VARIANTS="${IMPLICIT_VARIANTS:-1}"
-TARGET_ORDER_VARIANTS="${TARGET_ORDER_VARIANTS:-3}"
+TARGET_ORDER_VARIANTS="${TARGET_ORDER_VARIANTS:-4}"
 ALIGNMENT_VARIANTS="${ALIGNMENT_VARIANTS:-3}"
+ALIGNMENT_BATCH_SIZE="${ALIGNMENT_BATCH_SIZE:-3}"
 MIN_ALIGNMENT_QUERIES_PER_SKILL="${MIN_ALIGNMENT_QUERIES_PER_SKILL:-5}"
 ALIGNMENT_COVERAGE_ROUNDS="${ALIGNMENT_COVERAGE_ROUNDS:-5}"
 FINAL_ALIGNMENT_COVERAGE_ROUNDS="${FINAL_ALIGNMENT_COVERAGE_ROUNDS:-5}"
 APPLY_RECOVERY="${APPLY_RECOVERY:-1}"
+MANUAL_ALIGNMENT_PATH="${MANUAL_ALIGNMENT_PATH:-}"
 
 CATALOG_PATH="${CATALOG_PATH:-data/clawhub/catalog.jsonl}"
 DATA_WORK_DIR="${DATA_WORK_DIR:-data/clawhub_training}"
@@ -65,7 +68,7 @@ fi
 stage "Stage 02a: generate direct single-skill curriculum queries"
 "$PYTHON" scripts/clawhub_data/02a_generate_alignment_queries.py \
   --profiles "$PROFILES_PATH" --output "$ALIGNMENT_QUERIES_PATH" \
-  --variants "$ALIGNMENT_VARIANTS" \
+  --variants "$ALIGNMENT_VARIANTS" --batch-size "$ALIGNMENT_BATCH_SIZE" \
   --api-config "$API_CONFIG" --model "$GENERATION_MODEL" --workers "$API_WORKERS"
 stage "Stage 03a: independently review single-skill curriculum queries"
 "$PYTHON" scripts/clawhub_data/03a_review_alignment_queries.py \
@@ -77,7 +80,7 @@ for ((round = 1; round <= ALIGNMENT_COVERAGE_ROUNDS; round++)); do
   "$PYTHON" scripts/clawhub_data/03a2_backfill_alignment.py \
     --profiles "$PROFILES_PATH" --queries "$ALIGNMENT_QUERIES_PATH" \
     --reviews "$ALIGNMENT_REVIEWS_PATH" --round "$round" \
-    --variants "$ALIGNMENT_VARIANTS" \
+    --variants "$ALIGNMENT_VARIANTS" --batch-size "$ALIGNMENT_BATCH_SIZE" \
     --min-passed-per-skill "$MIN_ALIGNMENT_QUERIES_PER_SKILL" \
     --api-config "$API_CONFIG" --model "$GENERATION_MODEL" --workers "$API_WORKERS"
   "$PYTHON" scripts/clawhub_data/03a_review_alignment_queries.py \
@@ -85,10 +88,17 @@ for ((round = 1; round <= ALIGNMENT_COVERAGE_ROUNDS; round++)); do
     --output "$ALIGNMENT_REVIEWS_PATH" \
     --api-config "$API_CONFIG" --model "$REVIEW_MODEL" --workers "$API_WORKERS"
 done
+if [[ -n "$MANUAL_ALIGNMENT_PATH" ]]; then
+  stage "Stage 03a3: append transparent manual single-skill alignment"
+  "$PYTHON" scripts/light_data/02b_apply_manual_alignment.py \
+    --profiles "$PROFILES_PATH" --queries "$ALIGNMENT_QUERIES_PATH" \
+    --reviews "$ALIGNMENT_REVIEWS_PATH" --curated "$MANUAL_ALIGNMENT_PATH"
+fi
 stage "Stage 02: generate explicit and implicit queries"
 "$PYTHON" scripts/clawhub_data/02_generate_queries.py \
   --workflows "$WORKFLOWS_PATH" --output "$QUERIES_PATH" \
   --variants "$QUERY_VARIANTS" --implicit-variants "$IMPLICIT_VARIANTS" \
+  --batch-size "$QUERY_BATCH_SIZE" \
   --api-config "$API_CONFIG" --model "$GENERATION_MODEL" --workers "$API_WORKERS"
 stage "Stage 03: independently review generated queries"
 "$PYTHON" scripts/clawhub_data/03_review_queries.py \
@@ -109,6 +119,7 @@ for ((round = 1; round <= COVERAGE_ROUNDS; round++)); do
   "$PYTHON" scripts/clawhub_data/02_generate_queries.py \
     --workflows "$WORKFLOWS_PATH" --output "$QUERIES_PATH" \
     --variants "$QUERY_VARIANTS" --implicit-variants "$IMPLICIT_VARIANTS" \
+    --batch-size "$QUERY_BATCH_SIZE" \
     --api-config "$API_CONFIG" --model "$GENERATION_MODEL" --workers "$API_WORKERS"
   stage "Stage 03: review new coverage queries for round $round"
   "$PYTHON" scripts/clawhub_data/03_review_queries.py \
@@ -121,7 +132,7 @@ for ((round = 1; round <= FINAL_ALIGNMENT_COVERAGE_ROUNDS; round++)); do
   "$PYTHON" scripts/clawhub_data/03a2_backfill_alignment.py \
     --profiles "$PROFILES_PATH" --queries "$ALIGNMENT_QUERIES_PATH" \
     --reviews "$ALIGNMENT_REVIEWS_PATH" --round "$backfill_round" \
-    --variants "$ALIGNMENT_VARIANTS" \
+    --variants "$ALIGNMENT_VARIANTS" --batch-size "$ALIGNMENT_BATCH_SIZE" \
     --min-passed-per-skill "$MIN_ALIGNMENT_QUERIES_PER_SKILL" \
     --multiskill-queries "$QUERIES_PATH" \
     --multiskill-reviews "$REVIEWS_PATH" --workflows "$WORKFLOWS_PATH" \

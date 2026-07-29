@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument("--api-config", type=Path, default=Path("~/llm_api.txt"))
     parser.add_argument("--model", default="Qwen3.6-Plus")
     parser.add_argument("--workers", type=int, default=12)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=3)
     parser.add_argument("--variants", type=int, default=3)
     parser.add_argument("--min-passed-per-skill", type=int, default=1)
     parser.add_argument("--multiskill-queries", type=Path)

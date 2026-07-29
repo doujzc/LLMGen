@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-order-variants",
         type=int,
-        default=3,
+        default=4,
         help="Maximum deterministic target permutations per accepted train query.",
     )
     return parser.parse_args()

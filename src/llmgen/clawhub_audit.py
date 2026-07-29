@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from llmgen.clawhub import atomic_json, sha256_file, utc_now
-from llmgen.clawhub_dataset import DatasetBuildError, load_jsonl
+from llmgen.clawhub_alignment import minimum_alignment_requirement_counts
+from llmgen.clawhub_dataset import (
+    ROUTING_MODES,
+    DatasetBuildError,
+    load_jsonl,
+)
 
 
 SPLITS = ("train", "validation", "test")
@@ -50,15 +55,63 @@ def audit_training_dataset(
         raise DatasetBuildError(
             f"dataset has {len(skills)} candidates, expected {expected_candidates}"
         )
+    for skill in skills:
+        skill_id = str(skill["skill_id"])
+        for field in ("aliases", "capability_facets", "trigger_phrases"):
+            values = skill.get(field)
+            if not isinstance(values, list) or not values:
+                raise DatasetBuildError(
+                    f"skill {skill_id} has no routing profile field {field}"
+                )
+        if skill.get("routing_mode") not in ROUTING_MODES:
+            raise DatasetBuildError(
+                f"skill {skill_id} has invalid routing_mode"
+            )
     alignment_rows = load_jsonl(dataset_dir / "queries_alignment.jsonl")
     alignment_counts = Counter(
         str(row["skill_ids"][0])
         for row in alignment_rows
         if isinstance(row.get("skill_ids"), list) and len(row["skill_ids"]) == 1
     )
+    skill_profiles = {str(row["skill_id"]): row for row in skills}
+    alignment_requirement_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in alignment_rows:
+        targets = list(map(str, row.get("skill_ids") or []))
+        primary = list(map(str, row.get("primary_skill_ids") or []))
+        support = list(map(str, row.get("support_skill_ids") or []))
+        if len(targets) != 1 or primary != targets or support:
+            raise DatasetBuildError(
+                f"invalid single-skill primary/support data in {row.get('id')}"
+            )
+        alignment_requirement_counts[targets[0]].update(
+            map(str, row.get("generation_requirements") or ["core"])
+        )
     if len(alignment_counts) != len(candidate_ids):
         raise DatasetBuildError(
             "single-skill curriculum does not cover the complete candidate set"
+        )
+    alignment_requirement_deficits: dict[str, dict[str, int]] = {}
+    for skill_id in sorted(candidate_ids):
+        deficits = {
+            requirement: minimum
+            - alignment_requirement_counts[skill_id][requirement]
+            for requirement, minimum in minimum_alignment_requirement_counts(
+                skill_profiles[skill_id]
+            ).items()
+            if alignment_requirement_counts[skill_id][requirement] < minimum
+        }
+        if deficits:
+            alignment_requirement_deficits[skill_id] = deficits
+    if alignment_requirement_deficits:
+        preview = ", ".join(
+            f"{skill_id}={deficits}"
+            for skill_id, deficits in list(
+                alignment_requirement_deficits.items()
+            )[:10]
+        )
+        raise DatasetBuildError(
+            "single-skill curriculum misses required routing scenarios: "
+            + preview
         )
 
     split_rows = {
@@ -88,6 +141,16 @@ def audit_training_dataset(
         targets = list(map(str, row.get("skill_ids") or []))
         if len(targets) != len(set(targets)) or not set(targets) <= candidate_ids:
             raise DatasetBuildError(f"invalid targets in query {row.get('id')}")
+        primary_ids = set(map(str, row.get("primary_skill_ids") or []))
+        support_ids = set(map(str, row.get("support_skill_ids") or []))
+        if (
+            not primary_ids
+            or primary_ids & support_ids
+            or primary_ids | support_ids != set(targets)
+        ):
+            raise DatasetBuildError(
+                f"invalid primary/support targets in query {row.get('id')}"
+            )
         implicit_ids = list(map(str, row.get("implicit_skill_ids") or []))
         if row.get("intent_mode") == "implicit":
             if not 1 <= len(implicit_ids) < len(targets):
@@ -104,6 +167,8 @@ def audit_training_dataset(
         groups[str(row.get("source_query_id") or row["id"])].append(row)
     semantic_positive_counts: Counter[str] = Counter()
     position_coverages: list[float] = []
+    first_position_coverages: list[float] = []
+    missing_first_position_pairs: list[tuple[str, str]] = []
     variant_count_distribution: Counter[int] = Counter()
     for source_id, rows in groups.items():
         first_targets = set(map(str, rows[0]["skill_ids"]))
@@ -117,9 +182,24 @@ def audit_training_dataset(
         semantic_positive_counts.update(first_targets)
         variant_count_distribution[len(rows)] += 1
         denominator = min(len(first_targets), len(rows))
+        first_position_targets = {order[0] for order in orders}
         for skill_id in first_targets:
             observed = {order.index(skill_id) for order in orders}
             position_coverages.append(len(observed) / denominator)
+            is_first = float(skill_id in first_position_targets)
+            first_position_coverages.append(is_first)
+            if not is_first:
+                missing_first_position_pairs.append((source_id, skill_id))
+
+    if missing_first_position_pairs:
+        preview = ", ".join(
+            f"{source_id}:{skill_id}"
+            for source_id, skill_id in missing_first_position_pairs[:10]
+        )
+        raise DatasetBuildError(
+            "target-order augmentation leaves query-target pairs without "
+            f"query-only first-position supervision: {preview}"
+        )
 
     required = int(manifest.get("min_train_positives_per_skill_required", 1))
     required_augmented_train_queries = int(
@@ -163,6 +243,17 @@ def audit_training_dataset(
             "covered_candidate_count": len(alignment_counts),
             "minimum_per_candidate": min(alignment_counts.values(), default=0),
             "mean_per_candidate": len(alignment_rows) / len(candidate_ids) if candidate_ids else 0.0,
+            "requirement_counts": dict(
+                sorted(
+                    Counter(
+                        requirement
+                        for counts in alignment_requirement_counts.values()
+                        for requirement, count in counts.items()
+                        for _ in range(count)
+                    ).items()
+                )
+            ),
+            "requirement_deficit_candidate_count": 0,
         },
         "target_order": {
             "augmented_train_query_count": len(split_rows["train"]),
@@ -176,6 +267,12 @@ def audit_training_dataset(
                 if position_coverages
                 else 0.0
             ),
+            "query_target_first_position_coverage": (
+                sum(first_position_coverages) / len(first_position_coverages)
+                if first_position_coverages
+                else 0.0
+            ),
+            "missing_first_position_pair_count": 0,
         },
         "implicit_intent": {
             "query_count": len(implicit_rows),

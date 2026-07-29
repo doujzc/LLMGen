@@ -7,7 +7,9 @@ import pytest
 
 from llmgen.clawhub_dataset import (
     DatasetBuildError,
+    _augment_target_orders,
     _deduplicate_near_queries,
+    _profile_prompt,
     _validate_generated_variant,
     _validate_profile,
     _validate_review,
@@ -55,6 +57,52 @@ def test_profile_accepts_common_capability_alias() -> None:
         "unsafe_action": False,
     }
     assert _validate_profile(raw, skill)["capability_zh"] == "查询实时天气和未来预报"
+
+
+def test_profile_preserves_routing_triggers_facets_and_display_name() -> None:
+    skill = {
+        "rank": 1,
+        "skill_id": "pua",
+        "owner": "data-light",
+        "slug": "pua",
+        "display_name": "调教AI人设",
+        "summary": None,
+        "description": "任务失败两次后继续读日志、换方法并逐项验证。",
+    }
+    raw = {
+        "skill_id": "pua",
+        "domain": "agent_system_automation",
+        "roles": ["meta", "automate"],
+        "capability_zh": "在任务反复失败时推动智能体换方法继续验证",
+        "aliases": ["失败恢复助手"],
+        "capability_facets": ["读取日志定位失败原因", "更换方案并逐项验证"],
+        "trigger_phrases": ["已经失败两轮", "不要归因环境"],
+        "negative_boundaries": ["不负责普通语气美化"],
+        "routing_mode": "meta",
+        "mobile_fit": "low",
+        "unsafe_action": False,
+    }
+    profile = _validate_profile(raw, skill)
+    assert profile["aliases"][0] == "调教AI人设"
+    assert profile["routing_mode"] == "meta"
+    assert profile["capability_facets"] == raw["capability_facets"]
+    assert profile["trigger_phrases"] == raw["trigger_phrases"]
+
+
+def test_profile_prompt_keeps_distinctive_description_beyond_old_limit() -> None:
+    marker = "失败两轮后必须换方法继续验证"
+    prompt = _profile_prompt(
+        [
+            {
+                "skill_id": "meta",
+                "display_name": "恢复助手",
+                "description": "前置说明" * 100 + marker,
+            }
+        ]
+    )
+    assert marker in prompt
+    assert "trigger_phrases" in prompt
+    assert "routing_mode" in prompt
 
 
 def test_workflows_keep_every_candidate_regardless_of_mobile_fit(tmp_path: Path) -> None:
@@ -360,6 +408,22 @@ def test_export_keeps_all_catalog_skills_without_mobile_fit_filter(tmp_path: Pat
     ]
     assert manifest["semantic_split_query_counts"]["train"] == 2
     assert manifest["split_query_counts"]["train"] == 4
+
+
+def test_four_target_order_augmentation_exposes_every_target_first() -> None:
+    rows, metrics = _augment_target_orders(
+        [
+            {
+                "id": "q-four",
+                "query": "完成一个由四项能力组成的连贯任务",
+                "skill_ids": ["a", "b", "c", "d"],
+            }
+        ],
+        variants=4,
+        seed=7,
+    )
+    assert {row["skill_ids"][0] for row in rows} == {"a", "b", "c", "d"}
+    assert metrics["augmented_train_query_count"] == 4
 
 
 def test_export_does_not_replace_dataset_when_training_coverage_is_low(tmp_path: Path) -> None:
