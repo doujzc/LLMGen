@@ -2092,6 +2092,15 @@ input::placeholder {
   accent-color: var(--accent);
 }
 
+#monitor-follow-label {
+  transition: color 140ms ease;
+}
+
+#monitor-follow-label.paused {
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
 #monitor-log {
   min-height: 280px;
   max-height: 42vh;

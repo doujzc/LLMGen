@@ -31,12 +31,14 @@ def test_numeric_visible_devices_bind_to_stable_gpu_uuids() -> None:
         "runtime_value": "GPU-charlie,GPU-alpha",
         "bindings": [
             {
+                "logical_index": "0",
                 "requested": "2",
                 "index": "2",
                 "uuid": "GPU-charlie",
                 "name": "Test GPU C",
             },
             {
+                "logical_index": "1",
                 "requested": "0",
                 "index": "0",
                 "uuid": "GPU-alpha",
@@ -84,5 +86,30 @@ def test_gpu_probe_attaches_compute_process_groups(monkeypatch) -> None:
                     "used_memory_mib": 1536,
                 }
             ],
+        }
+    ]
+
+
+def test_observe_process_group_gpus_uses_physical_gpu_identity() -> None:
+    metrics = [
+        {
+            **GPU_ROWS[0],
+            "processes": [
+                {"pid": 101, "process_group_id": 90},
+                {"pid": 102, "process_group_id": 90},
+                {"pid": 201, "process_group_id": 200},
+            ],
+        },
+        {
+            **GPU_ROWS[1],
+            "processes": [{"pid": 202, "process_group_id": 200}],
+        },
+    ]
+
+    assert gpu.observe_process_group_gpus(metrics, 90) == [
+        {
+            "index": "0",
+            "uuid": "GPU-alpha",
+            "pids": [101, 102],
         }
     ]

@@ -19,6 +19,8 @@ const state = {
   selectedRunId: "",
   runFilter: "all",
   monitorLogRequestId: 0,
+  monitorLogRunId: "",
+  monitorLogUpdating: false,
   loadedProfileId: "",
   loadedVersion: null,
   loadedRevision: null,
@@ -999,11 +1001,33 @@ function gpuProcessesForRun(run, gpu) {
   });
 }
 
+function persistedGpuObservation(run, gpu) {
+  if (!run || !gpu) return null;
+  const observations = Array.isArray(run.observed_gpu_processes)
+    ? run.observed_gpu_processes
+    : [];
+  return (
+    observations.find(
+      (observation) =>
+        String(observation.index || "") === String(gpu.index) ||
+        (gpu.uuid && String(observation.uuid || "") === String(gpu.uuid)),
+    ) || null
+  );
+}
+
 function assignedGpusForRun(run, gpus = state.health?.gpus || []) {
   return gpus.filter((gpu) => gpuMatchesRunAssignment(run, gpu));
 }
 
 function observedGpusForRun(run, gpus = state.health?.gpus || []) {
+  return gpus.filter(
+    (gpu) =>
+      gpuProcessesForRun(run, gpu).length ||
+      persistedGpuObservation(run, gpu),
+  );
+}
+
+function liveObservedGpusForRun(run, gpus = state.health?.gpus || []) {
   return gpus.filter((gpu) => gpuProcessesForRun(run, gpu).length);
 }
 
@@ -1086,17 +1110,24 @@ function renderMonitorSummary() {
   if (run) {
     const assigned = assignedGpusForRun(run, gpus);
     const observed = observedGpusForRun(run, gpus);
+    const liveObserved = liveObservedGpusForRun(run, gpus);
     const breached = observed.filter(
       (gpu) => !gpuMatchesRunAssignment(run, gpu),
     );
-    if (breached.length) {
+    if (run.gpu_contract_violation || breached.length) {
+      const labels = breached.map((gpu) => gpu.index).join(", ");
       $("#monitor-gpu-summary").textContent =
-        `检测到越界占用 · GPU ${breached.map((gpu) => gpu.index).join(", ")}`;
+        labels ? `检测到越界占用 · GPU ${labels}` : "检测到 GPU 越界占用";
+      return;
+    }
+    if (liveObserved.length) {
+      $("#monitor-gpu-summary").textContent =
+        `实际占用 GPU ${liveObserved.map((gpu) => gpu.index).join(", ")}`;
       return;
     }
     if (observed.length) {
       $("#monitor-gpu-summary").textContent =
-        `实际占用 GPU ${observed.map((gpu) => gpu.index).join(", ")}`;
+        `最后观测 GPU ${observed.map((gpu) => gpu.index).join(", ")}`;
       return;
     }
     if (assigned.length) {
@@ -1211,6 +1242,7 @@ function renderGpuBoard() {
   const run = selectedRun();
   const requested = configuredGpuIds(run);
   const observed = observedGpusForRun(run, gpus);
+  const liveObserved = liveObservedGpusForRun(run, gpus);
   const breached = observed.filter(
     (gpu) => !gpuMatchesRunAssignment(run, gpu),
   );
@@ -1223,9 +1255,10 @@ function renderGpuBoard() {
   $("#gpu-runtime-devices").textContent = run
     ? bindings.length
       ? bindings
-          .map((binding) =>
+          .map((binding, index) =>
             binding.index
-              ? `GPU ${binding.index} → ${shortGpuToken(binding.uuid)}`
+              ? `cuda:${binding.logical_index ?? index} → GPU ` +
+                `${binding.index} → ${shortGpuToken(binding.uuid)}`
               : shortGpuToken(binding.uuid || binding.requested),
           )
           .join(" · ")
@@ -1241,9 +1274,11 @@ function renderGpuBoard() {
       ? observed
           .map((gpu) => {
             const processes = gpuProcessesForRun(run, gpu);
-            return `GPU ${gpu.index} · PID ${processes
-              .map((process) => process.pid)
-              .join("/")}`;
+            const persisted = persistedGpuObservation(run, gpu);
+            const pids = processes.length
+              ? processes.map((process) => process.pid)
+              : persisted?.pids || [];
+            return `GPU ${gpu.index}${pids.length ? ` · PID ${pids.join("/")}` : ""}`;
           })
           .join(" · ")
       : PROCESS_RUN_STATUSES.has(run.status)
@@ -1254,12 +1289,17 @@ function renderGpuBoard() {
   if (!run) {
     contractStatus.textContent = "请选择运行";
     contractStatus.className = "health-label neutral";
-  } else if (breached.length) {
+  } else if (run.gpu_contract_violation || breached.length) {
+    const labels = breached.map((gpu) => gpu.index).join(", ");
     contractStatus.textContent =
-      `越界占用 GPU ${breached.map((gpu) => gpu.index).join(", ")}`;
+      labels ? `越界占用 GPU ${labels}` : "已记录 GPU 越界占用";
     contractStatus.className = "health-label negative";
-  } else if (observed.length) {
+  } else if (liveObserved.length) {
     contractStatus.textContent = "运行绑定已核验";
+    contractStatus.className = "health-label positive";
+  } else if (observed.length) {
+    contractStatus.textContent =
+      `最后 GPU 观测与绑定一致 · ${formatTime(run.last_gpu_observed_at)}`;
     contractStatus.className = "health-label positive";
   } else if (PROCESS_RUN_STATUSES.has(run.status)) {
     contractStatus.textContent = run.gpu_binding_verified
@@ -1286,25 +1326,30 @@ function renderGpuBoard() {
     const card = element("article", "gpu-card");
     const assigned = gpuMatchesRunAssignment(run, gpu);
     const runProcesses = gpuProcessesForRun(run, gpu);
+    const persistedObservation = persistedGpuObservation(run, gpu);
     const occupied = runProcesses.length > 0;
+    const previouslyObserved = Boolean(persistedObservation);
+    const observedForRun = occupied || previouslyObserved;
     card.classList.toggle("assigned", assigned);
-    card.classList.toggle("observed", occupied && assigned);
-    card.classList.toggle("breached", occupied && !assigned);
-    card.classList.toggle("host-only", Boolean(run) && !assigned && !occupied);
+    card.classList.toggle("observed", observedForRun && assigned);
+    card.classList.toggle("breached", observedForRun && !assigned);
+    card.classList.toggle(
+      "host-only",
+      Boolean(run) && !assigned && !observedForRun,
+    );
     const heading = element("div", "gpu-card-heading");
     const identity = element("div", "gpu-card-identity");
+    let badgeLabel = "其他 GPU";
+    if (!run) badgeLabel = "整机";
+    else if (occupied && assigned) badgeLabel = "本任务占用";
+    else if (occupied) badgeLabel = "越界占用";
+    else if (previouslyObserved && assigned) badgeLabel = "最后观测";
+    else if (previouslyObserved) badgeLabel = "越界记录";
+    else if (assigned) badgeLabel = "已分配";
     const badge = element(
       "span",
       "gpu-contract-badge",
-      !run
-        ? "整机"
-        : occupied && assigned
-          ? "本任务占用"
-          : occupied
-            ? "越界占用"
-            : assigned
-              ? "已分配"
-              : "其他 GPU",
+      badgeLabel,
     );
     identity.append(element("strong", "", `GPU ${gpu.index}`), badge);
     heading.append(
@@ -1343,16 +1388,21 @@ function renderGpuBoard() {
     const memoryBar = element("span");
     memoryBar.style.width = `${memoryPercent}%`;
     memoryTrack.append(memoryBar);
+    let processText = "不属于当前任务契约";
+    if (occupied) {
+      processText = `本任务 PID ${runProcesses
+        .map((process) => process.pid)
+        .join(", ")}`;
+    } else if (previouslyObserved) {
+      processText =
+        `最后观测 PID ${(persistedObservation.pids || []).join(", ")}`;
+    } else if (assigned) {
+      processText = "任务已绑定，等待 CUDA 上下文";
+    }
     const processLine = element(
       "span",
       "gpu-process-line",
-      occupied
-        ? `本任务 PID ${runProcesses
-            .map((process) => process.pid)
-            .join(", ")}`
-        : assigned
-          ? "任务已绑定，等待 CUDA 上下文"
-          : "不属于当前任务契约",
+      processText,
     );
     card.append(
       heading,
@@ -1538,12 +1588,36 @@ async function loadRuns(showMessage = false) {
   }
 }
 
+function monitorLogNearBottom(log, tolerance = 36) {
+  return log.scrollHeight - log.scrollTop - log.clientHeight <= tolerance;
+}
+
+function setMonitorLogFollowing(enabled, { scroll = false } = {}) {
+  const checkbox = $("#monitor-follow-log");
+  const label = $("#monitor-follow-label");
+  checkbox.checked = enabled;
+  label.textContent = enabled ? "跟随底部" : "已暂停跟随";
+  label.classList.toggle("paused", !enabled);
+  if (enabled && scroll) {
+    const log = $("#monitor-log");
+    state.monitorLogUpdating = true;
+    log.scrollTop = log.scrollHeight;
+    window.requestAnimationFrame(() => {
+      state.monitorLogUpdating = false;
+    });
+  }
+}
+
 async function loadMonitorLog(showMessage = false) {
   const run = selectedRun();
   if (!run) {
     $("#monitor-log").textContent = "尚无运行日志。";
     $("#monitor-log-updated").textContent = "尚未读取";
     return;
+  }
+  if (state.monitorLogRunId !== run.run_id) {
+    state.monitorLogRunId = run.run_id;
+    setMonitorLogFollowing(true);
   }
   const requestId = ++state.monitorLogRequestId;
   try {
@@ -1552,10 +1626,22 @@ async function loadMonitorLog(showMessage = false) {
     );
     if (requestId !== state.monitorLogRequestId) return;
     const log = $("#monitor-log");
+    const previousScrollTop = log.scrollTop;
+    const following = $("#monitor-follow-log").checked;
+    state.monitorLogUpdating = true;
     log.textContent = payload.text || "日志文件尚未产生内容。";
     $("#monitor-log-updated").textContent =
-      `读取于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`;
-    if ($("#monitor-follow-log").checked) log.scrollTop = log.scrollHeight;
+      `读取于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}` +
+      (following ? "" : " · 跟随已暂停");
+    log.scrollTop = following
+      ? log.scrollHeight
+      : Math.min(
+          previousScrollTop,
+          Math.max(0, log.scrollHeight - log.clientHeight),
+        );
+    window.requestAnimationFrame(() => {
+      state.monitorLogUpdating = false;
+    });
     if (showMessage) showToast("已刷新持久化训练日志");
   } catch (error) {
     if (requestId !== state.monitorLogRequestId) return;
@@ -1790,6 +1876,22 @@ function wireEvents() {
   $("#monitor-log-refresh").addEventListener("click", () =>
     loadMonitorLog(true),
   );
+  $("#monitor-follow-log").addEventListener("change", (event) => {
+    setMonitorLogFollowing(event.target.checked, {
+      scroll: event.target.checked,
+    });
+  });
+  $("#monitor-log").addEventListener("scroll", (event) => {
+    if (
+      state.monitorLogUpdating ||
+      !$("#monitor-follow-log").checked ||
+      monitorLogNearBottom(event.currentTarget)
+    ) {
+      return;
+    }
+    setMonitorLogFollowing(false);
+    $("#monitor-log-updated").textContent = "手动浏览 · 跟随已暂停";
+  });
   $$(".run-filters button").forEach((button) => {
     button.addEventListener("click", () => {
       state.runFilter = button.dataset.runFilter;

@@ -752,6 +752,12 @@ class StateStore:
                 "gpu_bindings": [],
                 "runtime_visible_devices": "",
                 "gpu_binding_verified": False,
+                "observed_gpu_indices": [],
+                "observed_gpu_uuids": [],
+                "observed_gpu_processes": [],
+                "last_gpu_observed_at": None,
+                "gpu_contract_violation": False,
+                "failure_reason": "",
             }
             _atomic_write_json(run_dir / "run.json", run_payload)
         return run_payload

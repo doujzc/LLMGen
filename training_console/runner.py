@@ -15,7 +15,11 @@ import time
 from typing import Any
 
 from .config import ALLOWED_KEYS, DATASETS, PIPELINE_COMMANDS
-from .gpu import probe_gpu_metrics, resolve_cuda_visible_devices
+from .gpu import (
+    observe_process_group_gpus,
+    probe_gpu_metrics,
+    resolve_cuda_visible_devices,
+)
 from .store import (
     StateStore,
     child_process_environment,
@@ -41,6 +45,7 @@ STAGE_PATTERNS = (
 CHECKPOINT_RE = re.compile(r"(?P<path>[^\s\"']*checkpoint[-_]\d+[^\s\"']*)")
 PROGRESS_RE = re.compile(r"(?P<done>\d[\d,]*)\s*/\s*(?P<total>\d[\d,]*)")
 STOP_GRACE_SECONDS = 12.0
+GPU_OBSERVATION_INTERVAL_SECONDS = 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +109,17 @@ def _read_new_text(path: Path, offset: int) -> tuple[str, int]:
         stream.seek(offset)
         data = stream.read()
         return data.decode("utf-8", errors="replace"), stream.tell()
+
+
+def _cuda_oom_line(text: str) -> str:
+    for raw_line in reversed(text.splitlines()):
+        line = raw_line.strip()
+        normalized = line.casefold()
+        if "out of memory" in normalized and (
+            "cuda" in normalized or "torch" in normalized
+        ):
+            return line[-400:]
+    return ""
 
 
 def _latest_checkpoint(artifact_run_dir: str, repo_root: Path) -> str:
@@ -230,6 +246,16 @@ def run(args: argparse.Namespace) -> int:
         f"launching detached training process for {args.run_id}: {argv!r}",
         flush=True,
     )
+    gpu_mapping_lines = ""
+    if gpu_resolution is not None:
+        gpu_mapping_lines = "".join(
+            "[training-console] "
+            f"cuda:{binding['logical_index']} -> "
+            f"nvidia-smi GPU {binding['index'] or '?'} -> "
+            f"{binding['uuid'] or binding['requested']}"
+            f" ({binding['name'] or 'name unavailable'})\n"
+            for binding in gpu_resolution["bindings"]
+        )
     with secure_binary_append(log_path) as log_stream:
         log_stream.write(
             (
@@ -242,6 +268,7 @@ def run(args: argparse.Namespace) -> int:
                 f"{resolved.get('CUDA_VISIBLE_DEVICES', '')}\n"
                 "[training-console] runtime CUDA_VISIBLE_DEVICES="
                 f"{env.get('CUDA_VISIBLE_DEVICES', '')}\n"
+                f"{gpu_mapping_lines}"
             ).encode("utf-8")
         )
         process = subprocess.Popen(
@@ -266,10 +293,24 @@ def run(args: argparse.Namespace) -> int:
     stage = "训练已启动"
     checkpoint = ""
     progress = ""
+    oom_line = ""
     stop_signal_at: float | None = None
     force_stop_sent = False
+    last_gpu_probe_at = float("-inf")
+    gpu_contract_violation = False
+    allowed_gpu_uuids = {
+        str(binding.get("uuid", ""))
+        for binding in (gpu_resolution or {}).get("bindings", ())
+        if binding.get("uuid")
+    }
+    allowed_gpu_indices = {
+        str(binding.get("index", ""))
+        for binding in (gpu_resolution or {}).get("bindings", ())
+        if binding.get("index")
+    }
     while process.poll() is None:
         text, offset = _read_new_text(log_path, offset)
+        oom_line = _cuda_oom_line(text) or oom_line
         stage, checkpoint, parsed_progress = _progress_from_text(
             text,
             stage,
@@ -277,6 +318,37 @@ def run(args: argparse.Namespace) -> int:
         )
         if parsed_progress:
             progress = parsed_progress
+        now = time.monotonic()
+        if now - last_gpu_probe_at >= GPU_OBSERVATION_INTERVAL_SECONDS:
+            last_gpu_probe_at = now
+            observations = observe_process_group_gpus(
+                probe_gpu_metrics(),
+                process.pid,
+            )
+            if observations:
+                outside_contract = [
+                    observation
+                    for observation in observations
+                    if (
+                        observation["uuid"] not in allowed_gpu_uuids
+                        and observation["index"] not in allowed_gpu_indices
+                    )
+                ]
+                gpu_contract_violation = bool(
+                    gpu_contract_violation or outside_contract
+                )
+                store.update_run(
+                    args.run_id,
+                    observed_gpu_indices=[
+                        observation["index"] for observation in observations
+                    ],
+                    observed_gpu_uuids=[
+                        observation["uuid"] for observation in observations
+                    ],
+                    observed_gpu_processes=observations,
+                    last_gpu_observed_at=utc_now(),
+                    gpu_contract_violation=gpu_contract_violation,
+                )
         if _stop_requested(store, args.run_id):
             if stop_signal_at is None:
                 _signal_process_group(process, signal.SIGTERM)
@@ -312,6 +384,7 @@ def run(args: argparse.Namespace) -> int:
         time.sleep(max(0.25, args.poll_seconds))
 
     text, _ = _read_new_text(log_path, offset)
+    oom_line = _cuda_oom_line(text) or oom_line
     stage, checkpoint, parsed_progress = _progress_from_text(
         text,
         stage,
@@ -335,14 +408,22 @@ def run(args: argparse.Namespace) -> int:
         )
         print("training process stopped by user request", flush=True)
         return 0
+    if return_code != 0 and oom_line:
+        final_progress = f"CUDA OOM · {oom_line}"
+    elif progress:
+        final_progress = progress
+    elif return_code == 0:
+        final_progress = "训练完成"
+    else:
+        final_progress = f"训练失败 · exit {return_code}"
     store.update_run(
         args.run_id,
         status="succeeded" if return_code == 0 else "failed",
         stage=stage,
         latest_checkpoint=checkpoint,
-        progress_text=progress or (
-            "训练完成" if return_code == 0 else f"训练失败 · exit {return_code}"
-        ),
+        progress_text=final_progress,
+        failure_reason="cuda_oom" if return_code != 0 and oom_line else "",
+        gpu_contract_violation=gpu_contract_violation,
         exit_code=return_code,
         finished_at=utc_now(),
     )

@@ -131,12 +131,13 @@ def resolve_cuda_visible_devices(
             "runtime_value": ",".join(tokens),
             "bindings": [
                 {
+                    "logical_index": str(logical_index),
                     "requested": token,
                     "index": token if token.isdecimal() else "",
                     "uuid": token if token.startswith(("GPU-", "MIG-")) else "",
                     "name": "",
                 }
-                for token in tokens
+                for logical_index, token in enumerate(tokens)
             ],
             "verified": False,
         }
@@ -145,7 +146,7 @@ def resolve_cuda_visible_devices(
     bindings: list[dict[str, str]] = []
     runtime_tokens: list[str] = []
     missing_indices: list[str] = []
-    for token in tokens:
+    for logical_index, token in enumerate(tokens):
         matched: Mapping[str, Any] | None = None
         if token.isdecimal():
             matched = by_index.get(token)
@@ -170,6 +171,7 @@ def resolve_cuda_visible_devices(
         runtime_tokens.append(runtime_token)
         bindings.append(
             {
+                "logical_index": str(logical_index),
                 "requested": token,
                 "index": str(matched.get("index", "")) if matched else "",
                 "uuid": str(matched.get("uuid", "")) if matched else runtime_token,
@@ -189,3 +191,34 @@ def resolve_cuda_visible_devices(
         "bindings": bindings,
         "verified": True,
     }
+
+
+def observe_process_group_gpus(
+    gpus: Sequence[Mapping[str, Any]] | None,
+    process_group_id: int,
+) -> list[dict[str, Any]]:
+    """Return physical GPUs used by processes in one detached training group."""
+
+    observations: list[dict[str, Any]] = []
+    for gpu in gpus or ():
+        processes = [
+            process
+            for process in gpu.get("processes", ())
+            if int(process.get("process_group_id") or 0) == process_group_id
+        ]
+        if not processes:
+            continue
+        observations.append(
+            {
+                "index": str(gpu.get("index", "")),
+                "uuid": str(gpu.get("uuid", "")),
+                "pids": sorted(
+                    {
+                        int(process["pid"])
+                        for process in processes
+                        if process.get("pid") is not None
+                    }
+                ),
+            }
+        )
+    return observations

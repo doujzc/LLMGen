@@ -357,6 +357,11 @@ python scripts/incremental/01_remove_candidate.py \
 
 ## 显存不足
 
+`CUDA_VISIBLE_DEVICES` 会让 PyTorch 重新编号设备。例如配置物理 GPU `4,6` 后，
+OOM 中的 `GPU 0` 指物理 GPU 4，并不表示训练跑到了物理 0 号卡。通过训练控制台
+启动时，先在运行监控中核对 `cuda:N -> nvidia-smi GPU N -> UUID` 和“最后观测”
+记录；映射正确时，OOM 属于所选卡上的真实显存压力。
+
 优先启用 ZeRO-3 CPU parameter offload：
 
 ```bash

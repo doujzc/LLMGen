@@ -20,6 +20,7 @@ from training_console.config import (
     ConfigResolver,
     ConfigValidationError,
 )
+from training_console.runner import _cuda_oom_line
 from training_console.server import (
     TrainingConsoleService,
     handler_class,
@@ -375,6 +376,16 @@ def test_log_redaction_covers_known_values_keys_and_bearer_tokens() -> None:
     assert redacted.count("[REDACTED]") == 6
 
 
+def test_cuda_oom_line_keeps_the_actionable_log_record() -> None:
+    assert _cuda_oom_line(
+        "step 12\n"
+        "torch.OutOfMemoryError: CUDA out of memory. "
+        "GPU 0 has a total capacity of 79.1 GiB\n"
+        "torch.distributed.elastic.multiprocessing.errors.ChildFailedError\n"
+    ).startswith("torch.OutOfMemoryError: CUDA out of memory")
+    assert _cuda_oom_line("ordinary training failure") == ""
+
+
 def test_log_tail_bounds_bytes_lines_and_single_line_length(
     tmp_path,
     monkeypatch,
@@ -574,6 +585,8 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert run["status"] == "saved"
         assert run["configured_gpus"] == ["0", "1", "2", "3"]
         assert run["cuda_device_order"] == "PCI_BUS_ID"
+        assert run["observed_gpu_indices"] == []
+        assert run["gpu_contract_violation"] is False
         assert Path(run["config_path"]).is_file()
         assert Path(run["env_path"]).is_file()
         assert Path(run["log_path"]).exists() is False
@@ -642,6 +655,9 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert 'postJson("/api/runs/stop"' in app
         assert "gpuMatchesRunAssignment" in app
         assert "gpuProcessesForRun" in app
+        assert "monitorLogNearBottom" in app
+        assert "setMonitorLogFollowing(false)" in app
+        assert "previousScrollTop" in app
 
         _, validated = _request(
             base + "/api/validate",
@@ -749,11 +765,13 @@ def test_detached_runner_survives_without_a_web_request_owner(
     scripts = fake_repo / "scripts"
     scripts.mkdir(parents=True)
     _link_console_package(fake_repo)
+    training_pid_file = tmp_path / "training.pid"
     pipeline = scripts / "router_pipeline.sh"
     pipeline.write_text(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "mkdir -p \"$RUN_DIR\"\n"
+        f"printf '%s' \"$$\" > {training_pid_file}\n"
         "printf '[06b] detached retrieval\\n'\n"
         "printf 'OPENAI_API_KEY=%s\\n' \"${OPENAI_API_KEY:-missing}\"\n"
         "printf 'Authorization: Bearer direct-bearer-token\\n'\n"
@@ -767,7 +785,7 @@ def test_detached_runner_survives_without_a_web_request_owner(
         "\"${CUDA_DEVICE_ORDER:-}\" \"${CUDA_VISIBLE_DEVICES:-}\"\n"
         "  printf 'started\\n'\n"
         "} > \"$RUN_DIR/marker.txt\"\n"
-        "sleep 0.6\n"
+        "sleep 2.6\n"
         "printf 'finished\\n' >> \"$RUN_DIR/marker.txt\"\n",
         encoding="utf-8",
     )
@@ -782,7 +800,9 @@ def test_detached_runner_survives_without_a_web_request_owner(
         "    printf '0, GPU-zero, 00000000:01:00.0, Test GPU, 0, 0, 1000, 30\\n'\n"
         "    printf '1, GPU-one, 00000000:02:00.0, Test GPU, 0, 0, 1000, 31\\n'\n"
         "    ;;\n"
-        "  --query-compute-apps=*) ;;\n"
+        "  --query-compute-apps=*)\n"
+        f"    printf 'GPU-one, %s, 10\\n' \"$(< {training_pid_file})\"\n"
+        "    ;;\n"
         "  *) exit 2 ;;\n"
         "esac\n",
         encoding="utf-8",
@@ -868,16 +888,27 @@ def test_detached_runner_survives_without_a_web_request_owner(
     assert observed["gpu_bindings"] == [
         {
             "index": "1",
+            "logical_index": "0",
             "name": "Test GPU",
             "requested": "1",
             "uuid": "GPU-one",
         }
     ]
+    assert observed["observed_gpu_indices"] == ["1"]
+    assert observed["observed_gpu_uuids"] == ["GPU-one"]
+    assert observed["observed_gpu_processes"][0]["pids"] == [
+        observed["training_pid"]
+    ]
+    assert observed["gpu_contract_violation"] is False
     assert not injection_marker.exists()
     raw_log = Path(observed["log_path"]).read_text(
         encoding="utf-8"
     )
     assert "detached retrieval" in raw_log
+    assert (
+        "cuda:0 -> nvidia-smi GPU 1 -> GPU-one (Test GPU)"
+        in raw_log
+    )
     assert "known-openai-secret" in raw_log
     redacted = service.tail_log(observed["run_id"], 200)
     assert "known-openai-secret" not in redacted
@@ -959,6 +990,60 @@ def test_detached_runner_cooperatively_stops_its_training_group(tmp_path) -> Non
     assert (artifact_dir / "stop-marker.txt").read_text(
         encoding="utf-8"
     ) == "started\n"
+
+
+def test_detached_runner_records_cuda_oom_as_the_failure_reason(tmp_path) -> None:
+    fake_repo = tmp_path / "repo"
+    scripts = fake_repo / "scripts"
+    scripts.mkdir(parents=True)
+    _link_console_package(fake_repo)
+    pipeline = scripts / "router_pipeline.sh"
+    pipeline.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '[05] train router memorization phase\\n'\n"
+        "printf 'torch.OutOfMemoryError: CUDA out of memory. "
+        "GPU 0 has 79 GiB total capacity\\n' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    pipeline.chmod(0o755)
+    state_root = tmp_path / "state"
+    store = StateStore(state_root)
+    profile = store.save_profile(
+        profile_id="oom-test",
+        dataset="clawhub",
+        command="full",
+        overrides={"RUN_DIR": str(tmp_path / "artifacts")},
+        resolved={"RUN_DIR": str(tmp_path / "artifacts")},
+    )
+    service = TrainingConsoleService(
+        repo_root=fake_repo,
+        state_root=state_root,
+        inference_url="",
+        launch_enabled=True,
+    )
+
+    run = service.submit_run(
+        {
+            "profile_id": profile["profile_id"],
+            "version": profile["version"],
+        }
+    )
+    deadline = time.time() + 8
+    observed = run
+    while time.time() < deadline:
+        observed = store.get_run(run["run_id"])
+        if observed["status"] in {"failed", "failed_to_start"}:
+            break
+        time.sleep(0.1)
+
+    assert observed["status"] == "failed"
+    assert observed["stage"] == "05 Memorization"
+    assert observed["failure_reason"] == "cuda_oom"
+    assert observed["progress_text"].startswith(
+        "CUDA OOM · torch.OutOfMemoryError: CUDA out of memory"
+    )
 
 
 def test_training_completes_after_web_process_is_killed(tmp_path) -> None:
