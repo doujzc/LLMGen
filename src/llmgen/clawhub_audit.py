@@ -38,6 +38,8 @@ def audit_training_dataset(
     dataset_dir = dataset_dir.expanduser().resolve()
     manifest_path = dataset_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    format_version = int(manifest.get("format_version", 1))
+    strict_routing_schema = format_version >= 2
     for name, expected in manifest.get("artifacts", {}).items():
         path = dataset_dir / name
         if not path.is_file():
@@ -55,18 +57,19 @@ def audit_training_dataset(
         raise DatasetBuildError(
             f"dataset has {len(skills)} candidates, expected {expected_candidates}"
         )
-    for skill in skills:
-        skill_id = str(skill["skill_id"])
-        for field in ("aliases", "capability_facets", "trigger_phrases"):
-            values = skill.get(field)
-            if not isinstance(values, list) or not values:
+    if strict_routing_schema:
+        for skill in skills:
+            skill_id = str(skill["skill_id"])
+            for field in ("aliases", "capability_facets", "trigger_phrases"):
+                values = skill.get(field)
+                if not isinstance(values, list) or not values:
+                    raise DatasetBuildError(
+                        f"skill {skill_id} has no routing profile field {field}"
+                    )
+            if skill.get("routing_mode") not in ROUTING_MODES:
                 raise DatasetBuildError(
-                    f"skill {skill_id} has no routing profile field {field}"
+                    f"skill {skill_id} has invalid routing_mode"
                 )
-        if skill.get("routing_mode") not in ROUTING_MODES:
-            raise DatasetBuildError(
-                f"skill {skill_id} has invalid routing_mode"
-            )
     alignment_rows = load_jsonl(dataset_dir / "queries_alignment.jsonl")
     alignment_counts = Counter(
         str(row["skill_ids"][0])
@@ -77,12 +80,18 @@ def audit_training_dataset(
     alignment_requirement_counts: dict[str, Counter[str]] = defaultdict(Counter)
     for row in alignment_rows:
         targets = list(map(str, row.get("skill_ids") or []))
-        primary = list(map(str, row.get("primary_skill_ids") or []))
-        support = list(map(str, row.get("support_skill_ids") or []))
-        if len(targets) != 1 or primary != targets or support:
+        if len(targets) != 1:
             raise DatasetBuildError(
-                f"invalid single-skill primary/support data in {row.get('id')}"
+                f"invalid single-skill data in {row.get('id')}"
             )
+        if strict_routing_schema:
+            primary = list(map(str, row.get("primary_skill_ids") or []))
+            support = list(map(str, row.get("support_skill_ids") or []))
+            if primary != targets or support:
+                raise DatasetBuildError(
+                    "invalid single-skill primary/support data in "
+                    f"{row.get('id')}"
+                )
         alignment_requirement_counts[targets[0]].update(
             map(str, row.get("generation_requirements") or ["core"])
         )
@@ -91,28 +100,29 @@ def audit_training_dataset(
             "single-skill curriculum does not cover the complete candidate set"
         )
     alignment_requirement_deficits: dict[str, dict[str, int]] = {}
-    for skill_id in sorted(candidate_ids):
-        deficits = {
-            requirement: minimum
-            - alignment_requirement_counts[skill_id][requirement]
-            for requirement, minimum in minimum_alignment_requirement_counts(
-                skill_profiles[skill_id]
-            ).items()
-            if alignment_requirement_counts[skill_id][requirement] < minimum
-        }
-        if deficits:
-            alignment_requirement_deficits[skill_id] = deficits
-    if alignment_requirement_deficits:
-        preview = ", ".join(
-            f"{skill_id}={deficits}"
-            for skill_id, deficits in list(
-                alignment_requirement_deficits.items()
-            )[:10]
-        )
-        raise DatasetBuildError(
-            "single-skill curriculum misses required routing scenarios: "
-            + preview
-        )
+    if strict_routing_schema:
+        for skill_id in sorted(candidate_ids):
+            deficits = {
+                requirement: minimum
+                - alignment_requirement_counts[skill_id][requirement]
+                for requirement, minimum in minimum_alignment_requirement_counts(
+                    skill_profiles[skill_id]
+                ).items()
+                if alignment_requirement_counts[skill_id][requirement] < minimum
+            }
+            if deficits:
+                alignment_requirement_deficits[skill_id] = deficits
+        if alignment_requirement_deficits:
+            preview = ", ".join(
+                f"{skill_id}={deficits}"
+                for skill_id, deficits in list(
+                    alignment_requirement_deficits.items()
+                )[:10]
+            )
+            raise DatasetBuildError(
+                "single-skill curriculum misses required routing scenarios: "
+                + preview
+            )
 
     split_rows = {
         split: load_jsonl(dataset_dir / f"queries_{split}.jsonl")
@@ -141,16 +151,17 @@ def audit_training_dataset(
         targets = list(map(str, row.get("skill_ids") or []))
         if len(targets) != len(set(targets)) or not set(targets) <= candidate_ids:
             raise DatasetBuildError(f"invalid targets in query {row.get('id')}")
-        primary_ids = set(map(str, row.get("primary_skill_ids") or []))
-        support_ids = set(map(str, row.get("support_skill_ids") or []))
-        if (
-            not primary_ids
-            or primary_ids & support_ids
-            or primary_ids | support_ids != set(targets)
-        ):
-            raise DatasetBuildError(
-                f"invalid primary/support targets in query {row.get('id')}"
-            )
+        if strict_routing_schema:
+            primary_ids = set(map(str, row.get("primary_skill_ids") or []))
+            support_ids = set(map(str, row.get("support_skill_ids") or []))
+            if (
+                not primary_ids
+                or primary_ids & support_ids
+                or primary_ids | support_ids != set(targets)
+            ):
+                raise DatasetBuildError(
+                    f"invalid primary/support targets in query {row.get('id')}"
+                )
         implicit_ids = list(map(str, row.get("implicit_skill_ids") or []))
         if row.get("intent_mode") == "implicit":
             if not 1 <= len(implicit_ids) < len(targets):
@@ -191,7 +202,7 @@ def audit_training_dataset(
             if not is_first:
                 missing_first_position_pairs.append((source_id, skill_id))
 
-    if missing_first_position_pairs:
+    if strict_routing_schema and missing_first_position_pairs:
         preview = ", ".join(
             f"{source_id}:{skill_id}"
             for source_id, skill_id in missing_first_position_pairs[:10]
@@ -227,10 +238,27 @@ def audit_training_dataset(
     if not implicit_rows:
         raise DatasetBuildError("dataset has no accepted implicit-intent samples")
 
+    patch_details = manifest.get("targeted_alignment_patch")
+    report_created_at = (
+        str(patch_details.get("created_at"))
+        if isinstance(patch_details, dict) and patch_details.get("created_at")
+        else utc_now()
+    )
+    targeted_categories = Counter(
+        str(row.get("targeted_category"))
+        for row in alignment_rows
+        if row.get("curation_source") == "targeted_alignment_v1"
+    )
     report = {
         "stage": "dataset_quality_audit",
-        "created_at": utc_now(),
+        "created_at": report_created_at,
         "dataset_dir": ".",
+        "format_version": format_version,
+        "schema_policy": (
+            "routing_profiles_v2"
+            if strict_routing_schema
+            else "previous_snapshot_v1_with_targeted_patch"
+        ),
         "candidate_count": len(skills),
         "query_counts": {split: len(split_rows[split]) for split in SPLITS},
         "semantic_train_query_count": len(groups),
@@ -253,7 +281,13 @@ def audit_training_dataset(
                     ).items()
                 )
             ),
-            "requirement_deficit_candidate_count": 0,
+            "requirement_deficit_candidate_count": (
+                len(alignment_requirement_deficits)
+            ),
+            "targeted_category_counts": dict(
+                sorted(targeted_categories.items())
+            ),
+            "targeted_query_count": sum(targeted_categories.values()),
         },
         "target_order": {
             "augmented_train_query_count": len(split_rows["train"]),
@@ -272,7 +306,9 @@ def audit_training_dataset(
                 if first_position_coverages
                 else 0.0
             ),
-            "missing_first_position_pair_count": 0,
+            "missing_first_position_pair_count": len(
+                missing_first_position_pairs
+            ),
         },
         "implicit_intent": {
             "query_count": len(implicit_rows),
@@ -298,5 +334,14 @@ def audit_training_dataset(
         },
         "status": "pass",
     }
-    atomic_json(dataset_dir / "quality_report.json", report)
+    quality_path = dataset_dir / "quality_report.json"
+    atomic_json(quality_path, report)
+    artifacts = manifest.get("artifacts")
+    if isinstance(artifacts, dict) and "quality_report.json" in artifacts:
+        artifacts["quality_report.json"] = {
+            "bytes": quality_path.stat().st_size,
+            "path": "quality_report.json",
+            "sha256": sha256_file(quality_path),
+        }
+        atomic_json(manifest_path, manifest)
     return report

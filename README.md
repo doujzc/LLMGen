@@ -13,7 +13,7 @@ LLMGen 将固定候选集中的 Agent Skills 编码为短层级 token，并微�
 | 数据集 | 候选数 | 默认 codebook | 配置 | 默认运行目录 |
 |---|---:|---:|---|---|
 | `clawhub` | 1,000 | `128×128` | `configs/clawhub.env` | `runs/clawhub-top1000-qwen3-1.7b-full-v1` |
-| `light` | 301 | `32×16` | `configs/light.env` | `runs/light301-qwen3-1.7b-full-v2` |
+| `light` | 301 | `32×16` | `configs/light.env` | `runs/light301-qwen3-1.7b-full-v3` |
 
 数据说明见
 [ClawHub Training](data/clawhub_training/README.md) 和

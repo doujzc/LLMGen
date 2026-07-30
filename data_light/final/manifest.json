@@ -3,9 +3,9 @@
   "alignment_positive_skill_count": 301,
   "artifacts": {
     "qrels_alignment.jsonl": {
-      "bytes": 505316,
+      "bytes": 499923,
       "path": "qrels_alignment.jsonl",
-      "sha256": "34887b1608a6e8d5db9c79e7260eabf36bd5ad1699e6bd3643324de51026a647"
+      "sha256": "864483ded06b125edc6b84e7499636e490771c1898df032e8c75dc3f18da1aff"
     },
     "qrels_test.jsonl": {
       "bytes": 162889,
@@ -13,9 +13,9 @@
       "sha256": "8818afbf7e66186c0f05d04478740ce55dd225c3fa0f0a182810786e3d14819d"
     },
     "qrels_train.jsonl": {
-      "bytes": 11353594,
+      "bytes": 8963488,
       "path": "qrels_train.jsonl",
-      "sha256": "ecaad385c884cc70471d75bd0c68d5110cfdcca39449860164604b86a1286839"
+      "sha256": "65aee341f3a8d1fca9b102aff5dde39b2eab0c8c6637b119f4e9f49258005794"
     },
     "qrels_validation.jsonl": {
       "bytes": 135448,
@@ -23,29 +23,29 @@
       "sha256": "fac9e6debddfb9c83b6bde61bc06d5929a0c03cdf32e817f963059617126b9ec"
     },
     "queries.jsonl": {
-      "bytes": 72031176,
+      "bytes": 54019654,
       "path": "queries.jsonl",
-      "sha256": "8f7d7193951cf360c2daa5cac2e6a2c2f72cd0b7dbe18381143e4be251bce96c"
+      "sha256": "ed3d0acd66a15c508f15163ceee5c8133375ace6518ac01e732b08290e445617"
     },
     "queries_alignment.jsonl": {
-      "bytes": 4320412,
+      "bytes": 2818432,
       "path": "queries_alignment.jsonl",
-      "sha256": "e8884c30a0f7b93e22385e79981bc5555628e2ecbfc71911d0f7f9fa309c633d"
+      "sha256": "d69f5accb3ab2cb4817915cc58e467ee56e4e1ebde32d8130274885eaa2f6fd2"
     },
     "queries_test.jsonl": {
-      "bytes": 788685,
+      "bytes": 704314,
       "path": "queries_test.jsonl",
-      "sha256": "f022908cdd7b7d9757960019ab23c2706f5420e30972cff5b4153e3fb9d5e165"
+      "sha256": "40f9a525feb92c1f6cc89dae4b51891ea0494d099b5420000b5beafd605c3d5e"
     },
     "queries_train.jsonl": {
-      "bytes": 54171594,
+      "bytes": 39254190,
       "path": "queries_train.jsonl",
-      "sha256": "46cfd2a52a1bf1463d2cfe5332f761c002ddd1c627b80ac69fd34c9eb4f5c916"
+      "sha256": "5559b5bf6c31208064321931e76243ae7c22feea854bb65c7b4eb02deecd2051"
     },
     "queries_validation.jsonl": {
-      "bytes": 655317,
+      "bytes": 584420,
       "path": "queries_validation.jsonl",
-      "sha256": "fb3c5183e813fe5a2f28d8581262e8eebf5147cec6b99a190aa9d64fc5a60632"
+      "sha256": "4dd031d966bd9e0df31aa95de887e6694b2555f28ae965912c831d4d1574290d"
     },
     "rejected_near_duplicates.jsonl": {
       "bytes": 0,
@@ -53,9 +53,9 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     "skills.jsonl": {
-      "bytes": 449028,
+      "bytes": 215014,
       "path": "skills.jsonl",
-      "sha256": "122ec4457a204fba1679daf72384d86c0f21aa9e089505d5c804d7b6298dc543"
+      "sha256": "2142ca6477dd9f0dfe39ab3ae9071a93322cb9785c70ee8e2de61b36d817ee4f"
     }
   },
   "candidate_count": 301,
@@ -65,31 +65,18 @@
   "coverage_repair_skill_count": 0,
   "coverage_repair_workflow_count": 0,
   "coverage_repair_workflow_ids": [],
-  "created_at": "2026-07-29T06:43:37.375639Z",
-  "cross_domain_query_count": 38108,
-  "final_query_count": 41733,
-  "format_version": 2,
+  "created_at": "2026-07-30T03:56:34Z",
+  "cross_domain_query_count": 30954,
+  "final_query_count": 34259,
+  "format_version": 1,
   "generated_query_count": 26265,
-  "input_provenance": {
-    "multi_skill_query_schema_counts": {
-      "unversioned": 26265
-    },
-    "multi_skill_query_source": "qwen37-plus-glm52-v3-one-epoch",
-    "multi_skill_review_schema_counts": {
-      "unversioned": 26265
-    },
-    "multi_skill_review_source": "qwen37-plus-glm52-v3-one-epoch"
-  },
-  "mean_train_positives_per_covered_skill": 137.54152823920265,
+  "mean_train_positives_per_covered_skill": 137.3421926910299,
   "min_augmented_train_queries_required": 26653,
   "min_train_positives_per_covered_skill": 100,
   "min_train_positives_per_skill_required": 100,
   "multiskill_train_positive_skill_count": 301,
   "near_duplicate_rejection_count": 0,
-  "query_data_schema_version": 4,
-  "query_review_schema_version": 4,
   "reviewed_query_count": 26265,
-  "routing_profile_schema_version": 3,
   "seed": 20260720,
   "semantic_split_query_counts": {
     "test": 631,
@@ -98,22 +85,19 @@
   },
   "single_skill_alignment": {
     "accepted_candidate_count": 301,
-    "accepted_query_count": 5636,
+    "accepted_query_count": 5576,
+    "base_accepted_query_count": 5456,
     "candidate_count": 301,
-    "curation_source_counts": {
-      "legacy_alignment_review": 160,
-      "manual_alignment": 18,
-      "model_generated": 5458
-    },
-    "generated_query_count": 6034,
-    "mean_queries_per_skill": 18.72425249169435,
+    "generated_query_count": 5568,
+    "mean_queries_per_skill": 18.524916943521596,
     "min_queries_per_skill": 15,
     "min_queries_per_skill_required": 15,
-    "review_source_counts": {
-      "legacy_model_review": 160,
-      "manual_curation": 18,
-      "model_review": 5458
-    }
+    "replaced_baseline_query_count": 47,
+    "source_counts": {
+      "previous_snapshot_model_review": 5409,
+      "targeted_manual_curation": 167
+    },
+    "targeted_query_count": 167
   },
   "skills_below_min_train_positives": {},
   "skills_below_min_train_positives_count": 0,
@@ -145,26 +129,26 @@
       "weather_environment": 3
     },
     "train": {
-      "agent_system_automation": 3464,
-      "business_operations": 4994,
-      "communication": 4744,
-      "data_analysis": 3444,
-      "documents_office": 10554,
-      "education_knowledge": 5082,
-      "files_knowledge_memory": 6846,
-      "finance_investment": 4810,
-      "health_fitness": 2648,
-      "media_audio_video": 5922,
-      "media_image_design": 8900,
-      "news_research": 7442,
-      "productivity_planning": 4632,
-      "security_privacy": 1694,
-      "shopping_food": 2608,
-      "smart_home_iot": 858,
-      "social_content": 5632,
-      "software_development": 6478,
-      "travel_local": 3544,
-      "weather_environment": 918
+      "agent_system_automation": 2817,
+      "business_operations": 3910,
+      "communication": 3753,
+      "data_analysis": 2747,
+      "documents_office": 8302,
+      "education_knowledge": 4045,
+      "files_knowledge_memory": 5417,
+      "finance_investment": 3862,
+      "health_fitness": 2096,
+      "media_audio_video": 4792,
+      "media_image_design": 7340,
+      "news_research": 5892,
+      "productivity_planning": 3710,
+      "security_privacy": 1336,
+      "shopping_food": 2168,
+      "smart_home_iot": 671,
+      "social_content": 4448,
+      "software_development": 5185,
+      "travel_local": 2944,
+      "weather_environment": 744
     },
     "validation": {
       "agent_system_automation": 34,
@@ -191,12 +175,12 @@
   },
   "split_qrel_counts": {
     "test": 1850,
-    "train": 121704,
+    "train": 96616,
     "validation": 1533
   },
   "split_query_counts": {
     "test": 631,
-    "train": 40572,
+    "train": 33098,
     "validation": 530
   },
   "split_target_count_distribution": {
@@ -207,8 +191,8 @@
     },
     "train": {
       "2": 10676,
-      "3": 19232,
-      "4": 10664
+      "3": 14424,
+      "4": 7998
     },
     "validation": {
       "2": 206,
@@ -218,18 +202,73 @@
   },
   "target_count_distribution": {
     "2": 11107,
-    "3": 19631,
-    "4": 10995
+    "3": 14823,
+    "4": 8329
   },
   "target_order_augmentation": {
     "actual_variants_distribution": {
       "2": 5338,
-      "4": 7474
+      "3": 7474
     },
-    "augmentation_factor": 3.1667187012176083,
-    "augmented_train_query_count": 40572,
-    "requested_variants_per_query": 4,
+    "augmentation_factor": 2.5833593506088044,
+    "augmented_train_query_count": 33098,
+    "requested_variants_per_query": 3,
     "semantic_train_query_count": 12812
+  },
+  "targeted_alignment_patch": {
+    "base_revision": "f3258094c31ce378133bddc0160742db914da055",
+    "category_counts": {
+      "badcase_paraphrase": 29,
+      "boundary_disambiguation": 28,
+      "brand_explicit": 65,
+      "semantic_correction": 45
+    },
+    "created_at": "2026-07-30T03:56:34Z",
+    "metadata_patch_sha256": "95eb4df9c80b4569ed93ab46b1151dd22d3a966a08a84b4cb3aa330b31d150b7",
+    "metadata_patch_source": "data_light/skill_metadata_patches.jsonl",
+    "replace_alignment_skill_ids": [
+      "brainhole-factory",
+      "pua",
+      "tencent-meeting-mcp"
+    ],
+    "replaced_baseline_query_counts": {
+      "brainhole-factory": 16,
+      "pua": 16,
+      "tencent-meeting-mcp": 15
+    },
+    "schema_version": 1,
+    "source": "data_light/manual_alignment.jsonl",
+    "source_sha256": "c88525a38d90bce013f24a82681220707fa47e64ebaee3415caddb756482b424",
+    "targeted_query_count": 167,
+    "targeted_skill_count": 26,
+    "targeted_skill_counts": {
+      "ai-zhangle-skills": 12,
+      "brainhole-factory": 20,
+      "ciccwm-skills": 6,
+      "davila7-claude-code-templates-ship-learn-next": 4,
+      "deep-search-and-insight-synthesize": 4,
+      "eastmoney-mx-skills-suite": 6,
+      "etf-rank-time": 3,
+      "gf-securities-skill": 3,
+      "guosen-finance-all": 3,
+      "imap-smtp-email": 4,
+      "meituan-coupon-get-tool": 4,
+      "meituan-travel": 3,
+      "minimax-music-gen": 4,
+      "news-extractor": 4,
+      "office-automation": 8,
+      "openclaw-skills-soulcraft": 6,
+      "pua": 20,
+      "react-best-practices": 4,
+      "speech-to-text": 6,
+      "tencent-meeting-mcp": 18,
+      "wendao-skill": 6,
+      "xiaoyi-report": 6,
+      "xz-finance-data": 4,
+      "xz-hot-rank": 3,
+      "xz-realtime-quotes": 3,
+      "xz-self-select": 3
+    }
   },
   "train_positive_skill_count": 301
 }
