@@ -255,6 +255,10 @@ bash scripts/router_pipeline.sh "$DATASET" export-web \
   "$RUN_DIR/router/retrieval/checkpoint-500"
 ```
 
+训练控制台中选择 `10 · export-web` 后，在“待导出模型目录”填写上述任一
+目录即可；checkpoint 的输出目录、Tokenizer 来源和模板 Manifest 可在高级
+设置中覆盖。最终模型导出沿用其 `router_manifest.json` 中记录的 Replay 配比。
+
 启动人工测试界面：
 
 ```bash
@@ -272,6 +276,8 @@ ssh -L 8080:127.0.0.1:8080 user@server
 界面默认使用 Greedy 自回归生成多条 Skill code。切换为 Beam Search 后只生成
 一条固定长度 code，并将 Beam 宽度 K 对应的前 K 个 code 作为检索候选；
 `Skill 候选 Top K` 再限制 code 碰撞桶展开后的 Skill 数量。
+`Greedy + Beam 补全` 会优先保留 Greedy 的候选；仅在数量不足时执行单行
+Beam Search，去重追加到 `Skill 候选 Top K` 或耗尽配置的 Beam 宽度。
 切换到“批量 TXT”后，每个非空行会作为一个 Query 分批推理，结果可以逐条检查
 并下载为 JSONL。
 
