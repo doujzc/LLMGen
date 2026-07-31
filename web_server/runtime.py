@@ -240,7 +240,8 @@ class RouterRuntime:
         effective_mode, effective_num_beams = _resolve_decoding(request_args)
         if effective_mode == "beam_search":
             # A Web Beam represents one code candidate, never a multi-line
-            # autoregressive output. max_code_paths only applies to Greedy.
+            # autoregressive output. The combined mode keeps the requested
+            # Greedy path cap and runs its supplemental Beam separately.
             request_args.max_code_paths = 1
         if effective_num_beams > self.max_num_beams:
             raise RouterDataError(
@@ -249,8 +250,11 @@ class RouterRuntime:
         return request_args, effective_mode, effective_num_beams
 
     def _enrich_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        for path in result["paths"]:
-            path["skills"] = [self.skills[skill_id] for skill_id in path["skill_ids"]]
+        for path_group in ("paths", "beam_fill_paths"):
+            for path in result.get(path_group, []):
+                path["skills"] = [
+                    self.skills[skill_id] for skill_id in path["skill_ids"]
+                ]
         for candidate in result["candidates"]:
             skill_id = candidate["skill_id"]
             candidate.update(self.skills[skill_id])

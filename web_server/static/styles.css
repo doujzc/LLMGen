@@ -840,6 +840,51 @@ select:disabled {
   white-space: nowrap;
 }
 
+.candidate-source {
+  flex: 0 0 auto;
+  padding: 3px 5px 2px;
+  border: 1px solid #cfc9bc;
+  border-radius: 2px;
+  color: #746f66;
+  font: 750 7px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.06em;
+}
+
+.candidate-source.beam {
+  border-color: #d7a66e;
+  background: #fff3df;
+  color: #9b4f13;
+}
+
+.candidate-source.greedy {
+  border-color: #9bb8af;
+  background: #edf5f1;
+  color: #2b6657;
+}
+
+.candidate-id-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 5px;
+}
+
+.candidate-id-label {
+  flex: 0 0 auto;
+  color: var(--muted-light);
+  font: 650 7px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.candidate-skill-id {
+  min-width: 0;
+  color: #6e6960;
+  font: 600 9px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
 .candidate-description {
   display: -webkit-box;
   margin-top: 6px;
@@ -1088,6 +1133,12 @@ select:disabled {
 .catalog-item code {
   color: var(--muted);
   font: 8px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.catalog-item .catalog-skill-id {
+  grid-column: 1 / -1;
+  color: #777168;
+  overflow-wrap: anywhere;
 }
 
 .catalog-description {
@@ -1355,6 +1406,14 @@ select:disabled {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.all-skill-copy .all-skill-id {
+  display: block;
+  margin-top: 4px;
+  color: #777168;
+  font: 600 8px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
 }
 
 .all-skill-copy span {

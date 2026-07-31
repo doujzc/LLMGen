@@ -27,6 +27,7 @@ const errorBox = $("#form-error");
 const decodingMode = $("#decoding-mode");
 const numBeams = $("#num-beams");
 const beamControl = $("#beam-control");
+const beamControlLabel = $("#beam-control-label");
 const maxPaths = $("#max-paths");
 const maxPathsControl = $("#max-paths-control");
 const batchFile = $("#batch-file");
@@ -53,8 +54,10 @@ function skillTokens(skill) {
 }
 
 function updateDecodingControls() {
-  const beamEnabled = decodingMode.value === "beam_search";
-  if (beamEnabled) {
+  const mode = decodingMode.value;
+  const beamOnly = mode === "beam_search";
+  const usesBeam = beamOnly || mode === "greedy_beam_fill";
+  if (beamOnly) {
     if (!maxPaths.disabled) state.greedyMaxPaths = maxPaths.value;
     maxPaths.value = "1";
   } else if (maxPaths.disabled) {
@@ -63,10 +66,14 @@ function updateDecodingControls() {
       ? state.greedyMaxPaths
       : available[0];
   }
-  maxPaths.disabled = beamEnabled;
-  maxPathsControl.classList.toggle("disabled", beamEnabled);
-  numBeams.disabled = !beamEnabled;
-  beamControl.classList.toggle("disabled", !beamEnabled);
+  maxPaths.disabled = beamOnly;
+  maxPathsControl.classList.toggle("disabled", beamOnly);
+  numBeams.disabled = !usesBeam;
+  beamControl.classList.toggle("disabled", !usesBeam);
+  beamControlLabel.textContent =
+    mode === "greedy_beam_fill"
+      ? "补充 Code Top K（Beam 宽度）"
+      : "Code Top K（Beam 宽度）";
 }
 
 function setInputMode(mode) {
@@ -331,6 +338,16 @@ function renderCandidates(candidates) {
     nameLine.append(
       textNode("strong", "candidate-name", candidate.name || candidate.skill_id),
     );
+    if (candidate.selection_source === "beam_fill") {
+      nameLine.append(textNode("span", "candidate-source beam", "BEAM 补充"));
+    } else if (candidate.selection_source === "greedy") {
+      nameLine.append(textNode("span", "candidate-source greedy", "GREEDY"));
+    }
+    const skillIdLine = textNode("span", "candidate-id-line");
+    skillIdLine.append(
+      textNode("span", "candidate-id-label", "Skill ID"),
+      textNode("code", "candidate-skill-id", candidate.skill_id),
+    );
     const meta = textNode("span", "candidate-meta");
     meta.append(
       textNode("span", "candidate-domain", candidate.domain || "未分类"),
@@ -349,6 +366,7 @@ function renderCandidates(candidates) {
     meta.append(codePath);
     copy.append(
       nameLine,
+      skillIdLine,
       textNode(
         "span",
         "candidate-description",
@@ -377,11 +395,12 @@ function renderCandidates(candidates) {
 
 function generationOptions() {
   const mode = decodingMode.value;
+  const usesBeam = mode === "beam_search" || mode === "greedy_beam_fill";
   return {
     max_code_paths: mode === "beam_search" ? 1 : Number(maxPaths.value),
     top_k: Number($("#top-k").value),
     decoding_mode: mode,
-    num_beams: mode === "beam_search" ? Number(numBeams.value) : 1,
+    num_beams: usesBeam ? Number(numBeams.value) : 1,
   };
 }
 
@@ -401,12 +420,17 @@ function renderResult(result, { batch = false } = {}) {
   const mode = request?.decoding_mode || result.decoding?.mode || "greedy";
   const beamWidth = request?.num_beams || result.decoding?.num_beams || 1;
   const beamMode = mode === "beam_search";
+  const hybridMode = mode === "greedy_beam_fill";
   $("#decode-summary").textContent = beamMode
     ? `Beam Search · Top ${beamWidth} codes`
-    : "Greedy Autoregressive";
+    : hybridMode
+      ? `Greedy + Beam 补全 · ${beamWidth} beams`
+      : "Greedy Autoregressive";
   $("#candidate-hint").textContent = beamMode
     ? "按 Beam 概率排序，Code 路径随候选一并展示"
-    : "按生成顺序与模型得分展开，Code 路径随候选一并展示";
+    : hybridMode
+      ? "Greedy 候选优先；Beam 去重补充至 Skill Top K"
+      : "按生成顺序与模型得分展开，Code 路径随候选一并展示";
   const candidateCount = (result.candidates || []).length;
   $("#result-subtitle").textContent =
     `${candidateCount} 个候选 Skill · 点击候选查看详情`;
@@ -484,10 +508,14 @@ async function runSingleInference(options) {
     queryInput.focus();
     return false;
   }
+  const loadingMessages = {
+    beam_search: `正在搜索单行 Skill Code 的 Top ${options.num_beams} 候选…`,
+    greedy_beam_fill:
+      `正在生成 Greedy 路由；若不足 Top ${options.top_k}，将用 ${options.num_beams} Beam 补全…`,
+  };
   showLoading(
-    options.decoding_mode === "beam_search"
-      ? `正在搜索单行 Skill Code 的 Top ${options.num_beams} 候选…`
-      : "正在进行 Greedy Autoregressive 路由并解码候选 Skill…",
+    loadingMessages[options.decoding_mode] ||
+      "正在进行 Greedy Autoregressive 路由并解码候选 Skill…",
   );
   const result = await jsonRequest("/api/infer", {
     method: "POST",
@@ -511,10 +539,13 @@ async function runBatchInference(options) {
   const started = performance.now();
   for (let start = 0; start < rows.length; start += size) {
     const end = Math.min(start + size, rows.length);
+    const decodingLabels = {
+      beam_search: `单行 Code Top ${options.num_beams}`,
+      greedy_beam_fill:
+        `Greedy + ${options.num_beams} Beam 补全至 Top ${options.top_k}`,
+    };
     const decodingLabel =
-      options.decoding_mode === "beam_search"
-        ? `单行 Code Top ${options.num_beams}`
-        : "Greedy Autoregressive";
+      decodingLabels[options.decoding_mode] || "Greedy Autoregressive";
     showLoading(
       `正在处理 ${start + 1}–${end} / ${rows.length} 条 Query · ${decodingLabel}…`,
     );
@@ -589,6 +620,7 @@ function renderCatalog(payload) {
     item.append(
       textNode("strong", "", skill.name || skill.skill_id),
       textNode("code", "", skill.code_text),
+      textNode("code", "catalog-skill-id", skill.skill_id),
       textNode(
         "span",
         "catalog-description",
@@ -777,6 +809,7 @@ function renderAllSkills() {
     const copy = textNode("span", "all-skill-copy");
     copy.append(
       textNode("strong", "", skill.name || skill.skill_id),
+      textNode("code", "all-skill-id", skill.skill_id),
       textNode(
         "span",
         "",

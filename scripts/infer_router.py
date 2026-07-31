@@ -35,7 +35,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "Select every Agent Skill needed for the user request in execution order. "
     "Output one hierarchical skill code per line, with no other text."
 )
-DECODING_MODES = ("greedy", "beam_search")
+DECODING_MODES = ("greedy", "beam_search", "greedy_beam_fill")
 
 
 def parse_args() -> argparse.Namespace:
@@ -87,8 +87,10 @@ def parse_args() -> argparse.Namespace:
         choices=DECODING_MODES,
         default="greedy",
         help=(
-            "Generate an ordered multi-path sequence (greedy) or return the top "
-            "single-path codes from constrained beam search (beam_search)."
+            "Generate an ordered multi-path sequence (greedy), return the top "
+            "single-path codes from constrained beam search (beam_search), or "
+            "preserve Greedy candidates and use Beam to fill missing candidates "
+            "up to --top-k (greedy_beam_fill)."
         ),
     )
     parser.add_argument(
@@ -97,7 +99,8 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help=(
             "Beam width and number of single-path codes returned by "
-            "--decoding-mode beam_search; ignored by greedy decoding."
+            "beam_search, or the supplement search budget used by "
+            "greedy_beam_fill; ignored by greedy decoding."
         ),
     )
     parser.add_argument("--top-k", type=int, default=20)
@@ -405,12 +408,12 @@ def _resolve_decoding(args: argparse.Namespace) -> tuple[str, int]:
         raise RouterDataError("num_beams must be an integer") from exc
     if num_beams < 1:
         raise RouterDataError("num_beams must be positive")
-    if mode == "beam_search" and num_beams < 2:
-        raise RouterDataError("beam_search requires num_beams >= 2")
-    return mode, num_beams if mode == "beam_search" else 1
+    if mode in ("beam_search", "greedy_beam_fill") and num_beams < 2:
+        raise RouterDataError(f"{mode} requires num_beams >= 2")
+    return mode, num_beams if mode != "greedy" else 1
 
 
-def _generate_batch(
+def _generate_decoding_batch(
     *,
     batch: list[dict[str, Any]],
     tokenizer: Any,
@@ -595,6 +598,135 @@ def _generate_batch(
     return results
 
 
+def _decoding_args(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    num_beams: int,
+) -> argparse.Namespace:
+    payload = vars(args).copy()
+    payload["decoding_mode"] = mode
+    payload["num_beams"] = num_beams
+    return argparse.Namespace(**payload)
+
+
+def _merge_greedy_beam_result(
+    greedy_result: dict[str, Any],
+    beam_result: dict[str, Any] | None,
+    *,
+    top_k: int,
+    num_beams: int,
+) -> dict[str, Any]:
+    """Keep Greedy ordering and append unique Beam candidates up to ``top_k``."""
+
+    if beam_result is not None and (
+        beam_result["query_id"] != greedy_result["query_id"]
+        or beam_result["query"] != greedy_result["query"]
+    ):
+        raise RuntimeError("Greedy and Beam results do not describe the same query")
+
+    candidates: list[dict[str, Any]] = []
+    seen_skill_ids: set[str] = set()
+    for candidate in greedy_result["candidates"]:
+        enriched = dict(candidate)
+        enriched["selection_source"] = "greedy"
+        candidates.append(enriched)
+        seen_skill_ids.add(candidate["skill_id"])
+
+    beam_candidates = [] if beam_result is None else beam_result["candidates"]
+    beam_candidates_added = 0
+    for candidate in beam_candidates:
+        if len(candidates) >= top_k:
+            break
+        if candidate["skill_id"] in seen_skill_ids:
+            continue
+        enriched = dict(candidate)
+        enriched["selection_source"] = "beam_fill"
+        candidates.append(enriched)
+        seen_skill_ids.add(candidate["skill_id"])
+        beam_candidates_added += 1
+
+    result = dict(greedy_result)
+    result["candidates"] = candidates[:top_k]
+    result["beam_fill_paths"] = (
+        [] if beam_result is None else list(beam_result["paths"])
+    )
+    result["decoding"] = {
+        "mode": "greedy_beam_fill",
+        "num_beams": num_beams,
+        "scope": "autoregressive_multi_path_with_beam_fill",
+        "target_top_k": top_k,
+        "target_reached": len(result["candidates"]) >= top_k,
+        "beam_executed": beam_result is not None,
+        "beam_candidates_added": beam_candidates_added,
+        "greedy": greedy_result["decoding"],
+        "beam_fill": None if beam_result is None else beam_result["decoding"],
+    }
+    return result
+
+
+def _generate_batch(
+    *,
+    batch: list[dict[str, Any]],
+    tokenizer: Any,
+    model: Any,
+    torch: Any,
+    trie: MultiPathTokenTrie,
+    id_to_token: dict[int, str],
+    buckets: dict[tuple[str, ...], tuple[str, ...]],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """Generate one batch using the selected atomic or combined strategy."""
+
+    decoding_mode, num_beams = _resolve_decoding(args)
+    common = {
+        "tokenizer": tokenizer,
+        "model": model,
+        "torch": torch,
+        "trie": trie,
+        "id_to_token": id_to_token,
+        "buckets": buckets,
+    }
+    if decoding_mode != "greedy_beam_fill":
+        return _generate_decoding_batch(batch=batch, args=args, **common)
+
+    greedy_args = _decoding_args(args, mode="greedy", num_beams=1)
+    greedy_results = _generate_decoding_batch(
+        batch=batch,
+        args=greedy_args,
+        **common,
+    )
+    top_k = int(args.top_k)
+    missing_positions = [
+        index
+        for index, result in enumerate(greedy_results)
+        if len(result["candidates"]) < top_k
+    ]
+    beam_by_position: dict[int, dict[str, Any]] = {}
+    if missing_positions:
+        beam_args = _decoding_args(
+            args,
+            mode="beam_search",
+            num_beams=num_beams,
+        )
+        beam_results = _generate_decoding_batch(
+            batch=[batch[index] for index in missing_positions],
+            args=beam_args,
+            **common,
+        )
+        beam_by_position = dict(zip(missing_positions, beam_results, strict=True))
+
+    return [
+        _merge_greedy_beam_result(
+            greedy_result,
+            beam_by_position.get(index),
+            top_k=top_k,
+            num_beams=num_beams,
+        )
+        for index, greedy_result in enumerate(greedy_results)
+    ]
+
+
 def main() -> None:
     args = parse_args()
     if args.batch_size < 1 or args.max_code_paths < 1:
@@ -729,7 +861,11 @@ def main() -> None:
                 "mode": (
                     "single_code_top_k"
                     if decoding_mode == "beam_search"
-                    else "autoregressive_multi_path"
+                    else (
+                        "autoregressive_multi_path_with_beam_fill"
+                        if decoding_mode == "greedy_beam_fill"
+                        else "autoregressive_multi_path"
+                    )
                 ),
                 "separator": CODE_PATH_SEPARATOR,
                 "max_code_paths": (
@@ -740,6 +876,10 @@ def main() -> None:
                 "num_return_sequences": (
                     num_beams if decoding_mode == "beam_search" else 1
                 ),
+                "beam_fill_num_return_sequences": (
+                    num_beams if decoding_mode == "greedy_beam_fill" else 0
+                ),
+                "beam_fill_when_needed": decoding_mode == "greedy_beam_fill",
             },
             "cutoffs": sorted(set(args.cutoffs)),
             "metrics": aggregate_retrieval_metrics(per_query),

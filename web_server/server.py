@@ -149,7 +149,11 @@ def handler_class(runtime: RouterRuntime):
                 if not isinstance(payload, dict):
                     raise ValueError("JSON body must be an object")
                 decoding_mode = str(payload.get("decoding_mode", "greedy"))
-                default_num_beams = 4 if decoding_mode == "beam_search" else 1
+                default_num_beams = (
+                    4
+                    if decoding_mode in ("beam_search", "greedy_beam_fill")
+                    else 1
+                )
                 generation_options = {
                     "max_code_paths": int(payload.get("max_code_paths", 4)),
                     "top_k": int(payload.get("top_k", 10)),

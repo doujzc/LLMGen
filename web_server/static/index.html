@@ -119,6 +119,7 @@
                   <select id="decoding-mode" name="decoding_mode">
                     <option value="greedy" selected>Greedy Autoregressive</option>
                     <option value="beam_search">Beam Search</option>
+                    <option value="greedy_beam_fill">Greedy + Beam 补全</option>
                   </select>
                 </label>
                 <label id="max-paths-control">
@@ -140,7 +141,7 @@
                   </select>
                 </label>
                 <label id="beam-control" class="control-wide disabled">
-                  <span>Code Top K（Beam 宽度）</span>
+                  <span id="beam-control-label">Code Top K（Beam 宽度）</span>
                   <select id="num-beams" name="num_beams" disabled>
                     <option value="2">2</option>
                     <option value="4" selected>4</option>
@@ -216,7 +217,7 @@
                 </div>
                 <div class="candidate-columns" aria-hidden="true">
                   <span>Rank</span>
-                  <span>候选 Skill / Code 路径</span>
+                  <span>候选 Skill / Skill ID / Code 路径</span>
                   <span>Score</span>
                 </div>
                 <div id="candidate-rows" class="candidate-rows"></div>
@@ -319,7 +320,7 @@
                 <span id="filtered-skill-count" class="count-label">0 Skills</span>
               </div>
               <div class="all-skill-columns" aria-hidden="true">
-                <span>Skill / 能力说明</span>
+                <span>Skill / Skill ID / 能力说明</span>
                 <span>领域</span>
                 <span>Code</span>
               </div>

@@ -59,6 +59,21 @@ Beam Search 则只生成一条固定长度 code：`num_beams=K` 时返回概率�
 }
 ```
 
+`greedy_beam_fill` 会先保留 Greedy 的多 Skill 结果；仅当去重后的候选少于
+`top_k` 时，才用单行 Beam Search 追加未重复候选。`num_beams` 控制补充搜索
+预算，因此在 Beam 宽度不足或 code 碰撞较多时，最终候选数可能仍少于
+`top_k`：
+
+```json
+{
+  "query": "...",
+  "decoding_mode": "greedy_beam_fill",
+  "max_code_paths": 4,
+  "num_beams": 8,
+  "top_k": 10
+}
+```
+
 K 越大，时延和显存开销越高。默认仍为多路径 Greedy Autoregressive。
 
 命令行批量推理也支持同一 TXT 格式，使用

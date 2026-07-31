@@ -79,10 +79,17 @@ def test_decoding_mode_normalizes_greedy_and_validates_beam_width() -> None:
     assert _resolve_decoding(
         Namespace(decoding_mode="beam_search", num_beams=4)
     ) == ("beam_search", 4)
+    assert _resolve_decoding(
+        Namespace(decoding_mode="greedy_beam_fill", num_beams=6)
+    ) == ("greedy_beam_fill", 6)
 
     with pytest.raises(RouterDataError, match="num_beams >= 2"):
         _resolve_decoding(
             Namespace(decoding_mode="beam_search", num_beams=1)
+        )
+    with pytest.raises(RouterDataError, match="num_beams >= 2"):
+        _resolve_decoding(
+            Namespace(decoding_mode="greedy_beam_fill", num_beams=1)
         )
     with pytest.raises(RouterDataError, match="decoding_mode"):
         _resolve_decoding(Namespace(decoding_mode="sampling", num_beams=4))
@@ -355,4 +362,154 @@ def test_beam_search_groups_top_codes_by_input_query() -> None:
     ] == [
         ["<L1_0><L2_0>", "<L1_1><L2_1>"],
         ["<L1_1><L2_1>", "<L1_0><L2_0>"],
+    ]
+
+
+class _FakeGreedyBeamModel:
+    def __init__(self) -> None:
+        self.generate_calls = []
+
+    def generate(self, **kwargs):
+        self.generate_calls.append(kwargs)
+        if len(self.generate_calls) == 1:
+            return SimpleNamespace(
+                sequences=torch.tensor([[90, 91, 10, 20, 2]]),
+                scores=(torch.zeros((1, 32)),) * 3,
+                beam_indices=None,
+            )
+        return SimpleNamespace(
+            sequences=torch.tensor(
+                [
+                    [90, 91, 10, 20],
+                    [90, 91, 11, 21],
+                ]
+            ),
+            scores=(torch.zeros((2, 32)),) * 2,
+            beam_indices=torch.tensor(
+                [
+                    [-1, -1, 0, 0],
+                    [-1, -1, 1, 1],
+                ]
+            ),
+        )
+
+    def compute_transition_scores(
+        self,
+        sequences,
+        scores,
+        beam_indices=None,
+        normalize_logits=False,
+    ):
+        assert normalize_logits is True
+        if int(sequences.shape[0]) == 1:
+            return torch.tensor([[-0.1, -0.2, -0.01]])
+        assert beam_indices is not None
+        return torch.tensor(
+            [
+                [-0.1, -0.2],
+                [-0.4, -0.5],
+            ]
+        )
+
+
+def test_greedy_beam_fill_keeps_greedy_then_appends_unique_beam_candidates() -> None:
+    trie = MultiPathTokenTrie(
+        [(10, 20), (11, 21)],
+        eos_token_id=2,
+        separator_token_ids=(13,),
+        max_paths=2,
+    )
+    model = _FakeGreedyBeamModel()
+
+    results = _generate_batch(
+        batch=[{"id": "q1", "query": "查天气并安排日历"}],
+        tokenizer=_FakeTokenizer(),
+        model=model,
+        torch=torch,
+        trie=trie,
+        id_to_token={
+            10: "<L1_0>",
+            11: "<L1_1>",
+            20: "<L2_0>",
+            21: "<L2_1>",
+        },
+        buckets={
+            ("<L1_0>", "<L2_0>"): ("weather",),
+            ("<L1_1>", "<L2_1>"): ("calendar",),
+        },
+        args=Namespace(
+            system_prompt="route",
+            max_input_length=32,
+            device="cpu",
+            top_k=2,
+            decoding_mode="greedy_beam_fill",
+            num_beams=2,
+        ),
+    )
+
+    assert len(model.generate_calls) == 2
+    assert model.generate_calls[0]["num_beams"] == 1
+    assert model.generate_calls[1]["num_beams"] == 2
+    result = results[0]
+    assert result["generated_text"] == "<L1_0><L2_0>"
+    assert [path["code_text"] for path in result["paths"]] == [
+        "<L1_0><L2_0>"
+    ]
+    assert [path["code_text"] for path in result["beam_fill_paths"]] == [
+        "<L1_0><L2_0>",
+        "<L1_1><L2_1>",
+    ]
+    assert [
+        (candidate["skill_id"], candidate["selection_source"])
+        for candidate in result["candidates"]
+    ] == [
+        ("weather", "greedy"),
+        ("calendar", "beam_fill"),
+    ]
+    assert result["decoding"]["beam_executed"] is True
+    assert result["decoding"]["beam_candidates_added"] == 1
+    assert result["decoding"]["target_reached"] is True
+
+
+def test_greedy_beam_fill_skips_beam_when_greedy_already_reaches_top_k() -> None:
+    trie = MultiPathTokenTrie(
+        [(10, 20), (11, 21)],
+        eos_token_id=2,
+        separator_token_ids=(13,),
+        max_paths=2,
+    )
+    model = _FakeGreedyModel()
+
+    result = _generate_batch(
+        batch=[{"id": "q1", "query": "查天气并写入日历"}],
+        tokenizer=_FakeTokenizer(),
+        model=model,
+        torch=torch,
+        trie=trie,
+        id_to_token={
+            10: "<L1_0>",
+            11: "<L1_1>",
+            20: "<L2_0>",
+            21: "<L2_1>",
+        },
+        buckets={
+            ("<L1_0>", "<L2_0>"): ("weather",),
+            ("<L1_1>", "<L2_1>"): ("calendar",),
+        },
+        args=Namespace(
+            system_prompt="route",
+            max_input_length=32,
+            device="cpu",
+            top_k=2,
+            decoding_mode="greedy_beam_fill",
+            num_beams=2,
+        ),
+    )[0]
+
+    assert model.generate_kwargs["num_beams"] == 1
+    assert result["beam_fill_paths"] == []
+    assert result["decoding"]["beam_executed"] is False
+    assert [candidate["selection_source"] for candidate in result["candidates"]] == [
+        "greedy",
+        "greedy",
     ]

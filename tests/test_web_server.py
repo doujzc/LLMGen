@@ -3,6 +3,7 @@ from __future__ import annotations
 from argparse import Namespace
 from http.server import ThreadingHTTPServer
 import json
+from pathlib import Path
 import threading
 from urllib.request import Request, urlopen
 
@@ -11,6 +12,9 @@ import pytest
 from llmgen.router import RouterDataError
 from web_server.server import handler_class
 from web_server.runtime import RouterRuntime
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StubRuntime:
@@ -212,6 +216,56 @@ def test_runtime_beam_search_forces_one_code_per_beam(monkeypatch) -> None:
     assert result["request"]["num_beams"] == 4
 
 
+def test_runtime_greedy_beam_fill_keeps_greedy_path_cap(monkeypatch) -> None:
+    runtime = RouterRuntime.__new__(RouterRuntime)
+    runtime.max_code_paths = 8
+    runtime.max_num_beams = 8
+    runtime.args = Namespace()
+    runtime._lock = threading.Lock()
+    runtime.tokenizer = object()
+    runtime.model = object()
+    runtime.torch = object()
+    runtime.id_to_token = {}
+    runtime.buckets = {}
+    runtime.skills = {}
+    runtime.decode_map = {"skill_to_code": {}}
+    trie_requests = []
+    runtime._trie = (
+        lambda max_code_paths: trie_requests.append(max_code_paths) or object()
+    )
+
+    def fake_generate_batch(**kwargs):
+        assert kwargs["args"].max_code_paths == 6
+        assert kwargs["args"].decoding_mode == "greedy_beam_fill"
+        return [
+            {
+                "query_id": "interactive",
+                "query": "帮我查天气",
+                "generated_text": "",
+                "decoding": {
+                    "mode": "greedy_beam_fill",
+                    "num_beams": 4,
+                },
+                "paths": [],
+                "beam_fill_paths": [],
+                "candidates": [],
+            }
+        ]
+
+    monkeypatch.setattr("web_server.runtime._generate_batch", fake_generate_batch)
+
+    result = runtime.infer(
+        "帮我查天气",
+        max_code_paths=6,
+        decoding_mode="greedy_beam_fill",
+        num_beams=4,
+    )
+
+    assert trie_requests == [6]
+    assert result["request"]["max_code_paths"] == 6
+    assert result["request"]["num_beams"] == 4
+
+
 def test_runtime_batch_preserves_order_and_splits_model_batches(monkeypatch) -> None:
     runtime = RouterRuntime.__new__(RouterRuntime)
     runtime.max_code_paths = 8
@@ -305,6 +359,19 @@ def test_web_api_health_catalog_and_inference() -> None:
         assert greedy["request"]["decoding_mode"] == "greedy"
         assert greedy["request"]["num_beams"] == 1
 
+        _, hybrid = _request(
+            base + "/api/infer",
+            payload={
+                "query": "帮我查天气",
+                "decoding_mode": "greedy_beam_fill",
+                "max_code_paths": 5,
+                "top_k": 10,
+            },
+        )
+        assert hybrid["request"]["decoding_mode"] == "greedy_beam_fill"
+        assert hybrid["request"]["max_code_paths"] == 5
+        assert hybrid["request"]["num_beams"] == 4
+
         _, batch = _request(
             base + "/api/infer-batch",
             payload={
@@ -340,3 +407,20 @@ def test_web_serves_skill_router_brand_mark() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_candidate_renderer_displays_each_skill_id() -> None:
+    static_dir = REPOSITORY_ROOT / "web_server/static"
+    app = (static_dir / "app.js").read_text(encoding="utf-8")
+    index = (static_dir / "index.html").read_text(encoding="utf-8")
+    styles = (static_dir / "styles.css").read_text(encoding="utf-8")
+
+    assert 'textNode("code", "candidate-skill-id", candidate.skill_id)' in app
+    assert 'textNode("code", "catalog-skill-id", skill.skill_id)' in app
+    assert 'textNode("code", "all-skill-id", skill.skill_id)' in app
+    assert "候选 Skill / Skill ID / Code 路径" in index
+    assert "Skill / Skill ID / 能力说明" in index
+    assert ".candidate-skill-id" in styles
+    assert '<option value="greedy_beam_fill">' in index
+    assert 'candidate.selection_source === "beam_fill"' in app
+    assert ".candidate-source.beam" in styles
