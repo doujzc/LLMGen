@@ -476,22 +476,61 @@ function renderBatchRun(run) {
   selectBatchResult(0);
 }
 
-function downloadBatchResults() {
-  if (!state.batchResults.length) return;
-  const jsonl = `${state.batchResults.map((row) => JSON.stringify(row)).join("\n")}\n`;
+function batchExportRows() {
+  const run = state.batchRun;
+  return state.batchResults.map((row, index) => ({
+    ...row,
+    request: { ...(row.request || run?.request || {}) },
+    batch_export: {
+      source_file: run?.file_name || "",
+      query_index: index + 1,
+      source_line: row.source_line ?? index + 1,
+      total_queries: run?.num_queries || state.batchResults.length,
+      client_latency_ms: run?.latency_ms,
+      total_server_latency_ms: run?.server_latency_ms,
+      ...(row.batch_export || {}),
+    },
+  }));
+}
+
+function downloadBatchFile(content, { extension, mimeType }) {
   const blobUrl = URL.createObjectURL(
-    new Blob([jsonl], { type: "application/x-ndjson;charset=utf-8" }),
+    new Blob([content], { type: `${mimeType};charset=utf-8` }),
   );
   const fileStem = (state.batchRun?.file_name || "queries")
     .replace(/\.[^.]+$/, "")
     .replace(/[^\w.-]+/g, "_");
   const link = document.createElement("a");
   link.href = blobUrl;
-  link.download = `${fileStem}.results.jsonl`;
+  link.download = `${fileStem}.results.${extension}`;
   document.body.append(link);
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+}
+
+function downloadBatchResults() {
+  if (!state.batchResults.length) return;
+  const jsonl =
+    `${batchExportRows().map((row) => JSON.stringify(row)).join("\n")}\n`;
+  downloadBatchFile(jsonl, {
+    extension: "jsonl",
+    mimeType: "application/x-ndjson",
+  });
+}
+
+function downloadBatchText() {
+  if (!state.batchResults.length) return;
+  const lines = batchExportRows().map((row) =>
+    (row.skill_ids || [])
+      .map((skillId) => String(skillId).trim())
+      .filter(Boolean)
+      .join(","),
+  );
+  downloadBatchFile(`${lines.join("\n")}\n`, {
+    extension: "txt",
+    mimeType: "text/plain",
+  });
 }
 
 function showLoading(message) {
@@ -564,6 +603,17 @@ async function runBatchInference(options) {
       result.query_id = `query-${String(globalIndex + 1).padStart(6, "0")}`;
       result.batch_index = globalIndex;
       result.source_line = rows[globalIndex].source_line;
+      result.request = { ...(result.request || response.request || options) };
+      result.batch_export = {
+        source_file: fileName,
+        query_index: globalIndex + 1,
+        source_line: rows[globalIndex].source_line,
+        total_queries: rows.length,
+        request_index: Math.floor(start / size) + 1,
+        request_offset: localIndex + 1,
+        request_query_count: response.num_queries,
+        request_server_latency_ms: Number(response.latency_ms),
+      };
       results.push(result);
     });
   }
@@ -873,6 +923,7 @@ $("#batch-result-select").addEventListener("change", (event) => {
   selectBatchResult(Number(event.target.value));
 });
 $("#download-batch").addEventListener("click", downloadBatchResults);
+$("#download-batch-txt").addEventListener("click", downloadBatchText);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("#catalog-page").hidden) {
     closeCatalogPage();

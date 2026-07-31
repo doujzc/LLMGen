@@ -201,9 +201,24 @@
                 <div class="batch-result-actions">
                   <label class="sr-only" for="batch-result-select">查看批量结果</label>
                   <select id="batch-result-select"></select>
-                  <button id="download-batch" class="secondary-button" type="button">
-                    下载 JSONL
-                  </button>
+                  <div class="batch-download-actions" role="group" aria-label="导出批量结果">
+                    <button
+                      id="download-batch"
+                      class="secondary-button"
+                      type="button"
+                      title="每行包含完整候选、解码参数和来源信息"
+                    >
+                      JSONL · 完整
+                    </button>
+                    <button
+                      id="download-batch-txt"
+                      class="secondary-button"
+                      type="button"
+                      title="每个 Query 一行，直接输出 JSONL skill_ids"
+                    >
+                      TXT · Skill IDs
+                    </button>
+                  </div>
                 </div>
               </div>
 

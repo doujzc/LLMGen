@@ -209,6 +209,7 @@ def test_beam_search_returns_top_k_single_codes_and_tracks_beam_scores() -> None
         "weather",
         "calendar",
     ]
+    assert results[0]["skill_ids"] == ["weather", "calendar"]
 
 
 class _FakeGreedyModel:
@@ -469,6 +470,7 @@ def test_greedy_beam_fill_keeps_greedy_then_appends_unique_beam_candidates() -> 
     assert result["decoding"]["beam_executed"] is True
     assert result["decoding"]["beam_candidates_added"] == 1
     assert result["decoding"]["target_reached"] is True
+    assert result["skill_ids"] == ["weather", "calendar"]
 
 
 def test_greedy_beam_fill_skips_beam_when_greedy_already_reaches_top_k() -> None:
@@ -512,4 +514,101 @@ def test_greedy_beam_fill_skips_beam_when_greedy_already_reaches_top_k() -> None
     assert [candidate["selection_source"] for candidate in result["candidates"]] == [
         "greedy",
         "greedy",
+    ]
+
+
+def test_greedy_beam_fill_preserves_batch_order_and_only_beams_short_rows(
+    monkeypatch,
+) -> None:
+    batch = [
+        {"id": "q1", "query": "Greedy 已满"},
+        {"id": "q2", "query": "缺少一个"},
+        {"id": "q3", "query": "全部补充"},
+    ]
+    calls = []
+
+    def make_result(row, mode, skill_ids):
+        return {
+            "query_id": row["id"],
+            "query": row["query"],
+            "generated_text": "",
+            "decoding": {"mode": mode, "num_beams": 1 if mode == "greedy" else 3},
+            "paths": [],
+            "candidates": [
+                {
+                    "skill_id": skill_id,
+                    "score": -float(index),
+                    "path_rank": index,
+                    "code_tokens": [skill_id],
+                }
+                for index, skill_id in enumerate(skill_ids)
+            ],
+        }
+
+    def fake_generate_decoding_batch(*, batch, args, **kwargs):
+        calls.append((args.decoding_mode, [row["id"] for row in batch]))
+        skill_ids = (
+            {
+                "q1": ("a", "b"),
+                "q2": ("c",),
+                "q3": (),
+            }
+            if args.decoding_mode == "greedy"
+            else {
+                "q2": ("c", "d", "unused"),
+                "q3": ("e", "f", "unused"),
+            }
+        )
+        return [
+            make_result(row, args.decoding_mode, skill_ids[row["id"]])
+            for row in batch
+        ]
+
+    monkeypatch.setattr(
+        "scripts.infer_router._generate_decoding_batch",
+        fake_generate_decoding_batch,
+    )
+
+    results = _generate_batch(
+        batch=batch,
+        tokenizer=None,
+        model=None,
+        torch=None,
+        trie=None,
+        id_to_token={},
+        buckets={},
+        args=Namespace(
+            decoding_mode="greedy_beam_fill",
+            num_beams=3,
+            top_k=2,
+        ),
+    )
+
+    assert calls == [
+        ("greedy", ["q1", "q2", "q3"]),
+        ("beam_search", ["q2", "q3"]),
+    ]
+    assert [row["query_id"] for row in results] == ["q1", "q2", "q3"]
+    assert [
+        [candidate["skill_id"] for candidate in row["candidates"]]
+        for row in results
+    ] == [["a", "b"], ["c", "d"], ["e", "f"]]
+    assert [
+        [candidate["selection_source"] for candidate in row["candidates"]]
+        for row in results
+    ] == [
+        ["greedy", "greedy"],
+        ["greedy", "beam_fill"],
+        ["beam_fill", "beam_fill"],
+    ]
+    assert results[1]["decoding"]["result_fields"] == {
+        "greedy_paths": "paths",
+        "beam_supplement_paths": "beam_fill_paths",
+        "final_skill_ranking": "candidates",
+        "final_skill_ids": "skill_ids",
+    }
+    assert [row["skill_ids"] for row in results] == [
+        ["a", "b"],
+        ["c", "d"],
+        ["e", "f"],
     ]

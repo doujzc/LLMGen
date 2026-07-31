@@ -316,6 +316,10 @@ def test_runtime_batch_preserves_order_and_splits_model_batches(monkeypatch) -> 
     ]
     assert [row["batch_index"] for row in result["results"]] == list(range(5))
     assert result["request"]["batch_size"] == 2
+    assert all(
+        row["request"] == result["request"]
+        for row in result["results"]
+    )
 
 
 def test_web_api_health_catalog_and_inference() -> None:
@@ -424,3 +428,9 @@ def test_candidate_renderer_displays_each_skill_id() -> None:
     assert '<option value="greedy_beam_fill">' in index
     assert 'candidate.selection_source === "beam_fill"' in app
     assert ".candidate-source.beam" in styles
+    assert 'id="download-batch-txt"' in index
+    assert "function batchExportRows()" in app
+    assert "function downloadBatchText()" in app
+    assert 'extension: "txt"' in app
+    assert "(row.skill_ids || [])" in app
+    assert ".batch-download-actions" in styles

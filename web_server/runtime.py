@@ -364,9 +364,6 @@ class RouterRuntime:
                     )
                 )
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
-        for index, result in enumerate(results):
-            result["batch_index"] = index
-            self._enrich_result(result)
         request_payload = self._request_payload(
             max_code_paths=request_args.max_code_paths,
             top_k=top_k,
@@ -374,6 +371,12 @@ class RouterRuntime:
             num_beams=effective_num_beams,
         )
         request_payload["batch_size"] = batch_size
+        for index, result in enumerate(results):
+            result["batch_index"] = index
+            # Keep each JSONL-compatible row self-describing. The batch API
+            # still exposes this once at the top level for compact clients.
+            result["request"] = dict(request_payload)
+            self._enrich_result(result)
         return {
             "num_queries": len(results),
             "latency_ms": latency_ms,

@@ -30,7 +30,13 @@ bash scripts/router_pipeline.sh light web \
 
 界面可切换到“批量 TXT”：文件中每个非空行作为一个 Query，空行会忽略，重复行
 和原始顺序会保留。运行期间按选择的模型 Batch Size 分批处理，完成后可逐条查看
-并下载 JSONL 结果。
+并下载两种结果：
+
+- `JSONL · 完整`：每个 Query 一行，包含完整请求参数、输入文件/行号、批次信息、
+  Greedy 路径、Beam 补充路径、最终 `candidates` 排名及对应的顶层
+  `skill_ids`。
+- `TXT · Skill IDs`：每个 Query 一行，直接读取该 JSONL 行的 `skill_ids`，
+  按原顺序使用英文逗号连接；行序与输入中的非空 Query 严格一致。
 
 “Skill 目录 → 查看全部”会加载模型的完整唯一候选集；左侧 Code 树和中间候选
 列表使用同一份数据，可按任意层级 Token 筛选并查看 Skill 原始信息。

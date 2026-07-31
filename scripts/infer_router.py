@@ -593,6 +593,9 @@ def _generate_decoding_batch(
                 },
                 "paths": path_payloads,
                 "candidates": candidates,
+                "skill_ids": [
+                    candidate["skill_id"] for candidate in candidates
+                ],
             }
         )
     return results
@@ -648,6 +651,9 @@ def _merge_greedy_beam_result(
 
     result = dict(greedy_result)
     result["candidates"] = candidates[:top_k]
+    result["skill_ids"] = [
+        candidate["skill_id"] for candidate in result["candidates"]
+    ]
     result["beam_fill_paths"] = (
         [] if beam_result is None else list(beam_result["paths"])
     )
@@ -655,6 +661,12 @@ def _merge_greedy_beam_result(
         "mode": "greedy_beam_fill",
         "num_beams": num_beams,
         "scope": "autoregressive_multi_path_with_beam_fill",
+        "result_fields": {
+            "greedy_paths": "paths",
+            "beam_supplement_paths": "beam_fill_paths",
+            "final_skill_ranking": "candidates",
+            "final_skill_ids": "skill_ids",
+        },
         "target_top_k": top_k,
         "target_reached": len(result["candidates"]) >= top_k,
         "beam_executed": beam_result is not None,
