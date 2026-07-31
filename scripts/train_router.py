@@ -637,6 +637,7 @@ def _run_phase(
             "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
             "base_model": args.model_name_or_path,
             "base_model_revision": getattr(model.config, "_commit_hash", None),
+            "seed": args.seed,
             "finetune_mode": (
                 "continued_adapter"
                 if args.adapter_name_or_path

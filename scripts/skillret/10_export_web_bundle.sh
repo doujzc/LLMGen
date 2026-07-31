@@ -3,10 +3,11 @@ set -euo pipefail
 # shellcheck source=scripts/skillret/common.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-MODEL_DIR="${1:-$ROUTER_OUTPUT_DIR/retrieval}"
+MODEL_DIR="${1:-${ROUTER_EXPORT_MODEL_DIR:-$ROUTER_OUTPUT_DIR/retrieval}}"
 if (( $# > 0 )); then
   shift
 fi
+skillret_print_step "10" "export Web bundle from $MODEL_DIR"
 skillret_require_dir "$MODEL_DIR"
 skillret_require_file "$PROCESSED_DIR/catalog_train.jsonl"
 skillret_require_file "$INDEX_DIR/train_codes.jsonl"
@@ -105,28 +106,8 @@ MODEL_PHASE=$(
 TRAINING_DATA="$ROUTER_DATA_DIR/${MODEL_PHASE}_train.jsonl"
 skillret_require_file "$TRAINING_DATA"
 
-FINAL_REPLAY_ARGS=()
-if [[ "$MODEL_PHASE" == "retrieval" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION" != "0.0" ]]; then
-  skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
-  FINAL_REPLAY_ARGS+=(
-    --alignment-replay-data "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
-    --alignment-replay-fraction "$ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
-  )
-fi
-if [[ "$MODEL_PHASE" == "retrieval" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0" && "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION" != "0.0" ]]; then
-  skillret_require_file "$ROUTER_DATA_DIR/memorization_train.jsonl"
-  FINAL_REPLAY_ARGS+=(
-    --memorization-replay-data "$ROUTER_DATA_DIR/memorization_train.jsonl"
-    --memorization-replay-fraction "$ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"
-  )
-fi
-if (( ${#FINAL_REPLAY_ARGS[@]} > 0 )); then
-  FINAL_REPLAY_ARGS+=(--seed "$ROUTER_SEED")
-fi
-
 "$PYTHON" scripts/export_router_bundle.py \
   "${COMMON_ARGS[@]}" \
   --training-data "$TRAINING_DATA" \
   --phase "$MODEL_PHASE" \
-  "${FINAL_REPLAY_ARGS[@]}" \
   "$@"

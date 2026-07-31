@@ -121,6 +121,79 @@ def test_dump_router_decoder_artifacts_is_self_contained(tmp_path) -> None:
     assert restored["supervision"]["num_candidates"] == 3
 
 
+def test_completed_bundle_reuses_manifest_replay_mix_after_run_moves(
+    tmp_path,
+) -> None:
+    catalog = tmp_path / "catalog.jsonl"
+    index = tmp_path / "index"
+    router_data = tmp_path / "router_data"
+    model = tmp_path / "model"
+    index.mkdir()
+    router_data.mkdir()
+    model.mkdir()
+    codes = index / "train_codes.jsonl"
+    registry = index / "train_registry.json"
+    tokens = index / "virtual_tokens.txt"
+    training_data = router_data / "retrieval_train.jsonl"
+    alignment = router_data / "retrieval_alignment_train.jsonl"
+    memorization = router_data / "memorization_train.jsonl"
+    _write_jsonl(catalog, CATALOG)
+    _write_jsonl(codes, CODE_ROWS)
+    registry.write_text(json.dumps(REGISTRY), encoding="utf-8")
+    tokens.write_text("\n".join(TOKENS) + "\n", encoding="utf-8")
+    _write_jsonl(
+        training_data,
+        [
+            {"phase": "retrieval", "target_skill_ids": ["s1", "s2"]},
+            {"phase": "retrieval", "target_skill_ids": ["s1"]},
+        ],
+    )
+    _write_jsonl(
+        alignment,
+        [{"phase": "retrieval", "target_skill_ids": ["s2"]}],
+    )
+    _write_jsonl(
+        memorization,
+        [{"phase": "memorization", "target_skill_ids": ["s3"]}],
+    )
+    stale_root = tmp_path / "old-host" / "router_data"
+    manifest = {
+        "phase": "retrieval",
+        "seed": 17,
+        "replay_sources": {
+            "alignment": {
+                "data": str(stale_root / alignment.name),
+                "fraction_requested": 0.25,
+            },
+            "memorization": {
+                "data": str(stale_root / memorization.name),
+                "fraction_requested": 0.25,
+            },
+        },
+    }
+    (model / "router_manifest.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    export_router_bundle.attach_decoder_artifacts(
+        model_dir=model,
+        catalog_path=catalog,
+        codes_path=codes,
+        registry_path=registry,
+        virtual_tokens_path=tokens,
+        training_data_path=training_data,
+        phase="retrieval",
+    )
+
+    restored = load_skill_decode_map(model / DECODE_MAP_FILENAME)
+    assert restored["skills"]["s3"]["train_target_count"] == 1
+    assert restored["supervision"]["num_examples"] == 4
+    preserved = json.loads((model / "router_manifest.json").read_text())
+    assert preserved["seed"] == 17
+    assert preserved["replay_sources"] == manifest["replay_sources"]
+
+
 def test_materialize_completed_checkpoint_for_web(
     tmp_path, monkeypatch
 ) -> None:
@@ -252,6 +325,7 @@ def test_materialize_completed_checkpoint_for_web(
     assert restored["num_skills"] == 3
     manifest = json.loads((output / "router_manifest.json").read_text())
     assert manifest["phase"] == "retrieval"
+    assert manifest["seed"] == 42
     assert manifest["checkpoint_export"]["global_step"] == 50
     assert manifest["checkpoint_export"]["inference_mode"] == "full"
     assert manifest["generation_contract"]["max_target_paths"] == 1

@@ -92,7 +92,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-levels", type=int)
     parser.add_argument("--max-length", type=int)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Replay sampling seed. Completed models use router_manifest.json "
+            "when omitted; checkpoint exports fall back to 42."
+        ),
+    )
     parser.add_argument("--base-model-name-or-path")
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args()
@@ -409,6 +417,7 @@ def _checkpoint_manifest(
             "base_model": (
                 template.get("base_model") or base_model_name_or_path
             ),
+            "seed": seed,
             "finetune_mode": (
                 template.get("finetune_mode")
                 or ("continued_adapter" if inference_mode == "adapter" else "full")
@@ -684,7 +693,7 @@ def attach_decoder_artifacts(
     phase: str | None,
     replay_data_path: str | Path | None = None,
     replay_fraction: float = 0.0,
-    seed: int = 42,
+    seed: int | None = None,
     alignment_replay_data_path: str | Path | None = None,
     alignment_replay_fraction: float = 0.0,
 ) -> dict[str, Any]:
@@ -697,6 +706,11 @@ def attach_decoder_artifacts(
             f"router manifest does not exist; not a complete router dump: {model_dir}"
         )
     manifest = _load_json_object(manifest_path)
+    effective_seed = (
+        int(seed)
+        if seed is not None
+        else int(manifest.get("seed", 42))
+    )
     training_data = training_data_path or manifest.get("train_data")
     if training_data and not Path(training_data).is_file():
         raise RouterDataError(
@@ -709,6 +723,7 @@ def attach_decoder_artifacts(
         if isinstance(manifest_replay_sources, dict)
         else None
     )
+    replay_path_from_manifest = replay_data_path is None
     if replay_data_path is None:
         memorization_source = (
             structured_replay.get("memorization")
@@ -725,6 +740,7 @@ def attach_decoder_artifacts(
             replay_fraction = float(
                 manifest.get("replay_fraction_requested", replay_fraction)
             )
+    alignment_path_from_manifest = alignment_replay_data_path is None
     if alignment_replay_data_path is None and structured_replay is not None:
         alignment_source = structured_replay.get("alignment")
         if isinstance(alignment_source, dict):
@@ -732,6 +748,28 @@ def attach_decoder_artifacts(
             alignment_replay_fraction = float(
                 alignment_source.get("fraction_requested", 0.0)
             )
+    # Router manifests retain the paths used on the training host. When a run
+    # is copied to another machine, use the equivalent file beside the current
+    # primary training data while preserving the recorded replay fractions.
+    training_parent = Path(training_data).parent if training_data else None
+    if (
+        replay_path_from_manifest
+        and replay_data_path
+        and not Path(replay_data_path).is_file()
+        and training_parent is not None
+    ):
+        relocated = training_parent / Path(replay_data_path).name
+        if relocated.is_file():
+            replay_data_path = relocated
+    if (
+        alignment_path_from_manifest
+        and alignment_replay_data_path
+        and not Path(alignment_replay_data_path).is_file()
+        and training_parent is not None
+    ):
+        relocated = training_parent / Path(alignment_replay_data_path).name
+        if relocated.is_file():
+            alignment_replay_data_path = relocated
     for name, path, fraction in (
         ("memorization", replay_data_path, replay_fraction),
         (
@@ -773,7 +811,7 @@ def attach_decoder_artifacts(
                     replay_fraction,
                 ),
             ),
-            seed=seed,
+            seed=effective_seed,
         )
     supervision_phase = phase or manifest.get("phase")
     artifacts = dump_router_decoder_artifacts(
@@ -833,7 +871,7 @@ def main() -> None:
             phase=args.phase,
             num_levels=args.num_levels,
             max_length=args.max_length,
-            seed=args.seed,
+            seed=args.seed if args.seed is not None else 42,
             template_manifest_path=args.template_manifest,
             base_model_name_or_path=args.base_model_name_or_path,
             trust_remote_code=args.trust_remote_code,
