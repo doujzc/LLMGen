@@ -93,6 +93,12 @@ STAGES = (
         "label": "评估",
         "description": "闭集评估与报告",
     },
+    {
+        "id": "export",
+        "number": "10",
+        "label": "Web Bundle",
+        "description": "导出最终模型或 Retrieval checkpoint",
+    },
 )
 
 
@@ -515,7 +521,7 @@ FIELDS = (
         "code",
         "Code 分配",
         kind="select",
-        options=("sinkhorn", "nearest", "balanced_hierarchical"),
+        options=("nearest", "balanced_hierarchical"),
         source="configs/closedset.env",
     ),
     _field(
@@ -735,16 +741,18 @@ FIELDS = (
         "Alignment Replay 比例",
         "retrieval",
         "阶段超参数",
-        kind="float",
+        kind="ratio",
         source="configs/closedset.env",
+        help="Retrieval 阶段中单 Skill alignment 样本的目标占比。",
     ),
     _field(
         "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION",
         "Memorization Replay 比例",
         "retrieval",
         "阶段超参数",
-        kind="float",
+        kind="ratio",
         source="configs/closedset.env",
+        help="Retrieval 阶段中 memorization 样本的目标占比；两类 Replay 之和必须小于 1。",
     ),
     _field(
         "ROUTER_RESUME_RETRIEVAL",
@@ -994,6 +1002,51 @@ FIELDS = (
         advanced=True,
         derived_from="RUN_DIR",
         derived_suffix="evaluation",
+    ),
+    _field(
+        "ROUTER_EXPORT_MODEL_DIR",
+        "待导出模型目录",
+        "export",
+        "导出来源",
+        kind="path",
+        source="RUN_DIR",
+        help=(
+            "可选择完整 retrieval 模型，或训练中的 "
+            "retrieval/checkpoint-N。"
+        ),
+        required=True,
+        derived_from="RUN_DIR",
+        derived_suffix="router/retrieval",
+    ),
+    _field(
+        "ROUTER_CHECKPOINT_EXPORT_DIR",
+        "Checkpoint Bundle 输出目录",
+        "export",
+        "Checkpoint 导出",
+        kind="path",
+        help="留空时写入 $RUN_DIR/exports/retrieval-checkpoint-N。",
+        advanced=True,
+    ),
+    _field(
+        "ROUTER_CHECKPOINT_TOKENIZER_SOURCE",
+        "Tokenizer 来源",
+        "export",
+        "Checkpoint 导出",
+        kind="path",
+        help=(
+            "留空时依次使用 retrieval_alignment 或 memorization "
+            "阶段模型。"
+        ),
+        advanced=True,
+    ),
+    _field(
+        "ROUTER_CHECKPOINT_TEMPLATE_MANIFEST",
+        "模板 Manifest",
+        "export",
+        "Checkpoint 导出",
+        kind="path",
+        help="留空时使用 Tokenizer 来源目录下的 router_manifest.json。",
+        advanced=True,
     ),
 )
 
@@ -1425,6 +1478,28 @@ class ConfigResolver:
         except (KeyError, ValueError):
             pass
 
+        try:
+            alignment_replay = float(
+                resolved["ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"]
+            )
+            memorization_replay = float(
+                resolved["ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"]
+            )
+            if alignment_replay + memorization_replay >= 1.0:
+                errors.append(
+                    {
+                        "field": (
+                            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
+                        ),
+                        "message": (
+                            "Alignment 与 Memorization Replay 比例之和"
+                            "必须小于 1"
+                        ),
+                    }
+                )
+        except (KeyError, ValueError):
+            pass
+
         if resolved.get("DEVICE", "").startswith("cuda"):
             visible = [
                 token
@@ -1441,6 +1516,35 @@ class ConfigResolver:
                         ),
                     }
                 )
+
+        if command == "export-web":
+            source_value = resolved.get("ROUTER_EXPORT_MODEL_DIR", "")
+            source_path = Path(source_value)
+            if not source_path.is_absolute():
+                source_path = self.repo_root / source_path
+            if not source_path.is_dir():
+                errors.append(
+                    {
+                        "field": "ROUTER_EXPORT_MODEL_DIR",
+                        "message": f"待导出模型目录不存在：{source_path}",
+                    }
+                )
+            elif not (source_path / "router_manifest.json").is_file():
+                is_retrieval_checkpoint = bool(
+                    re.fullmatch(r"checkpoint-[0-9]+", source_path.name)
+                    and source_path.parent.name == "retrieval"
+                    and (source_path / "trainer_state.json").is_file()
+                )
+                if not is_retrieval_checkpoint:
+                    errors.append(
+                        {
+                            "field": "ROUTER_EXPORT_MODEL_DIR",
+                            "message": (
+                                "目录必须包含 router_manifest.json，或是包含 "
+                                "trainer_state.json 的 retrieval/checkpoint-N"
+                            ),
+                        }
+                    )
 
         if errors:
             raise ConfigValidationError(errors)

@@ -80,6 +80,12 @@ PyTorch 会把掩码内设备重新编号；例如请求物理 GPU `4,6` 后，�
 UUID 映射写入日志，并持久化最后一次实际 GPU 观测；即使进程因 OOM 退出，页面
 仍可核验其使用过的物理卡。
 
+Loss 面板每 3 秒从已登记任务的 `train.log` 增量提取 `loss`、`eval_loss`、
+step、epoch、learning rate 和 grad norm，可按 Tokenizer、Memorization、
+Alignment、Retrieval 阶段筛选并悬浮检查单点。首次打开已有任务时会从日志重建
+曲线，后续只读取新增字节；解析缓存仅属于 Web 服务，不写训练目录，也不影响独立
+训练进程。
+
 实时日志默认跟随底部。用户手动向上滚动后会自动取消勾选并显示“已暂停跟随”，
 后续自动刷新保留当前滚动位置；重新勾选后才跳回底部并恢复跟随。
 

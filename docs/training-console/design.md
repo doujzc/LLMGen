@@ -87,6 +87,7 @@ LLMGen 已提供完整的命令行训练、评估、导出流程，以及独立�
 | 06a Alignment | `train-retrieval` 的第一阶段 | `scripts/skillret/06_train_retrieval.sh` |
 | 06b Retrieval | `train-retrieval` 的第二阶段 | `scripts/skillret/06_train_retrieval.sh` |
 | 07 评估 | `evaluate` | `scripts/skillret/07_evaluate.sh` |
+| 10 Web Bundle | `export-web` | `scripts/skillret/10_export_web_bundle.sh` |
 
 完整运行使用 `full`。首版允许提交以下命令：
 
@@ -154,6 +155,11 @@ export-web
 - 高风险或低频字段放入“高级设置”，但仍可编辑；
 - 所有输入具有 label、说明、错误反馈和键盘焦点状态。
 
+导出阶段允许选择完整 Router dump 或
+`retrieval/checkpoint-N`。完整模型沿用训练 manifest 中的 Replay 来源和比例；
+checkpoint 可单独配置 Bundle 输出目录、Tokenizer 来源及模板 manifest。提交
+前检查导出源目录结构，导出本身不占用训练 GPU。
+
 ### 4.4 右侧：运行契约与当前任务
 
 `运行契约`：
@@ -199,6 +205,9 @@ export-web
   任务请求设备、Runtime UUID 绑定、本任务进程组的实际占用和整机其他 GPU；
 - Runner 持久化 `cuda:local_rank -> nvidia-smi index -> GPU UUID` 以及最后一次
   进程组 GPU 观测，任务异常退出后仍可核验物理设备；
+- Loss 面板通过只读、按文件偏移增量更新的日志解析器展示 train/eval loss，
+  支持阶段筛选、最新值、最佳 eval 和单点悬浮检查；服务重启后可从已有日志重建，
+  不向训练代码注册 callback，也不写入训练产物；
 - 日志面板每 3 秒有界读取已脱敏的 `train.log` 尾部；手动向上滚动会暂停跟随并
   保留阅读位置，只有重新启用跟随才回到底部；
 - 活跃任务提供显式二次确认的“停止训练”，停止中禁止重复提交；
@@ -616,6 +625,7 @@ GET /api/profile?id=<profile_id>&version=<n>
 GET /api/runs?limit=20
 GET /api/run?id=<run_id>
 GET /api/run-log?id=<run_id>&tail=200
+GET /api/run-metrics?id=<run_id>&limit=2000
 ```
 
 ### 9.2 写入
@@ -706,6 +716,7 @@ API 响应不返回已知密钥，不返回任意文件内容，不允许客户�
 - 能在 Web 服务重启后恢复 profile 和 run 列表；
 - 能有界读取任务日志尾部、阶段、PID、exit code 和最新 checkpoint；
 - 能在完整监控页切换历史任务，显示 GPU、流水线位置与持续时间；
+- 能从已有及新增 Trainer 日志绘制分阶段 train/eval Loss 曲线；
 - 能对活跃任务二次确认并发出协作停止请求；
 - Stage 02 能直接配置 raw collision rate 等全部 Code 质量门参数；
 - 不修改任何训练脚本。

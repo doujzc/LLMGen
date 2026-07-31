@@ -106,6 +106,7 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
         "alignment",
         "retrieval",
         "evaluation",
+        "export",
     }
     assert len(clawhub["fields"]) >= 90
     assert clawhub["defaults"]["BRANCHING_FACTORS"] == "128 128"
@@ -120,8 +121,15 @@ def test_schema_covers_every_training_stage_and_resolves_dataset_defaults() -> N
         clawhub["defaults"]["ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION"]
         == "0.05"
     )
+    assert clawhub["defaults"]["ROUTER_EXPORT_MODEL_DIR"] == (
+        "$RUN_DIR/router/retrieval"
+    )
     assert clawhub["secrets"]["OPENAI_API_KEY"]["persisted"] is False
     fields = {field["key"]: field for field in clawhub["fields"]}
+    assert fields["CODE_ASSIGNMENT_MODE"]["options"] == [
+        "nearest",
+        "balanced_hierarchical",
+    ]
     for key in (
         "CODE_MAX_COLLISION_RATE",
         "CODE_MAX_RAW_COLLISION_RATE",
@@ -287,6 +295,83 @@ def test_validation_rejects_unknown_values_newlines_and_gpu_mismatch() -> None:
             },
         )
     assert duplicate_gpu.value.errors[0]["field"] == "CUDA_VISIBLE_DEVICES"
+
+
+def test_validation_rejects_invalid_replay_mixtures() -> None:
+    resolver = ConfigResolver(REPO_ROOT, inherited_env=_clean_env())
+
+    for overrides in (
+        {"ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "-0.01"},
+        {"ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION": "1.01"},
+        {
+            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "0.8",
+            "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION": "0.2",
+        },
+    ):
+        with pytest.raises(ConfigValidationError):
+            resolver.validate("clawhub", "train-retrieval", overrides)
+
+    valid = resolver.validate(
+        "clawhub",
+        "train-retrieval",
+        {
+            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "0.15",
+            "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION": "0.05",
+        },
+    )
+    assert valid["resolved"][
+        "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION"
+    ] == "0.15"
+
+
+def test_export_validation_accepts_only_complete_models_or_checkpoints(
+    tmp_path,
+) -> None:
+    resolver = ConfigResolver(REPO_ROOT, inherited_env=_clean_env())
+    missing = tmp_path / "missing"
+    with pytest.raises(ConfigValidationError) as absent:
+        resolver.validate(
+            "light",
+            "export-web",
+            {"ROUTER_EXPORT_MODEL_DIR": str(missing)},
+        )
+    assert absent.value.errors[0]["field"] == "ROUTER_EXPORT_MODEL_DIR"
+
+    final_model = tmp_path / "router" / "retrieval"
+    final_model.mkdir(parents=True)
+    (final_model / "router_manifest.json").write_text(
+        '{"phase":"retrieval"}\n',
+        encoding="utf-8",
+    )
+    final = resolver.validate(
+        "light",
+        "export-web",
+        {"ROUTER_EXPORT_MODEL_DIR": str(final_model)},
+    )
+    assert final["resolved"]["ROUTER_EXPORT_MODEL_DIR"] == str(final_model)
+
+    checkpoint = tmp_path / "other" / "retrieval" / "checkpoint-50"
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "trainer_state.json").write_text(
+        '{"global_step":50}\n',
+        encoding="utf-8",
+    )
+    resumed = resolver.validate(
+        "light",
+        "export-web",
+        {"ROUTER_EXPORT_MODEL_DIR": str(checkpoint)},
+    )
+    assert resumed["resolved"]["ROUTER_EXPORT_MODEL_DIR"] == str(checkpoint)
+
+    wrong_phase = tmp_path / "memorization" / "checkpoint-50"
+    wrong_phase.mkdir(parents=True)
+    (wrong_phase / "trainer_state.json").write_text("{}\n", encoding="utf-8")
+    with pytest.raises(ConfigValidationError):
+        resolver.validate(
+            "light",
+            "export-web",
+            {"ROUTER_EXPORT_MODEL_DIR": str(wrong_phase)},
+        )
 
 
 def test_runtime_environment_is_allowlisted_frozen_and_excludes_secrets() -> None:
@@ -658,6 +743,10 @@ def test_http_api_saves_profiles_and_run_snapshots_without_launching(
         assert "monitorLogNearBottom" in app
         assert "setMonitorLogFollowing(false)" in app
         assert "previousScrollTop" in app
+        assert '"train-retrieval": ["alignment", "retrieval"]' in app
+        assert '"export-web": ["export"]' in app
+        assert '"export-web": "export"' in app
+        assert '<option value="export-web">10 · export-web</option>' in page
 
         _, validated = _request(
             base + "/api/validate",

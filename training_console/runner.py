@@ -196,7 +196,12 @@ def run(args: argparse.Namespace) -> int:
     )
     env.update(resolved)
     gpu_resolution: dict[str, Any] | None = None
-    if resolved.get("DEVICE", "").startswith("cuda"):
+    # Bundle export only copies/annotates artifacts and must remain runnable on
+    # a CPU-only host even when the saved training profile targets CUDA.
+    if (
+        config["command"] != "export-web"
+        and resolved.get("DEVICE", "").startswith("cuda")
+    ):
         env["CUDA_DEVICE_ORDER"] = resolved.get(
             "CUDA_DEVICE_ORDER",
             "PCI_BUS_ID",

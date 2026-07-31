@@ -395,7 +395,7 @@
           <span class="eyebrow">DETACHED RUN OBSERVATORY</span>
           <h1>训练运行中心</h1>
           <p>
-            从磁盘状态、训练日志与 GPU 遥测持续读取；关闭或刷新页面不会影响独立训练进程。
+            从磁盘状态、Loss、训练日志与 GPU 遥测持续读取；关闭或刷新页面不会影响独立训练进程。
           </p>
         </div>
         <div class="monitor-refresh-cluster">
@@ -509,6 +509,79 @@
                 <span id="monitor-progress-bar"></span>
               </div>
               <div id="monitor-stage-track" class="monitor-stage-track"></div>
+            </section>
+
+            <section class="loss-monitor-panel" aria-labelledby="loss-monitor-title">
+              <header class="loss-panel-header">
+                <div>
+                  <span class="eyebrow">OPTIMIZATION SIGNAL</span>
+                  <h3 id="loss-monitor-title">Loss 曲线</h3>
+                  <p>从持久化训练日志增量提取；不接入或控制训练进程。</p>
+                </div>
+                <div class="loss-panel-controls">
+                  <label for="loss-phase-filter">
+                    <span>训练阶段</span>
+                    <select id="loss-phase-filter">
+                      <option value="all">全部训练阶段</option>
+                    </select>
+                  </label>
+                  <span id="loss-panel-updated" class="health-label neutral">
+                    等待训练指标
+                  </span>
+                </div>
+              </header>
+
+              <div class="loss-readings" aria-live="polite">
+                <article>
+                  <span>Latest train</span>
+                  <strong id="monitor-latest-train-loss">—</strong>
+                  <small id="monitor-latest-train-meta">尚无训练点</small>
+                </article>
+                <article>
+                  <span>Latest eval</span>
+                  <strong id="monitor-latest-eval-loss">—</strong>
+                  <small id="monitor-latest-eval-meta">尚无验证点</small>
+                </article>
+                <article>
+                  <span>Best eval</span>
+                  <strong id="monitor-best-eval-loss">—</strong>
+                  <small id="monitor-best-eval-meta">等待验证</small>
+                </article>
+                <article>
+                  <span>Logged points</span>
+                  <strong id="monitor-loss-point-count">0</strong>
+                  <small id="monitor-loss-point-meta">train 0 · eval 0</small>
+                </article>
+              </div>
+
+              <div id="loss-chart-shell" class="loss-chart-shell">
+                <svg
+                  id="loss-chart"
+                  viewBox="0 0 960 300"
+                  role="img"
+                  aria-label="训练与验证 Loss 曲线"
+                  hidden
+                ></svg>
+                <div id="loss-chart-empty" class="loss-chart-empty">
+                  <span>∿</span>
+                  <strong>等待 Trainer 输出 Loss</strong>
+                  <p>出现首条 loss 或 eval_loss 日志后自动绘制。</p>
+                </div>
+                <div
+                  id="loss-chart-tooltip"
+                  class="loss-chart-tooltip"
+                  role="status"
+                  hidden
+                ></div>
+              </div>
+
+              <footer class="loss-chart-footer">
+                <div class="loss-legend" aria-label="曲线图例">
+                  <span><i class="train"></i>Train loss</span>
+                  <span><i class="eval"></i>Eval loss</span>
+                </div>
+                <span id="loss-axis-caption">横轴 · 日志观测点</span>
+              </footer>
             </section>
 
             <div class="monitor-detail-grid">
@@ -648,6 +721,11 @@
             <option value="train-memorization">05 · train-memorization</option>
             <option value="train-retrieval">06 · train-retrieval</option>
             <option value="evaluate">07 · evaluate</option>
+            <option value="diagnose">08 · diagnose</option>
+            <option value="diagnose-memorization">
+              09 · diagnose-memorization
+            </option>
+            <option value="export-web">10 · export-web</option>
           </select>
         </label>
         <footer>

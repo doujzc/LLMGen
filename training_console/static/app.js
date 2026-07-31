@@ -21,6 +21,14 @@ const state = {
   monitorLogRequestId: 0,
   monitorLogRunId: "",
   monitorLogUpdating: false,
+  monitorMetrics: null,
+  monitorMetricsLoading: false,
+  monitorMetricError: "",
+  monitorMetricRequestId: 0,
+  monitorMetricRunId: "",
+  lossPhaseFilter: "all",
+  lossChartPoints: [],
+  lossRenderSignature: "",
   loadedProfileId: "",
   loadedVersion: null,
   loadedRevision: null,
@@ -48,6 +56,15 @@ const ATTENTION_RUN_STATUSES = new Set([
   "stopped",
   "unknown",
 ]);
+const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
+const LOSS_CHART = {
+  width: 960,
+  height: 300,
+  left: 58,
+  right: 22,
+  top: 24,
+  bottom: 42,
+};
 const PIPELINE_STAGES = [
   { id: "embedding", number: "01", label: "Embedding", markers: ["01", "embedding"] },
   { id: "tokenizer", number: "02", label: "Tokenizer", markers: ["02", "tokenizer"] },
@@ -57,6 +74,9 @@ const PIPELINE_STAGES = [
   { id: "alignment", number: "06a", label: "Alignment", markers: ["06a", "alignment"] },
   { id: "retrieval", number: "06b", label: "Retrieval", markers: ["06b", "retrieval", "06 retrieval"] },
   { id: "evaluation", number: "07", label: "Evaluation", markers: ["07", "评估"] },
+  { id: "diagnostics", number: "08", label: "Diagnostics", markers: ["08", "诊断"] },
+  { id: "memorization_diagnostics", number: "09", label: "Forgetting Check", markers: ["09", "遗忘诊断"] },
+  { id: "export", number: "10", label: "Web Bundle", markers: ["10", "导出 web bundle"] },
 ];
 
 const $ = (selector) => document.querySelector(selector);
@@ -65,6 +85,15 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 function element(tag, className = "", text = "") {
   const node = document.createElement(tag);
   if (className) node.className = className;
+  node.textContent = text;
+  return node;
+}
+
+function svgElement(tag, attributes = {}, text = "") {
+  const node = document.createElementNS(SVG_NAMESPACE, tag);
+  Object.entries(attributes).forEach(([key, value]) => {
+    node.setAttribute(key, String(value));
+  });
   node.textContent = text;
   return node;
 }
@@ -556,6 +585,16 @@ function handleFieldChange(field, input, row) {
   }
   if (field.key === "PIPELINE_COMMAND") {
     state.draft.command = value;
+    state.activeStage = value === "full" ? "retrieval" : stageForCommand(value);
+    state.draft.dirty = true;
+    invalidateDraftValidation();
+    renderWorkspaceHeader();
+    renderHeaderMetrics();
+    renderStages();
+    renderPhaseSwitch();
+    renderFields();
+    scheduleValidation();
+    return;
   } else if (value === defaultValue(field.key)) {
     delete state.draft.overrides[field.key];
   } else {
@@ -1182,27 +1221,49 @@ function renderRunList() {
     );
     button.append(heading, identity, stage, footer);
     button.addEventListener("click", () => {
+      if (state.selectedRunId !== run.run_id) {
+        state.monitorMetrics = null;
+        state.monitorMetricError = "";
+        state.monitorMetricRunId = "";
+        state.lossPhaseFilter = "all";
+        state.lossRenderSignature = "";
+      }
       state.selectedRunId = run.run_id;
       renderMonitor();
-      loadMonitorLog(false);
+      Promise.all([
+        loadMonitorLog(false),
+        loadMonitorMetrics(false),
+      ]);
     });
     container.append(button);
   });
 }
 
 function stagesForRun(run) {
-  const singleStage = {
-    prepare: "embedding",
-    "train-tokenizer": "tokenizer",
-    "export-codes": "code",
-    "build-router-data": "router_data",
-    "train-memorization": "memorization",
-    "train-retrieval": "retrieval",
-    evaluate: "evaluation",
+  const stageIds = {
+    full: [
+      "embedding",
+      "tokenizer",
+      "code",
+      "router_data",
+      "memorization",
+      "alignment",
+      "retrieval",
+      "evaluation",
+    ],
+    prepare: ["embedding"],
+    "train-tokenizer": ["tokenizer"],
+    "export-codes": ["code"],
+    "build-router-data": ["router_data"],
+    "train-memorization": ["memorization"],
+    "train-retrieval": ["alignment", "retrieval"],
+    evaluate: ["evaluation"],
+    diagnose: ["diagnostics"],
+    "diagnose-memorization": ["memorization_diagnostics"],
+    "export-web": ["export"],
   }[run.command];
-  return singleStage
-    ? PIPELINE_STAGES.filter((stage) => stage.id === singleStage)
-    : PIPELINE_STAGES;
+  if (!stageIds) return PIPELINE_STAGES;
+  return PIPELINE_STAGES.filter((stage) => stageIds.includes(stage.id));
 }
 
 function renderMonitorStageTrack(run) {
@@ -1233,6 +1294,491 @@ function renderMonitorStageTrack(run) {
     );
     container.append(node);
   });
+}
+
+function finiteMetric(value) {
+  return (
+    value !== null &&
+    value !== undefined &&
+    Number.isFinite(Number(value))
+  );
+}
+
+function formatLossValue(value) {
+  if (!finiteMetric(value)) return "—";
+  const number = Number(value);
+  if (Math.abs(number) >= 1000 || (number !== 0 && Math.abs(number) < 0.0001)) {
+    return number.toExponential(3);
+  }
+  return number.toFixed(4);
+}
+
+function formatEpoch(value) {
+  if (!finiteMetric(value)) return "";
+  return Number(value)
+    .toFixed(3)
+    .replace(/\.?0+$/, "");
+}
+
+function lossPointMeta(point) {
+  if (!point) return "尚无观测点";
+  const parts = [point.phase || "Training"];
+  if (finiteMetric(point.step)) {
+    parts.push(`step ${Number(point.step).toLocaleString()}`);
+  }
+  if (finiteMetric(point.epoch)) {
+    parts.push(
+      finiteMetric(point.total_epochs)
+        ? `epoch ${formatEpoch(point.epoch)} / ${Number(point.total_epochs).toLocaleString()}`
+        : `epoch ${formatEpoch(point.epoch)}`,
+    );
+  }
+  return parts.join(" · ");
+}
+
+function syncLossPhaseOptions(metrics) {
+  const select = $("#loss-phase-filter");
+  const phases = Array.isArray(metrics?.phases) ? metrics.phases : [];
+  const signature = phases
+    .map((phase) => `${phase.id}:${phase.label}:${phase.points}`)
+    .join("|");
+  if (select.dataset.signature !== signature) {
+    select.replaceChildren();
+    const allOption = document.createElement("option");
+    allOption.value = "all";
+    allOption.textContent = "全部训练阶段";
+    select.append(allOption);
+    phases.forEach((phase) => {
+      const option = document.createElement("option");
+      option.value = String(phase.id);
+      option.textContent = `${phase.label} · ${Number(phase.points).toLocaleString()} pts`;
+      select.append(option);
+    });
+    select.dataset.signature = signature;
+  }
+  const available = new Set(["all", ...phases.map((phase) => String(phase.id))]);
+  if (!available.has(state.lossPhaseFilter)) state.lossPhaseFilter = "all";
+  select.value = state.lossPhaseFilter;
+  select.disabled = phases.length < 2;
+}
+
+function lossSummary(metrics) {
+  if (!metrics || state.lossPhaseFilter === "all") {
+    return {
+      points: Number(metrics?.total_points || 0),
+      trainPoints: Number(metrics?.kind_counts?.train || 0),
+      evalPoints: Number(metrics?.kind_counts?.eval || 0),
+      latest: metrics?.latest || {},
+      bestEval: metrics?.best_eval || null,
+    };
+  }
+  const phase = (metrics.phases || []).find(
+    (candidate) => String(candidate.id) === state.lossPhaseFilter,
+  );
+  return {
+    points: Number(phase?.points || 0),
+    trainPoints: Number(phase?.train_points || 0),
+    evalPoints: Number(phase?.eval_points || 0),
+    latest: phase?.latest || {},
+    bestEval: phase?.best_eval || null,
+  };
+}
+
+function updateLossReadings(metrics) {
+  const summary = lossSummary(metrics);
+  const latestTrain = summary.latest.train;
+  const latestEval = summary.latest.eval;
+  $("#monitor-latest-train-loss").textContent =
+    formatLossValue(latestTrain?.loss);
+  $("#monitor-latest-train-meta").textContent = latestTrain
+    ? lossPointMeta(latestTrain)
+    : "尚无训练点";
+  $("#monitor-latest-eval-loss").textContent =
+    formatLossValue(latestEval?.loss);
+  $("#monitor-latest-eval-meta").textContent = latestEval
+    ? lossPointMeta(latestEval)
+    : "尚无验证点";
+  $("#monitor-best-eval-loss").textContent =
+    formatLossValue(summary.bestEval?.loss);
+  $("#monitor-best-eval-meta").textContent = summary.bestEval
+    ? lossPointMeta(summary.bestEval)
+    : "等待验证";
+  $("#monitor-loss-point-count").textContent =
+    summary.points.toLocaleString();
+  $("#monitor-loss-point-meta").textContent =
+    `train ${summary.trainPoints.toLocaleString()} · ` +
+    `eval ${summary.evalPoints.toLocaleString()}`;
+}
+
+function filteredLossPoints(metrics) {
+  const points = Array.isArray(metrics?.points) ? metrics.points : [];
+  if (state.lossPhaseFilter === "all") return points;
+  return points.filter(
+    (point) => String(point.phase_id) === state.lossPhaseFilter,
+  );
+}
+
+function lossPath(points, xPosition, yPosition) {
+  return points
+    .map(
+      (point, index) =>
+        `${index ? "L" : "M"}${xPosition(point).toFixed(2)},` +
+        `${yPosition(point).toFixed(2)}`,
+    )
+    .join(" ");
+}
+
+function renderLossChart(points) {
+  const svg = $("#loss-chart");
+  svg.replaceChildren();
+  state.lossChartPoints = [];
+  if (!points.length) return false;
+
+  const plotRight = LOSS_CHART.width - LOSS_CHART.right;
+  const plotBottom = LOSS_CHART.height - LOSS_CHART.bottom;
+  const plotWidth = plotRight - LOSS_CHART.left;
+  const plotHeight = plotBottom - LOSS_CHART.top;
+  const useStepAxis =
+    state.lossPhaseFilter !== "all" &&
+    points.every((point) => finiteMetric(point.step));
+  const xValue = (point) =>
+    Number(useStepAxis ? point.step : point.sequence);
+  let xMinimum = Math.min(...points.map(xValue));
+  let xMaximum = Math.max(...points.map(xValue));
+  if (xMinimum === xMaximum) {
+    xMinimum -= 1;
+    xMaximum += 1;
+  }
+  const losses = points.map((point) => Number(point.loss));
+  let yMinimum = Math.min(...losses);
+  let yMaximum = Math.max(...losses);
+  const spread = yMaximum - yMinimum;
+  const padding = spread > 0
+    ? spread * 0.12
+    : Math.max(Math.abs(yMaximum) * 0.08, 0.08);
+  yMinimum = Math.max(0, yMinimum - padding);
+  yMaximum += padding;
+  if (yMinimum === yMaximum) yMaximum = yMinimum + 1;
+
+  const xPosition = (point) =>
+    LOSS_CHART.left +
+    ((xValue(point) - xMinimum) / (xMaximum - xMinimum)) * plotWidth;
+  const yPosition = (point) =>
+    LOSS_CHART.top +
+    ((yMaximum - Number(point.loss)) / (yMaximum - yMinimum)) * plotHeight;
+
+  const definitions = svgElement("defs");
+  const gradient = svgElement("linearGradient", {
+    id: "loss-train-area-gradient",
+    x1: "0",
+    x2: "0",
+    y1: "0",
+    y2: "1",
+  });
+  gradient.append(
+    svgElement("stop", {
+      offset: "0%",
+      "stop-color": "#ed5d2f",
+      "stop-opacity": "0.20",
+    }),
+    svgElement("stop", {
+      offset: "100%",
+      "stop-color": "#ed5d2f",
+      "stop-opacity": "0",
+    }),
+  );
+  definitions.append(gradient);
+  svg.append(definitions);
+
+  for (let index = 0; index <= 4; index += 1) {
+    const ratio = index / 4;
+    const y = LOSS_CHART.top + ratio * plotHeight;
+    const value = yMaximum - ratio * (yMaximum - yMinimum);
+    svg.append(
+      svgElement("line", {
+        class: "loss-grid-line",
+        x1: LOSS_CHART.left,
+        x2: plotRight,
+        y1: y,
+        y2: y,
+      }),
+      svgElement(
+        "text",
+        {
+          class: "loss-axis-label y",
+          x: LOSS_CHART.left - 10,
+          y: y + 3,
+          "text-anchor": "end",
+        },
+        formatLossValue(value),
+      ),
+    );
+  }
+  for (let index = 0; index <= 5; index += 1) {
+    const ratio = index / 5;
+    const x = LOSS_CHART.left + ratio * plotWidth;
+    const value = xMinimum + ratio * (xMaximum - xMinimum);
+    svg.append(
+      svgElement("line", {
+        class: "loss-grid-line vertical",
+        x1: x,
+        x2: x,
+        y1: LOSS_CHART.top,
+        y2: plotBottom,
+      }),
+      svgElement(
+        "text",
+        {
+          class: "loss-axis-label x",
+          x,
+          y: plotBottom + 23,
+          "text-anchor": "middle",
+        },
+        `${useStepAxis ? "S" : "#"}${Math.max(0, Math.round(value)).toLocaleString()}`,
+      ),
+    );
+  }
+
+  if (state.lossPhaseFilter === "all") {
+    const firstByPhase = new Map();
+    points.forEach((point) => {
+      if (!firstByPhase.has(point.phase_id)) {
+        firstByPhase.set(point.phase_id, point);
+      }
+    });
+    [...firstByPhase.values()].slice(1).forEach((point) => {
+      const x = xPosition(point);
+      svg.append(
+        svgElement("line", {
+          class: "loss-phase-divider",
+          x1: x,
+          x2: x,
+          y1: LOSS_CHART.top,
+          y2: plotBottom,
+        }),
+        svgElement(
+          "text",
+          {
+            class: "loss-phase-label",
+            x: x + 7,
+            y: LOSS_CHART.top + 12,
+          },
+          point.phase,
+        ),
+      );
+    });
+  }
+
+  const series = new Map();
+  points.forEach((point) => {
+    const key = `${point.kind}:${point.phase_id}`;
+    if (!series.has(key)) series.set(key, []);
+    series.get(key).push(point);
+  });
+  series.forEach((seriesPoints) => {
+    const kind = seriesPoints[0].kind;
+    const pathData = lossPath(seriesPoints, xPosition, yPosition);
+    if (kind === "train" && seriesPoints.length > 1) {
+      const firstX = xPosition(seriesPoints[0]).toFixed(2);
+      const lastX = xPosition(seriesPoints.at(-1)).toFixed(2);
+      svg.append(
+        svgElement("path", {
+          class: "loss-area train",
+          d: `${pathData} L${lastX},${plotBottom} L${firstX},${plotBottom} Z`,
+        }),
+      );
+    }
+    svg.append(
+      svgElement("path", {
+        class: `loss-line ${kind}`,
+        d: pathData,
+      }),
+    );
+    if (kind === "train" && seriesPoints.length === 1) {
+      svg.append(
+        svgElement("circle", {
+          class: "loss-train-point",
+          cx: xPosition(seriesPoints[0]),
+          cy: yPosition(seriesPoints[0]),
+          r: 3.2,
+        }),
+      );
+    }
+  });
+  points
+    .filter((point) => point.kind === "eval")
+    .forEach((point) => {
+      svg.append(
+        svgElement("circle", {
+          class: "loss-eval-point",
+          cx: xPosition(point),
+          cy: yPosition(point),
+          r: 3.2,
+        }),
+      );
+    });
+
+  const hoverLine = svgElement("line", {
+    id: "loss-hover-line",
+    class: "loss-hover-line",
+    x1: LOSS_CHART.left,
+    x2: LOSS_CHART.left,
+    y1: LOSS_CHART.top,
+    y2: plotBottom,
+    hidden: "",
+  });
+  const hoverDot = svgElement("circle", {
+    id: "loss-hover-dot",
+    class: "loss-hover-dot",
+    cx: LOSS_CHART.left,
+    cy: LOSS_CHART.top,
+    r: 4,
+    hidden: "",
+  });
+  svg.append(hoverLine, hoverDot);
+  state.lossChartPoints = points.map((point) => ({
+    point,
+    x: xPosition(point),
+    y: yPosition(point),
+  }));
+  svg.setAttribute(
+    "aria-label",
+    `${points.length} 个可见 Loss 点，范围 ` +
+      `${formatLossValue(yMinimum)} 到 ${formatLossValue(yMaximum)}`,
+  );
+  $("#loss-axis-caption").textContent = useStepAxis
+    ? "横轴 · Global step"
+    : "横轴 · 跨阶段日志观测点";
+  return true;
+}
+
+function hideLossTooltip() {
+  $("#loss-chart-tooltip").hidden = true;
+  $("#loss-chart").querySelector("#loss-hover-line")?.setAttribute("hidden", "");
+  $("#loss-chart").querySelector("#loss-hover-dot")?.setAttribute("hidden", "");
+}
+
+function showLossTooltip(event) {
+  if (!state.lossChartPoints.length) return;
+  const svg = $("#loss-chart");
+  const rectangle = svg.getBoundingClientRect();
+  const viewX =
+    ((event.clientX - rectangle.left) / Math.max(rectangle.width, 1)) *
+    LOSS_CHART.width;
+  const nearest = state.lossChartPoints.reduce((best, candidate) =>
+    Math.abs(candidate.x - viewX) < Math.abs(best.x - viewX)
+      ? candidate
+      : best,
+  );
+  const hoverLine = svg.querySelector("#loss-hover-line");
+  const hoverDot = svg.querySelector("#loss-hover-dot");
+  [hoverLine, hoverDot].forEach((node) => node?.removeAttribute("hidden"));
+  hoverLine?.setAttribute("x1", nearest.x);
+  hoverLine?.setAttribute("x2", nearest.x);
+  hoverDot?.setAttribute("cx", nearest.x);
+  hoverDot?.setAttribute("cy", nearest.y);
+  hoverDot?.classList.toggle("eval", nearest.point.kind === "eval");
+
+  const tooltip = $("#loss-chart-tooltip");
+  tooltip.replaceChildren();
+  tooltip.append(
+    element(
+      "strong",
+      "",
+      `${nearest.point.phase} · ` +
+        `${nearest.point.kind === "eval" ? "Eval" : "Train"} loss`,
+    ),
+    element("b", "", formatLossValue(nearest.point.loss)),
+    element("span", "", lossPointMeta(nearest.point)),
+  );
+  if (finiteMetric(nearest.point.learning_rate)) {
+    tooltip.append(
+      element(
+        "span",
+        "",
+        `lr ${Number(nearest.point.learning_rate).toExponential(3)}`,
+      ),
+    );
+  }
+  if (finiteMetric(nearest.point.grad_norm)) {
+    tooltip.append(
+      element(
+        "span",
+        "",
+        `grad norm ${Number(nearest.point.grad_norm).toFixed(4)}`,
+      ),
+    );
+  }
+  tooltip.hidden = false;
+  const shell = $("#loss-chart-shell").getBoundingClientRect();
+  const tooltipWidth = 220;
+  const rawLeft = event.clientX - shell.left + 14;
+  tooltip.style.left =
+    `${Math.max(10, Math.min(rawLeft, shell.width - tooltipWidth - 10))}px`;
+  tooltip.style.top =
+    `${Math.max(10, event.clientY - shell.top - 78)}px`;
+}
+
+function renderLossMonitor() {
+  const run = selectedRun();
+  const metrics =
+    run && state.monitorMetricRunId === run.run_id
+      ? state.monitorMetrics
+      : null;
+  const signature = [
+    run?.run_id || "none",
+    metrics?.updated_at || "",
+    metrics?.total_points || 0,
+    state.lossPhaseFilter,
+    state.monitorMetricsLoading,
+    state.monitorMetricError,
+  ].join("|");
+  if (signature === state.lossRenderSignature) return;
+  state.lossRenderSignature = signature;
+  syncLossPhaseOptions(metrics);
+  updateLossReadings(metrics);
+  const points = filteredLossPoints(metrics);
+  const chartVisible = renderLossChart(points);
+  const svg = $("#loss-chart");
+  const empty = $("#loss-chart-empty");
+  svg.toggleAttribute("hidden", !chartVisible);
+  empty.hidden = chartVisible;
+  hideLossTooltip();
+
+  const syncState = $("#loss-panel-updated");
+  if (state.monitorMetricError) {
+    syncState.textContent = "指标读取失败";
+    syncState.className = "health-label negative";
+  } else if (state.monitorMetricsLoading && !metrics) {
+    syncState.textContent = "正在扫描 train.log";
+    syncState.className = "health-label pending";
+  } else if (metrics?.total_points) {
+    syncState.textContent =
+      `${metrics.sampled ? "已抽样" : "已同步"} · ` +
+      `${formatTime(metrics.updated_at)}`;
+    syncState.className = "health-label positive";
+  } else {
+    syncState.textContent = run ? "等待 Loss 日志" : "请选择运行";
+    syncState.className = "health-label neutral";
+  }
+
+  if (!chartVisible) {
+    const title = empty.querySelector("strong");
+    const copy = empty.querySelector("p");
+    if (state.monitorMetricError) {
+      title.textContent = "无法读取 Loss 指标";
+      copy.textContent = state.monitorMetricError;
+    } else if (state.monitorMetricsLoading) {
+      title.textContent = "正在扫描训练日志";
+      copy.textContent = "首次加载会从已有 train.log 重建完整曲线。";
+    } else if (!run) {
+      title.textContent = "尚未选择训练任务";
+      copy.textContent = "从左侧运行记录选择一项后读取对应 Loss。";
+    } else {
+      title.textContent = "等待 Trainer 输出 Loss";
+      copy.textContent = "出现首条 loss 或 eval_loss 日志后自动绘制。";
+    }
+  }
 }
 
 function renderGpuBoard() {
@@ -1422,6 +1968,7 @@ function renderMonitorDetail() {
   $("#monitor-empty").hidden = Boolean(run);
   $("#monitor-detail").hidden = !run;
   if (!run) {
+    renderLossMonitor();
     renderGpuBoard();
     return;
   }
@@ -1487,6 +2034,7 @@ function renderMonitorDetail() {
     processHealth.textContent = "运行已结束";
     processHealth.className = "health-label neutral";
   }
+  renderLossMonitor();
   renderGpuBoard();
 }
 
@@ -1651,14 +2199,74 @@ async function loadMonitorLog(showMessage = false) {
   }
 }
 
+async function loadMonitorMetrics(showMessage = false) {
+  const run = selectedRun();
+  if (!run) {
+    state.monitorMetricRequestId += 1;
+    state.monitorMetricRunId = "";
+    state.monitorMetrics = null;
+    state.monitorMetricsLoading = false;
+    state.monitorMetricError = "";
+    state.lossPhaseFilter = "all";
+    state.lossRenderSignature = "";
+    renderLossMonitor();
+    return;
+  }
+  if (state.monitorMetricRunId !== run.run_id) {
+    state.monitorMetricRunId = run.run_id;
+    state.monitorMetrics = null;
+    state.monitorMetricError = "";
+    state.lossPhaseFilter = "all";
+    state.lossRenderSignature = "";
+  }
+  const requestId = ++state.monitorMetricRequestId;
+  if (!state.monitorMetrics) {
+    state.monitorMetricsLoading = true;
+    state.lossRenderSignature = "";
+    renderLossMonitor();
+  }
+  try {
+    const payload = await requestJson(
+      `/api/run-metrics?id=${encodeURIComponent(run.run_id)}&limit=2400`,
+    );
+    if (
+      requestId !== state.monitorMetricRequestId ||
+      payload.run_id !== selectedRun()?.run_id
+    ) {
+      return;
+    }
+    state.monitorMetrics = payload;
+    state.monitorMetricError = "";
+    if (showMessage) {
+      showToast(
+        payload.total_points
+          ? `已刷新 ${Number(payload.total_points).toLocaleString()} 个 Loss 观测点`
+          : "训练日志中尚无 Loss 观测点",
+      );
+    }
+  } catch (error) {
+    if (requestId !== state.monitorMetricRequestId) return;
+    state.monitorMetricError = error.message;
+    if (showMessage) showToast(`Loss 读取失败：${error.message}`, true);
+  } finally {
+    if (requestId === state.monitorMetricRequestId) {
+      state.monitorMetricsLoading = false;
+      renderLossMonitor();
+    }
+  }
+}
+
 async function refreshMonitor(showMessage = false) {
   if (state.monitorRefreshing) return;
   state.monitorRefreshing = true;
   $("#monitor-poll-state").classList.add("refreshing");
   try {
     await Promise.all([loadRuns(false), loadHealth(false)]);
-    await loadMonitorLog(false);
-    if (showMessage) showToast("运行、日志与 GPU 状态均已刷新");
+    await Promise.all([
+      loadMonitorLog(false),
+      loadMonitorMetrics(false),
+    ]);
+    if (showMessage) showToast("运行、Loss、日志与 GPU 状态均已刷新");
   } finally {
     state.monitorRefreshing = false;
     $("#monitor-poll-state").classList.remove("refreshing");
@@ -1777,6 +2385,7 @@ function stageForCommand(command) {
       "train-memorization": "memorization",
       "train-retrieval": "retrieval",
       evaluate: "evaluation",
+      "export-web": "export",
     }[command] || "base"
   );
 }
@@ -1876,6 +2485,13 @@ function wireEvents() {
   $("#monitor-log-refresh").addEventListener("click", () =>
     loadMonitorLog(true),
   );
+  $("#loss-phase-filter").addEventListener("change", (event) => {
+    state.lossPhaseFilter = event.target.value;
+    state.lossRenderSignature = "";
+    renderLossMonitor();
+  });
+  $("#loss-chart").addEventListener("pointermove", showLossTooltip);
+  $("#loss-chart").addEventListener("pointerleave", hideLossTooltip);
   $("#monitor-follow-log").addEventListener("change", (event) => {
     setMonitorLogFollowing(event.target.checked, {
       scroll: event.target.checked,

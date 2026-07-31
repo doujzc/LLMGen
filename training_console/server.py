@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .config import ALLOWED_KEYS, ConfigResolver, ConfigValidationError, DATASETS
 from .gpu import probe_gpu_metrics
+from .metrics import LossMetricReader
 from .store import (
     StateStore,
     child_process_environment,
@@ -189,6 +190,7 @@ class TrainingConsoleService:
         self.inference_url = inference_url
         self.launch_enabled = launch_enabled
         self._launcher = launcher
+        self._loss_metrics = LossMetricReader()
 
     def health(self) -> dict[str, Any]:
         profiles = self.store.list_profiles()
@@ -386,6 +388,20 @@ class TrainingConsoleService:
             secret_values=secrets.values(),
         )
 
+    def run_metrics(self, run_id: str, limit: int) -> dict[str, Any]:
+        """Return a bounded loss series parsed independently from train.log."""
+
+        run = self.store.get_run(run_id, observe=False)
+        payload = self._loss_metrics.read(
+            run["log_path"],
+            maximum_points=limit,
+        )
+        return {
+            "run_id": run_id,
+            "source": "train.log",
+            **payload,
+        }
+
 
 def handler_class(service: TrainingConsoleService):
     class Handler(BaseHTTPRequestHandler):
@@ -506,6 +522,16 @@ def handler_class(service: TrainingConsoleService):
                                 lines,
                             ),
                         },
+                    )
+                    return
+                if parsed.path == "/api/run-metrics":
+                    limit = int(self._query(parsed, "limit", "2000"))
+                    self._json(
+                        HTTPStatus.OK,
+                        service.run_metrics(
+                            self._query(parsed, "id"),
+                            limit,
+                        ),
                     )
                     return
             except ConfigValidationError as exc:
