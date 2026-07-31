@@ -508,91 +508,6 @@ def code_assignment_metrics(codes: Any, codebook_sizes: Sequence[int]) -> dict[s
     }
 
 
-def sinkhorn_residual_codes(
-    encoded: Any,
-    codebooks: Sequence[Any],
-    *,
-    sk_epsilons: Sequence[float],
-    sk_iters: int,
-    device: str | Any = "cpu",
-) -> np.ndarray:
-    """Return full-catalog RQ codes using the training-time Sinkhorn assignment.
-
-    The complete candidate matrix must be passed in one call. Sinkhorn couples
-    assignments across rows, so splitting this operation into encoder-sized
-    batches would make exported codes depend on the export batch size.
-    """
-
-    _require_torch()
-    from ..vendor.toolweaver.layers import sinkhorn_algorithm
-
-    normalized_codebooks = tuple(codebooks)
-    epsilons = tuple(float(value) for value in sk_epsilons)
-    if not normalized_codebooks:
-        raise ValueError("at least one codebook is required")
-    if len(epsilons) != len(normalized_codebooks):
-        raise ValueError("len(sk_epsilons) must equal the number of codebooks")
-    if any(value < 0 or not math.isfinite(value) for value in epsilons):
-        raise ValueError("Sinkhorn epsilons must be finite and non-negative")
-    if sk_iters < 1:
-        raise ValueError("sk_iters must be positive")
-
-    target_device = torch.device(device)
-
-    def as_float_tensor(value: Any) -> Any:
-        if torch.is_tensor(value):
-            return value.detach().to(device=target_device, dtype=torch.float32)
-        return torch.as_tensor(
-            np.asarray(value, dtype=np.float32),
-            dtype=torch.float32,
-            device=target_device,
-        )
-
-    residual = as_float_tensor(encoded).clone()
-    if residual.ndim != 2 or residual.shape[0] < 1:
-        raise ValueError("encoded vectors must be a non-empty [N, D] matrix")
-    assignments = torch.empty(
-        (residual.shape[0], len(normalized_codebooks)),
-        dtype=torch.long,
-        device=target_device,
-    )
-
-    with torch.no_grad():
-        for level, (raw_codebook, epsilon) in enumerate(
-            zip(normalized_codebooks, epsilons, strict=True)
-        ):
-            centers = as_float_tensor(raw_codebook)
-            if (
-                centers.ndim != 2
-                or centers.shape[0] < 1
-                or centers.shape[1] != residual.shape[1]
-            ):
-                raise ValueError("every codebook must be a non-empty [K, D] matrix")
-            distances = (
-                torch.sum(residual**2, dim=1, keepdim=True)
-                + torch.sum(centers**2, dim=1, keepdim=True).t()
-                - 2 * torch.matmul(residual, centers.t())
-            )
-            if epsilon <= 0:
-                indices = torch.argmin(distances, dim=-1)
-            else:
-                maximum = distances.max()
-                minimum = distances.min()
-                middle = (maximum + minimum) / 2
-                amplitude = maximum - middle + 1e-5
-                centered = ((distances - middle) / amplitude).double()
-                probabilities = sinkhorn_algorithm(centered, epsilon, sk_iters)
-                if not torch.isfinite(probabilities).all():
-                    raise RuntimeError(
-                        f"Sinkhorn returned non-finite assignments at level {level + 1}"
-                    )
-                indices = torch.argmax(probabilities, dim=-1)
-            assignments[:, level] = indices
-            residual -= centers[indices]
-
-    return assignments.cpu().numpy().astype(np.int64, copy=False)
-
-
 def residual_nearest_codes(
     encoded: Any,
     codebooks: Sequence[Any],
@@ -1052,30 +967,20 @@ class ToolWeaverStage1Trainer:
     def encode_all(self, batch_size: int | None = None) -> np.ndarray:
         self.model.eval()
         size = batch_size or self.training_config.batch_size
-        encoded_rows = []
+        rows = []
         for start in range(0, len(self.embeddings), size):
             indices = range(start, min(start + size, len(self.embeddings)))
             values = self._batch_tensor(indices)
-            encoded_rows.append(
-                self.model.encoder(values).detach().float().cpu().numpy()
+            with self._autocast():
+                codes = self.model.get_indices(values, use_sk=False)
+            rows.append(
+                codes.reshape(-1, self.model_config.num_levels).cpu().numpy()
             )
-        codebooks = [
-            quantizer.embedding.weight.detach()
-            for quantizer in self.model.rq.vq_layers
-        ]
-        return sinkhorn_residual_codes(
-            np.concatenate(encoded_rows, axis=0),
-            codebooks,
-            sk_epsilons=self.model_config.sk_epsilons,
-            sk_iters=self.model_config.sk_iters,
-            device=self.device,
-        )
+        return np.concatenate(rows).astype(np.int64, copy=False)
 
     @torch.no_grad()
     def evaluate(self, train_metrics: Mapping[str, float] | None = None) -> dict[str, Any]:
         metrics = code_assignment_metrics(self.encode_all(), self.model_config.num_emb_list)
-        metrics["assignment_mode"] = "sinkhorn"
-        metrics["assignment_scope"] = "full_catalog"
         if train_metrics:
             metrics.update({key: float(value) for key, value in train_metrics.items()})
         return metrics

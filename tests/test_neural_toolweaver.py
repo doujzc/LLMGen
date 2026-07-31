@@ -19,7 +19,6 @@ from llmgen.neural.toolweaver import (
     create_toolweaver_rqvae,
     load_toolweaver_rqvae,
     residual_nearest_codes,
-    sinkhorn_residual_codes,
 )
 
 
@@ -87,60 +86,7 @@ def test_code_metrics_report_collision_utilization_entropy_and_cv():
     assert metrics["levels"][0]["coefficient_of_variation"] == 0.0
 
 
-def test_sinkhorn_residual_codes_matches_training_quantizer_and_can_rebalance():
-    encoded = np.array([[0.0], [0.05], [0.1], [0.15]], dtype=np.float32)
-    codebooks = (
-        np.array([[0.0], [1.0]], dtype=np.float32),
-        np.array([[-0.1], [0.1]], dtype=np.float32),
-    )
-    model = create_toolweaver_rqvae(
-        model_config(
-            in_dim=1,
-            num_levels=2,
-            num_emb_list=(2, 2),
-            e_dim=1,
-            layers=(),
-            sk_epsilons=(0.1, 0.1),
-            sk_iters=50,
-        )
-    )
-    for quantizer, codebook in zip(
-        model.rq.vq_layers, codebooks, strict=True
-    ):
-        quantizer.embedding.weight.data.copy_(torch.from_numpy(codebook))
-    _, _, expected = model.rq(torch.from_numpy(encoded), use_sk=True)
-
-    actual = sinkhorn_residual_codes(
-        encoded,
-        codebooks,
-        sk_epsilons=(0.1, 0.1),
-        sk_iters=50,
-    )
-
-    np.testing.assert_array_equal(actual, expected.numpy())
-    assert actual.tolist() == [[0, 1], [0, 1], [1, 0], [1, 0]]
-    assert residual_nearest_codes(encoded, codebooks)[:, 0].tolist() == [0, 0, 0, 0]
-
-
-def test_sinkhorn_residual_codes_zero_epsilon_matches_nearest():
-    rng = np.random.default_rng(19)
-    encoded = rng.normal(size=(9, 3)).astype(np.float32)
-    codebooks = (
-        rng.normal(size=(4, 3)).astype(np.float32),
-        rng.normal(size=(5, 3)).astype(np.float32),
-    )
-
-    actual = sinkhorn_residual_codes(
-        encoded,
-        codebooks,
-        sk_epsilons=(0.0, 0.0),
-        sk_iters=3,
-    )
-
-    np.testing.assert_array_equal(actual, residual_nearest_codes(encoded, codebooks))
-
-
-def test_stage1_full_catalog_sinkhorn_is_independent_of_encoder_batch_size(tmp_path):
+def test_stage1_uses_sinkhorn_for_training_but_nearest_after_training(tmp_path):
     embeddings = np.array([[0.0], [0.05], [0.1], [0.15]], dtype=np.float32)
     config = model_config(
         in_dim=1,
@@ -174,11 +120,14 @@ def test_stage1_full_catalog_sinkhorn_is_independent_of_encoder_batch_size(tmp_p
         torch.tensor([[0.0], [1.0]])
     )
 
+    encoded = trainer.model.encoder(torch.from_numpy(embeddings))
+    _, _, training_codes = trainer.model.rq(encoded, use_sk=True)
     one_at_a_time = trainer.encode_all(batch_size=1)
     all_at_once = trainer.encode_all(batch_size=4)
 
+    assert training_codes[:, 0].tolist() == [0, 0, 1, 1]
     np.testing.assert_array_equal(one_at_a_time, all_at_once)
-    assert all_at_once[:, 0].tolist() == [0, 0, 1, 1]
+    assert all_at_once[:, 0].tolist() == [0, 0, 0, 0]
 
 
 def test_balanced_hierarchical_assignment_eliminates_avoidable_collisions():
