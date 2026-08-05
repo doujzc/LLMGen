@@ -9,6 +9,9 @@ from llmgen.clawhub_dataset import (
     DatasetBuildError,
     _augment_target_orders,
     _deduplicate_near_queries,
+    _generation_repair_prompt,
+    _normalized_profile_list,
+    _parse_generation_payload_partial,
     _profile_prompt,
     _validate_generated_variant,
     _validate_profile,
@@ -17,6 +20,7 @@ from llmgen.clawhub_dataset import (
     apply_recovery_workflows,
     build_workflow_specs,
     export_training_dataset,
+    routing_profile_context,
 )
 
 
@@ -57,6 +61,36 @@ def test_profile_accepts_common_capability_alias() -> None:
         "unsafe_action": False,
     }
     assert _validate_profile(raw, skill)["capability_zh"] == "查询实时天气和未来预报"
+
+
+def test_profile_lists_deterministically_keep_the_requested_limit() -> None:
+    assert _normalized_profile_list(
+        [f"能力切面{index}" for index in range(12)],
+        field="capability_facets",
+        minimum=1,
+        maximum=10,
+        max_chars=80,
+    ) == [f"能力切面{index}" for index in range(10)]
+
+
+def test_routing_context_replaces_opaque_id_with_real_product_alias() -> None:
+    context = routing_profile_context(
+        {
+            **_profile(1),
+            "skill_id": "polyv-live-cli",
+            "display_name": "polyv-live-cli",
+            "aliases": ["polyv-live-cli", "保利威直播CLI"],
+            "trigger_phrases": ["用 polyv-live-cli 查询频道"],
+            "description": "通过 polyv-live-cli 管理保利威直播",
+        }
+    )
+
+    assert context["name"] == "保利威直播CLI"
+    assert context["aliases"] == ["保利威直播CLI"]
+    assert context["trigger_phrases"] == ["用 保利威直播CLI 查询频道"]
+    assert context["original_description"] == (
+        "通过 保利威直播CLI 管理保利威直播"
+    )
 
 
 def test_profile_preserves_routing_triggers_facets_and_display_name() -> None:
@@ -194,6 +228,72 @@ def test_generated_variant_requires_exact_evidence_for_every_target() -> None:
         _validate_generated_variant(
             raw, _workflow(), 0, variants=3, implicit_variants=1
         )
+
+
+def test_generated_variant_allows_real_product_name_that_is_also_id() -> None:
+    workflow = _workflow()
+    workflow["skill_ids"] = ["polyv-live-cli", "@owner/calendar"]
+    workflow["anchor_skill_id"] = "polyv-live-cli"
+    workflow["targets"][0]["skill_id"] = "polyv-live-cli"
+    query = (
+        "用 polyv-live-cli 查今晚直播的推流状态，再把开播时间加到日历里提醒我。"
+    )
+
+    row = _validate_generated_variant(
+        {
+            "intent_mode": "explicit",
+            "query": query,
+            "evidence": {
+                "polyv-live-cli": "查今晚直播的推流状态",
+                "@owner/calendar": "加到日历里提醒我",
+            },
+            "implicit_skill_ids": [],
+            "implicit_rationales": {},
+        },
+        workflow,
+        0,
+        variants=3,
+        implicit_variants=1,
+    )
+
+    assert row["query"] == query
+
+
+def test_generation_failure_retains_invalid_item_for_targeted_repair() -> None:
+    workflow = _workflow()
+    invalid_item = {
+        "workflow_id": "wf-test",
+        "variants": [
+            {
+                "intent_mode": "explicit",
+                "query": "明天下午去公园前帮我查一下会不会下雨，回来以后告诉我结果。",
+                "evidence": {"@owner/weather": "查一下会不会下雨"},
+                "implicit_skill_ids": [],
+                "implicit_rationales": {},
+            }
+        ]
+        * 3,
+    }
+
+    rows, failures = _parse_generation_payload_partial(
+        {"items": [invalid_item]},
+        [workflow],
+        variants=3,
+        implicit_variants=1,
+    )
+
+    assert not rows
+    assert failures[0]["invalid_item"] == invalid_item
+    prompt = _generation_repair_prompt(
+        workflow,
+        invalid_item,
+        failures[0]["error"],
+        variants=3,
+        implicit_variants=1,
+    )
+    assert "上一次输出没有通过" in prompt
+    assert "evidence keys do not match target skills" in prompt
+    assert invalid_item["variants"][0]["query"] in prompt
 
 
 def test_generated_variant_ignores_numeric_payload_in_language_ratio() -> None:
@@ -462,6 +562,48 @@ def test_export_does_not_replace_dataset_below_training_scale_gate(
     report = json.loads((output / "training_scale_failure.json").read_text())
     assert report["augmented_train_query_count"] == 4
     assert report["min_augmented_train_queries_required"] == 5
+
+
+def test_export_can_explicitly_exclude_unreviewed_queries(tmp_path: Path) -> None:
+    paths = _export_fixture(tmp_path)
+    queries_path = paths[3]
+    queries = [json.loads(line) for line in queries_path.read_text().splitlines()]
+    unreviewed = {
+        **queries[0],
+        "query_id": "q-unreviewed",
+        "query_hash": "hash-unreviewed",
+        "query": "先处理第一项，再把第二项结果整理成简短清单",
+    }
+    queries_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in [*queries, unreviewed])
+    )
+    output = tmp_path / "final"
+
+    with pytest.raises(DatasetBuildError, match="1 generated queries have no review"):
+        export_training_dataset(
+            *paths,
+            output,
+            min_train_positives_per_skill=1,
+        )
+
+    manifest = export_training_dataset(
+        *paths,
+        output,
+        min_train_positives_per_skill=1,
+        allow_missing_reviews=True,
+        provisional_note="Test-only partial review export.",
+    )
+    assert manifest["export_status"] == "provisional"
+    assert manifest["review_completion"] == {
+        "generated_query_count": 3,
+        "reviewed_query_count": 2,
+        "missing_review_count": 1,
+        "missing_review_query_ids": ["q-unreviewed"],
+        "missing_review_policy": "exclude_unreviewed",
+    }
+    assert manifest["generated_query_count"] == 3
+    assert manifest["reviewed_query_count"] == 2
+    assert manifest["accepted_before_dedup"] == 2
 
 
 def test_coverage_backfill_targets_undercovered_candidates_idempotently(tmp_path: Path) -> None:

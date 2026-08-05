@@ -42,10 +42,16 @@ def read_candidates(path: Path) -> list[dict[str, str]]:
         if not isinstance(raw, dict):
             errors.append(f"line {number}: expected an object")
             continue
+        name = str(raw.get("name") or "").strip()
         candidate = {
-            "id": str(raw.get("id") or "").strip(),
-            "name": str(raw.get("name") or "").strip(),
-            "desc": str(raw.get("desc") or "").strip(),
+            # Hand-curated candidate lists commonly use the compact
+            # {name, description} schema. A unique name is a stable closed-set
+            # identifier when no explicit id is supplied.
+            "id": str(raw.get("id") or name).strip(),
+            "name": name,
+            "desc": str(
+                raw.get("desc") or raw.get("description") or ""
+            ).strip(),
         }
         missing = [key for key, value in candidate.items() if not value]
         if missing:

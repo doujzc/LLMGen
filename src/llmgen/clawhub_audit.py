@@ -254,6 +254,9 @@ def audit_training_dataset(
         "created_at": report_created_at,
         "dataset_dir": ".",
         "format_version": format_version,
+        "export_status": str(manifest.get("export_status") or "ready"),
+        "provisional_note": manifest.get("provisional_note"),
+        "review_completion": manifest.get("review_completion"),
         "schema_policy": (
             "routing_profiles_v2"
             if strict_routing_schema

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import runpy
 from collections import Counter
 from pathlib import Path
 
@@ -32,6 +33,29 @@ def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def test_light_catalog_accepts_name_description_candidates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidates.jsonl"
+    _write_jsonl(
+        source,
+        [{"name": "weather", "description": "查询实时天气和预报"}],
+    )
+    module = runpy.run_path(
+        str(REPOSITORY_ROOT / "scripts/light_data/00_build_catalog.py")
+    )
+
+    rows = module["read_candidates"](source)
+
+    assert rows == [
+        {
+            "id": "weather",
+            "name": "weather",
+            "desc": "查询实时天气和预报",
+        }
+    ]
 
 
 def test_light_targeted_patch_covers_badcases_and_direct_brand_names() -> None:

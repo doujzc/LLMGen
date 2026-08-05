@@ -23,6 +23,9 @@ data/clawhub_training/final/*
 data_light/work/
 data_light/catalog.jsonl
 data_light/catalog_report.json
+data_0804/work/
+data_0804/catalog.jsonl
+data_0804/catalog_report.json
 outputs/
 runs/
 .llmgen/

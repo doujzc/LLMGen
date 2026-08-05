@@ -34,6 +34,18 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Maximum deterministic target permutations per accepted train query.",
     )
+    parser.add_argument(
+        "--allow-missing-reviews",
+        action="store_true",
+        help=(
+            "Export only reviewed queries when some generated queries have no "
+            "review. The manifest is marked provisional."
+        ),
+    )
+    parser.add_argument(
+        "--provisional-note",
+        help="Record why this export intentionally bypasses the normal final gates.",
+    )
     return parser.parse_args()
 
 
@@ -52,6 +64,8 @@ def main() -> None:
         target_order_variants=args.target_order_variants,
         alignment_queries_path=args.alignment_queries,
         alignment_reviews_path=args.alignment_reviews,
+        allow_missing_reviews=args.allow_missing_reviews,
+        provisional_note=args.provisional_note,
     )
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
 

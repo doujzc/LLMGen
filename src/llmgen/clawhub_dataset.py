@@ -445,10 +445,14 @@ def _normalized_profile_list(
             if " ".join(str(item or "").split())
         )
     )
-    if not minimum <= len(normalized) <= maximum:
+    if len(normalized) < minimum:
         raise DatasetBuildError(
             f"profile {field} must contain {minimum}-{maximum} values"
         )
+    # Exhaustive model responses are still useful. Keep the deterministic
+    # leading facets instead of repeatedly rejecting a valid profile merely
+    # because a broad skill enumerated more supported formats than requested.
+    normalized = normalized[:maximum]
     if any(len(item) > max_chars for item in normalized):
         raise DatasetBuildError(f"profile {field} contains an overlong value")
     return normalized
@@ -794,26 +798,34 @@ def routing_profile_context(
 
     aliases = user_facing_aliases(profile)
     display_name = str(profile.get("display_name") or profile.get("slug") or "")
+    safe_name = (
+        display_name
+        if display_name.casefold() != str(profile["skill_id"]).casefold()
+        else aliases[0] if aliases else None
+    )
+    description = str(profile.get("description") or "")[:description_chars]
+    trigger_phrases = list(profile.get("trigger_phrases") or [])
+    opaque_skill_id = str(profile["skill_id"])
+    if aliases and re.search(r"[-_/]", opaque_skill_id):
+        pattern = re.compile(re.escape(opaque_skill_id), flags=re.IGNORECASE)
+        description = pattern.sub(aliases[0], description)
+        trigger_phrases = [
+            pattern.sub(aliases[0], str(trigger))
+            for trigger in trigger_phrases
+        ]
     context = {
         "skill_id": profile["skill_id"],
-        "name": (
-            display_name
-            if display_name.casefold()
-            != str(profile["skill_id"]).casefold()
-            else aliases[0] if aliases else None
-        ),
+        "name": safe_name,
         "aliases": aliases,
         "capability": profile.get("capability_zh"),
         "facets": list(profile.get("capability_facets") or []),
-        "trigger_phrases": list(profile.get("trigger_phrases") or []),
+        "trigger_phrases": trigger_phrases,
         "negative_boundaries": list(profile.get("negative_boundaries") or []),
         "routing_mode": profile.get("routing_mode") or "atomic",
         "domain": profile.get("domain"),
         "roles": list(profile.get("roles") or []),
         "unsafe_action": bool(profile.get("unsafe_action", False)),
-        "original_description": str(profile.get("description") or "")[
-            :description_chars
-        ],
+        "original_description": description,
     }
     if include_alternatives and profiles_by_id is not None:
         context["confusable_alternatives"] = [
@@ -1166,6 +1178,7 @@ def _generation_prompt(
             {
                 "workflow_id": workflow["workflow_id"],
                 "primary_skill_id": workflow["anchor_skill_id"],
+                "required_target_ids": list(workflow["skill_ids"]),
                 "unsafe_action": workflow["unsafe_action"],
                 "variant_plan": {
                     "explicit": variants - effective_implicit,
@@ -1202,12 +1215,67 @@ def _generation_prompt(
 10. 品牌或产品身份是能力边界时，至少一条 variant 要自然写出 name/aliases；其余样本可使用功能性转述。不得把中金、东方财富、问财、携程、美团、飞猪等相近平台互换。
 11. 不得让 query 更符合某个 confusable_alternative。若 target 是 composite，至少一条 variant 要在一个连贯任务里覆盖它的两个以上 facets，以训练“综合能力优先”；若 target 是 meta，至少一条 variant 要使用 trigger_phrases 中的状态触发而非直接要求配置系统。
 
+最容易犯的错误，必须在输出前逐条自检：
+- 三个 variant 是同一个完整 target 集合的三种训练表达，不是把不同 target 分摊到三个 variant。每个 explicit variant 都必须同时表达 required_target_ids 中每个能力的动作；少一个就整条无效。
+- implicit variant 也必须需要全部 target，只是其中 1 个或多个动作由用户目标/约束强蕴含。即使是隐式 target，evidence 仍必须提供 query 中证明其必要性的原文片段。
+- evidence 不是动作清单的替代品。explicit query 没有表达某 target 时，不能凭空补一个 evidence；必须重写 query，让该动作和其他动作形成真实依赖。
+
+下面只演示结构，不能照抄场景。假设 required_target_ids 为 ["calendar-id","nutrition-id"]：
+{{"workflow_id":"wf-example","variants":[
+  {{"intent_mode":"explicit","query":"根据我现在的孕周做一周控糖食谱，再把每天三餐安排到日历里，早上八点提醒我准备。","evidence":{{"calendar-id":"把每天三餐安排到日历里","nutrition-id":"根据我现在的孕周做一周控糖食谱"}},"implicit_skill_ids":[],"implicit_rationales":{{}}}},
+  {{"intent_mode":"explicit","query":"先按孕中期补铁需求列出工作日午餐，再把五天菜单分别建成中午十二点的日历事项。","evidence":{{"calendar-id":"建成中午十二点的日历事项","nutrition-id":"按孕中期补铁需求列出工作日午餐"}},"implicit_skill_ids":[],"implicit_rationales":{{}}}},
+  {{"intent_mode":"implicit","query":"我怀孕二十八周又要控糖，把下周每天三餐都排进日历，提前半小时提醒我备餐。","evidence":{{"calendar-id":"排进日历，提前半小时提醒我","nutrition-id":"怀孕二十八周又要控糖"}},"implicit_skill_ids":["nutrition-id"],"implicit_rationales":{{"nutrition-id":"孕周和控糖约束要求先制定适合孕期的三餐内容"}}}}
+]}}
+
 只返回严格 JSON 对象，格式：
 {{"items":[{{"workflow_id":"wf-...","variants":[{{"intent_mode":"explicit或implicit","query":"...","evidence":{{"@owner/slug":"query中的原文片段"}},"implicit_skill_ids":[],"implicit_rationales":{{}}}}]}}]}}
 items 数量、顺序和 workflow_id 必须与输入一致，每个 variants 必须正好 {variants} 条。不要附解释。
 
 输入 workflows：
 {json.dumps(specs, ensure_ascii=False)}"""
+
+
+def _generation_repair_prompt(
+    workflow: Mapping[str, Any],
+    failed_item: Mapping[str, Any],
+    validation_error: str,
+    *,
+    variants: int,
+    implicit_variants: int,
+) -> str:
+    """Ask the generator to correct a concrete locally rejected workflow."""
+
+    return f"""{_generation_prompt(
+        [workflow],
+        variants=variants,
+        implicit_variants=implicit_variants,
+    )}
+
+上一次输出没有通过本地严格校验。不要解释错误，也不要只修改 evidence 来掩盖
+query 中缺失的动作；请根据错误重写不合格的 variant，并重新返回这个 workflow 的
+全部 {variants} 个 variants。
+
+本地错误：
+{validation_error}
+
+上一次输出：
+{json.dumps(failed_item, ensure_ascii=False)}
+
+纠错规则：
+- `unsafe actions cannot be implicit targets`：所有 unsafe_action=true 的 target
+  必须显式表达；改选一个 unsafe_action=false 的 target 作为隐式目标。
+- `implicit variant needs explicit and implicit targets`：implicit_skill_ids 必须有
+  1 到 target 总数减 1 个，并确保剩余 target 在 query 中显式表达。
+- `evidence keys do not match target skills`：evidence 的 key 必须与
+  required_target_ids 完全相同，一个不能少、一个不能多。
+- `invalid evidence span`：value 必须从修改后的 query 中逐字复制，不得概括、
+  改写或使用省略号；不同 target 使用不同片段。
+- `query has no concrete context or constraint marker`：自然加入今天、明天、周末、
+  最近、截止时间、对象、数量、地点、文件或输出格式等至少一种具体约束。
+- explicit variant 若缺某个 target 的动作，必须把它改写成各 target 前后依赖的
+  完整任务；不要把不同 target 分摊到不同 variant。
+
+只返回要求的 JSON 对象，不要附加说明。"""
 
 
 _BANNED_QUERY_PATTERNS = (
@@ -1286,8 +1354,8 @@ def _validate_generated_variant(
     lowered = query.casefold()
     if any(pattern in lowered for pattern in _BANNED_QUERY_PATTERNS):
         raise DatasetBuildError("query contains dataset or implementation language")
-    if any(str(target["skill_id"]).casefold() in lowered for target in workflow["targets"]):
-        raise DatasetBuildError("query leaks a target skill_id")
+    if re.search(r"@[\w.-]+/[\w.-]+", query):
+        raise DatasetBuildError("query leaks an opaque target skill_id")
     chinese = len(re.findall(r"[\u3400-\u9fff]", query))
     linguistic = len(re.findall(r"[A-Za-z\u3400-\u9fff]", query))
     if chinese < 12 or chinese / max(1, linguistic) < 0.45:
@@ -1461,6 +1529,7 @@ def _parse_generation_payload_partial(
                     "workflow": dict(workflow),
                     "error_type": "DatasetBuildError",
                     "error": "variant count mismatch",
+                    "invalid_item": dict(item),
                 }
             )
             continue
@@ -1491,6 +1560,7 @@ def _parse_generation_payload_partial(
                     "workflow": dict(workflow),
                     "error_type": "DatasetBuildError",
                     "error": "; ".join(variant_errors)[:1000],
+                    "invalid_item": dict(item),
                 }
             )
     return rows, failures
@@ -1613,49 +1683,153 @@ def generate_queries(
             implicit_variants=implicit_variants,
         )
 
-    results, errors = client.map(generate_batch, batches, progress_label="generation batches") if batches else ([], [])
-    generated: dict[str, list[dict[str, Any]]] = {
-        workflow_id: rows for workflow_id, rows in existing_by_workflow.items() if workflow_id in complete
+    generated: dict[str, dict[int, dict[str, Any]]] = {
+        workflow_id: {
+            int(row["variant"]): row
+            for row in rows
+            if int(row.get("variant", -1)) in range(variants)
+        }
+        for workflow_id, rows in existing_by_workflow.items()
     }
+
+    def merge_rows(rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            workflow_id = str(row["workflow_id"])
+            generated.setdefault(workflow_id, {})[int(row["variant"])] = dict(
+                row
+            )
+
+    def checkpoint_rows() -> None:
+        checkpoint = [
+            generated[str(workflow["workflow_id"])][variant]
+            for workflow in workflows
+            if str(workflow["workflow_id"]) in generated
+            for variant in sorted(generated[str(workflow["workflow_id"])])
+        ]
+        atomic_jsonl(output_path, checkpoint)
+
     validation_failures: list[dict[str, Any]] = []
-    for batch_rows, batch_failures in results:
-        for row in batch_rows:
-            generated.setdefault(str(row["workflow_id"]), []).append(row)
-        validation_failures.extend(batch_failures)
-    failed_workflows = [workflow for error in errors for workflow in error["input"]]
-    failed_workflows.extend(failure["workflow"] for failure in validation_failures)
-    retry_pending = list({str(row["workflow_id"]): row for row in failed_workflows}.values())
+    request_failures: list[dict[str, Any]] = []
+    generation_chunk_size = 200
+    for start in range(0, len(batches), generation_chunk_size):
+        chunk = batches[start : start + generation_chunk_size]
+        results, errors = client.map(
+            generate_batch,
+            chunk,
+            progress_label=(
+                "generation batches "
+                f"{start + 1}-{start + len(chunk)}/{len(batches)}"
+            ),
+        )
+        for batch_rows, batch_failures in results:
+            merge_rows(batch_rows)
+            validation_failures.extend(batch_failures)
+        request_failures.extend(errors)
+        checkpoint_rows()
+
+    retry_pending: dict[str, dict[str, Any]] = {}
+    for failure in validation_failures:
+        workflow = dict(failure["workflow"])
+        retry_pending[str(workflow["workflow_id"])] = {
+            "workflow": workflow,
+            "validation_error": str(failure.get("error") or "validation failed"),
+            "invalid_item": dict(failure.get("invalid_item") or {}),
+        }
+    for error in request_failures:
+        for workflow in error["input"]:
+            workflow = dict(workflow)
+            retry_pending[str(workflow["workflow_id"])] = {
+                "workflow": workflow,
+                "validation_error": str(error.get("error") or "request failed"),
+                "invalid_item": {},
+            }
+
+    def repair_one(
+        state: Mapping[str, Any],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        workflow = dict(state["workflow"])
+        invalid_item = state.get("invalid_item")
+        if isinstance(invalid_item, Mapping) and invalid_item:
+            prompt = _generation_repair_prompt(
+                workflow,
+                invalid_item,
+                str(state.get("validation_error") or "validation failed"),
+                variants=variants,
+                implicit_variants=implicit_variants,
+            )
+        else:
+            prompt = _generation_prompt(
+                [workflow],
+                variants=variants,
+                implicit_variants=implicit_variants,
+            )
+        payload = client.complete_json(prompt, max_tokens=5000)
+        return _parse_generation_payload_partial(
+            payload,
+            [workflow],
+            variants=variants,
+            implicit_variants=implicit_variants,
+        )
+
     normalized_retry_errors: list[dict[str, Any]] = []
     for retry_round in range(1, validation_retry_rounds + 1):
         if not retry_pending:
             break
-        retry_results, retry_request_errors = client.map(
-            generate_batch,
-            [[workflow] for workflow in retry_pending],
-            progress_label=f"generation retries {retry_round}/{validation_retry_rounds}",
-        )
-        next_pending: list[dict[str, Any]] = []
-        for batch_rows, batch_failures in retry_results:
-            for row in batch_rows:
-                generated.setdefault(str(row["workflow_id"]), []).append(row)
-            next_pending.extend(dict(failure["workflow"]) for failure in batch_failures)
-        next_pending.extend(
-            dict(workflow)
-            for error in retry_request_errors
-            for workflow in error["input"]
-        )
-        retry_pending = list(
-            {str(row["workflow_id"]): row for row in next_pending}.values()
-        )
+        states = list(retry_pending.values())
+        next_pending: dict[str, dict[str, Any]] = {}
+        retry_request_errors: list[dict[str, Any]] = []
+        for start in range(0, len(states), generation_chunk_size):
+            chunk = states[start : start + generation_chunk_size]
+            retry_results, request_errors = client.map(
+                repair_one,
+                chunk,
+                progress_label=(
+                    f"generation repairs {retry_round}/{validation_retry_rounds} "
+                    f"{start + 1}-{start + len(chunk)}/{len(states)}"
+                ),
+            )
+            for batch_rows, batch_failures in retry_results:
+                merge_rows(batch_rows)
+                for failure in batch_failures:
+                    workflow = dict(failure["workflow"])
+                    next_pending[str(workflow["workflow_id"])] = {
+                        "workflow": workflow,
+                        "validation_error": str(
+                            failure.get("error") or "validation failed"
+                        ),
+                        "invalid_item": dict(
+                            failure.get("invalid_item") or {}
+                        ),
+                    }
+            for error in request_errors:
+                state = dict(error["input"])
+                workflow = dict(state["workflow"])
+                state["validation_error"] = str(
+                    error.get("error") or state.get("validation_error")
+                )
+                next_pending[str(workflow["workflow_id"])] = state
+            retry_request_errors.extend(request_errors)
+            checkpoint_rows()
+        retry_pending = next_pending
         if retry_round == validation_retry_rounds:
-            normalized_retry_errors = list(retry_request_errors)
+            normalized_retry_errors = [
+                {
+                    "input": [dict(error["input"]["workflow"])],
+                    "error_type": error.get("error_type"),
+                    "error": error.get("error"),
+                }
+                for error in retry_request_errors
+            ]
             normalized_retry_errors.extend(
                 {
-                    "input": [workflow],
+                    "input": [dict(state["workflow"])],
                     "error_type": "DatasetBuildError",
-                    "error": "workflow still fails generation validation",
+                    "error": str(
+                        state.get("validation_error")
+                        or "workflow still fails generation validation"
+                    ),
                 }
-                for workflow in retry_pending
+                for state in retry_pending.values()
             )
 
     ordered: list[dict[str, Any]] = []
@@ -1663,7 +1837,7 @@ def generate_queries(
     seen_query_hashes: set[str] = set()
     for workflow in workflows:
         workflow_id = str(workflow["workflow_id"])
-        rows_by_variant = {int(row["variant"]): row for row in generated.get(workflow_id, [])}
+        rows_by_variant = generated.get(workflow_id, {})
         if set(rows_by_variant) != set(range(variants)):
             missing.append(workflow_id)
             continue
@@ -2379,6 +2553,8 @@ def export_training_dataset(
     target_order_variants: int = 4,
     alignment_queries_path: Path | None = None,
     alignment_reviews_path: Path | None = None,
+    allow_missing_reviews: bool = False,
+    provisional_note: str | None = None,
 ) -> dict[str, Any]:
     catalog = load_jsonl(catalog_path)
     profiles = load_jsonl(profiles_path)
@@ -2388,20 +2564,40 @@ def export_training_dataset(
     catalog_by_id = {str(row["skill_id"]): row for row in catalog}
     profiles_by_id = {str(row["skill_id"]): row for row in profiles}
     workflows_by_id = {str(row["workflow_id"]): row for row in workflows}
+    query_ids = [str(row["query_id"]) for row in queries]
+    review_ids = [str(row["query_id"]) for row in reviews]
     reviews_by_id = {str(row["query_id"]): row for row in reviews}
     if len(catalog_by_id) != len(catalog):
         raise DatasetBuildError("duplicate catalog skill IDs")
     if set(profiles_by_id) != set(catalog_by_id):
         raise DatasetBuildError("profile skill IDs must exactly match the input catalog")
-    if len(reviews_by_id) != len(queries):
-        raise DatasetBuildError("review/query counts disagree")
+    if len(set(query_ids)) != len(query_ids):
+        raise DatasetBuildError("duplicate generated query IDs")
+    if len(reviews_by_id) != len(review_ids):
+        raise DatasetBuildError("duplicate query review IDs")
+    unknown_review_ids = sorted(set(reviews_by_id).difference(query_ids))
+    if unknown_review_ids:
+        raise DatasetBuildError(
+            "reviews reference queries outside the generated dataset: "
+            f"{unknown_review_ids[0]}"
+        )
+    missing_review_ids = sorted(set(query_ids).difference(reviews_by_id))
+    if missing_review_ids and not allow_missing_reviews:
+        raise DatasetBuildError(
+            "review/query counts disagree: "
+            f"{len(missing_review_ids)} generated queries have no review"
+        )
     if min_train_positives_per_skill < 1:
         raise DatasetBuildError("min_train_positives_per_skill must be positive")
     if min_augmented_train_queries < 0:
         raise DatasetBuildError("min_augmented_train_queries cannot be negative")
     if target_order_variants < 1:
         raise DatasetBuildError("target_order_variants must be positive")
-    accepted = [row for row in queries if bool(reviews_by_id[str(row["query_id"])]["pass"])]
+    accepted = [
+        row
+        for row in queries
+        if bool(reviews_by_id.get(str(row["query_id"]), {}).get("pass"))
+    ]
     accepted, duplicate_rejections = _deduplicate_near_queries(accepted, reviews_by_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -2680,6 +2876,23 @@ def export_training_dataset(
         "candidate_source": catalog_path.name,
         "candidate_count": len(candidate_rows),
         "candidate_policy": "retain_all_input_catalog_skills",
+        "export_status": (
+            "provisional"
+            if missing_review_ids or provisional_note
+            else "ready"
+        ),
+        "provisional_note": provisional_note,
+        "review_completion": {
+            "generated_query_count": len(queries),
+            "reviewed_query_count": len(queries) - len(missing_review_ids),
+            "missing_review_count": len(missing_review_ids),
+            "missing_review_query_ids": missing_review_ids,
+            "missing_review_policy": (
+                "exclude_unreviewed"
+                if missing_review_ids
+                else "require_complete"
+            ),
+        },
         "input_provenance": {
             "multi_skill_query_source": queries_path.parent.name,
             "multi_skill_review_source": reviews_path.parent.name,
@@ -2697,8 +2910,8 @@ def export_training_dataset(
             len(initially_missing) - len(skills_without_multiskill_train_positives)
         ),
         "generated_query_count": len(queries),
-        "reviewed_query_count": len(reviews),
-        "accepted_before_dedup": sum(bool(row["pass"]) for row in reviews),
+        "reviewed_query_count": len(queries) - len(missing_review_ids),
+        "accepted_before_dedup": len(accepted),
         "near_duplicate_rejection_count": len(duplicate_rejections),
         "final_query_count": sum(len(rows) for rows in split_rows.values()),
         "semantic_split_query_counts": semantic_split_query_counts,
