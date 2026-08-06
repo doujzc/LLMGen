@@ -153,8 +153,11 @@ def _validate_variant(
     variants: int = 1,
 ) -> dict[str, Any]:
     query = " ".join(str(raw.get("query") or "").split())
-    if not 6 <= len(query) <= 180:
-        raise DatasetBuildError("single-skill query length outside [6, 180]")
+    # Short mobile commands such as “打给爸爸” are valid capability-alignment
+    # supervision.  Requiring six characters systematically rejects concise
+    # phone/clock requests and shifts this curriculum away from runtime style.
+    if not 3 <= len(query) <= 180:
+        raise DatasetBuildError("single-skill query length outside [3, 180]")
     lowered = query.casefold()
     skill_id = str(profile["skill_id"]).casefold()
     opaque_id_leaked = (

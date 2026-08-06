@@ -401,6 +401,7 @@ python scripts/download_skillret.py
 ```bash
 bash scripts/run_clawhub_data.sh
 bash scripts/run_light_data.sh
+HELDOUT_CSV=/path/to/result.csv bash scripts/run_0804_data.sh
 ```
 
 生成接口默认从 `~/llm_api.txt` 读取 OpenAI-compatible 配置。独立校验当前最终
@@ -414,7 +415,22 @@ python scripts/clawhub_data/05_validate_dataset.py \
 python scripts/clawhub_data/05_validate_dataset.py \
   --dataset-dir data_light/final \
   --expected-candidates 301
+
+python scripts/0804_data/05_audit_final.py \
+  --dataset-dir data_0804/final \
+  --candidates candidates_0804.jsonl \
+  --heldout /path/to/result.csv \
+  --distribution-profile data_0804/distribution_profile.json
 ```
+
+0804 流程默认读取 `~/deepseek_api_key.txt`：`deepseek-v4-flash` 负责生成，独立严格
+复核默认使用 `deepseek-reasoner`。复核会拒绝仅用“并/再”连接的无关 Skill，并按
+候选覆盖缺口自动生成训练专用回填 workflow。生成与复核均可断点续跑；复核默认每
+500 条落盘。held-out CSV 只用于不含原句/Skill ID 的聚合分布和本地泄露门禁，
+不会进入模型 prompt 或训练文件。
+
+同一个 `WORK_DIR` 重跑会复用 workflow 和 API 结果。如修改候选、held-out 或种子
+数据，使用 `REBUILD_STATIC=1` 并指定新的 `WORK_DIR`，避免混用旧缓存。
 
 数据格式、统计、来源和限制见各数据目录 README。
 

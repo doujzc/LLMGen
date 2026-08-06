@@ -350,7 +350,17 @@ class ChatBatchClient:
                 last_error = error
                 with self.lock:
                     self.usage["failed_attempts"] += 1
-                if attempt >= self.max_retries:
+                message = str(error).casefold()
+                status_code = getattr(error, "status_code", None)
+                non_retryable = status_code in {401, 402, 403} or any(
+                    marker in message
+                    for marker in (
+                        "insufficient balance",
+                        "budget has been exceeded",
+                        "budget_exceeded",
+                    )
+                )
+                if non_retryable or attempt >= self.max_retries:
                     break
                 time.sleep(min(20.0, 1.25 * (2**attempt)) + random.random() * 0.5)
         raise DatasetBuildError(f"model request failed after retries: {type(last_error).__name__}: {last_error}")
@@ -2625,6 +2635,7 @@ def export_training_dataset(
                 "routing_mode": profile.get("routing_mode") or "atomic",
                 "confusable_skill_ids": profile.get("confusable_skill_ids") or [],
                 "mobile_fit": profile["mobile_fit"],
+                "unsafe_action": bool(profile.get("unsafe_action", False)),
                 "rank": skill["rank"],
                 "canonical_url": skill["canonical_url"],
             }

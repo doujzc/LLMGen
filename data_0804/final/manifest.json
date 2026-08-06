@@ -1,61 +1,61 @@
 {
-  "accepted_before_dedup": 7127,
+  "accepted_before_dedup": 18481,
   "alignment_positive_skill_count": 166,
   "artifacts": {
     "qrels_alignment.jsonl": {
-      "bytes": 270656,
+      "bytes": 262672,
       "path": "qrels_alignment.jsonl",
-      "sha256": "d8876a780ebff52abff1048c204e5470d259337c99eeac5e2f280efbcc3a6d2b"
+      "sha256": "c380cb7c9258770289d96be2a0d08e4818267926ce03b968b3cbc9005760b90f"
     },
     "qrels_test.jsonl": {
-      "bytes": 96967,
+      "bytes": 160130,
       "path": "qrels_test.jsonl",
-      "sha256": "bfe0e8edc8acd86c79448f466df58b679ef6a39d7a527ba9fbfdbd3d70d881e5"
+      "sha256": "c168c4c2ef5aa2d01e7100a6e27b15219c2d19dd3eab9644f5ed995e6685c69b"
     },
     "qrels_train.jsonl": {
-      "bytes": 6080541,
+      "bytes": 6450732,
       "path": "qrels_train.jsonl",
-      "sha256": "8f1a4977b994cec81358258dd9d6692b8822964f84a9575c08a4d582f7ef0a8f"
+      "sha256": "2b1d5360fb64509897106853aac9100963bee0e31d05c45c7dca03c7ea0b2924"
     },
     "qrels_validation.jsonl": {
-      "bytes": 73197,
+      "bytes": 158269,
       "path": "qrels_validation.jsonl",
-      "sha256": "8a382ffe27d1d21c5b902755e8de22aad32684b1f84b36654ba4bd21f27e0b44"
+      "sha256": "44e633aa9125f92632a97e7ec1ff28f661755d849e7d00263f995593ffc58f84"
     },
     "queries.jsonl": {
-      "bytes": 39805232,
+      "bytes": 49367106,
       "path": "queries.jsonl",
-      "sha256": "cd72de8eb8f78cd0a35b50df6f6f49140771a13f5ccdf18dfbe8b297bcf822b5"
+      "sha256": "9f92c202732e9655bee95a7685d9d53f73d01dfc81e85a5cbef06f5816f21529"
     },
     "queries_alignment.jsonl": {
-      "bytes": 2325175,
+      "bytes": 2263693,
       "path": "queries_alignment.jsonl",
-      "sha256": "82a3a683ccc9f667514c6c22e1a10e96d71d07b5836c3e21bbeb4af43d3bbfa2"
+      "sha256": "3461b2486a40e9571ec2341b2019c9e636bf9d4e209eba871a7b8de139e69a45"
     },
     "queries_test.jsonl": {
-      "bytes": 485020,
+      "bytes": 725419,
       "path": "queries_test.jsonl",
-      "sha256": "e15cd3436a49cdc66e09d0702e65c18d5e6576ca3b2adc886e0655a2935f16ff"
+      "sha256": "68352b780d7d808e12c2b59405a386e631545fa5121dd23f974e2564b06aea29"
     },
     "queries_train.jsonl": {
-      "bytes": 29753058,
+      "bytes": 30894090,
       "path": "queries_train.jsonl",
-      "sha256": "5a0d34a5d61a2bfa28efc72515987f18e704a66753ba537c786482223092e0d4"
+      "sha256": "577f4032d95abb90f292778fb46410e0d420d2fd8e6cf2596b495cd6ff0c3cd2"
     },
     "queries_validation.jsonl": {
-      "bytes": 378556,
+      "bytes": 722785,
       "path": "queries_validation.jsonl",
-      "sha256": "04ef2d15608ae039edcca392d56b10d6f0badb7e38e0b4d89e7c1058a1745077"
+      "sha256": "e565efe8dd6738682059801a7893e01fc6e833e95751e68afa00f75f59b23396"
     },
     "rejected_near_duplicates.jsonl": {
-      "bytes": 0,
+      "bytes": 7778,
       "path": "rejected_near_duplicates.jsonl",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "e3f533e176520a0c4c5d476d3e0489028a022cb583e5de0282887d6110f4f9ef"
     },
     "skills.jsonl": {
-      "bytes": 287774,
+      "bytes": 290694,
       "path": "skills.jsonl",
-      "sha256": "5e6b741f0520682fe4ce373c97d22fb07f0638483683d1b3c97db80adfe44848"
+      "sha256": "a93d3735619d743d79b24a968447080e48a1aa14d7b36a21f49cb0306e3a1c56"
     }
   },
   "candidate_count": 166,
@@ -65,126 +65,59 @@
   "coverage_repair_skill_count": 0,
   "coverage_repair_workflow_count": 0,
   "coverage_repair_workflow_ids": [],
-  "created_at": "2026-08-05T07:25:39.309812Z",
-  "cross_domain_query_count": 21011,
-  "export_status": "provisional",
-  "final_query_count": 21823,
+  "created_at": "2026-08-05T10:56:11.206620Z",
+  "cross_domain_query_count": 25873,
+  "export_status": "ready",
+  "final_query_count": 35241,
   "format_version": 2,
-  "generated_query_count": 11523,
+  "generated_query_count": 18570,
   "input_provenance": {
     "multi_skill_query_schema_counts": {
-      "4": 11523
+      "4": 18570
     },
-    "multi_skill_query_source": "qwen37-plus-glm52-v4-routing",
+    "multi_skill_query_source": "deepseek-v4-flash-teststyle-v1",
     "multi_skill_review_schema_counts": {
-      "4": 11457
+      "4": 18570
     },
-    "multi_skill_review_source": "qwen37-plus-glm52-v4-routing"
+    "multi_skill_review_source": "deepseek-v4-flash-teststyle-v1"
   },
-  "mean_train_positives_per_covered_skill": 131.06626506024097,
-  "min_augmented_train_queries_required": 14699,
-  "min_train_positives_per_covered_skill": 35,
-  "min_train_positives_per_skill_required": 35,
+  "mean_train_positives_per_covered_skill": 219.8734939759036,
+  "min_augmented_train_queries_required": 15000,
+  "min_train_positives_per_covered_skill": 167,
+  "min_train_positives_per_skill_required": 115,
   "multiskill_train_positive_skill_count": 166,
-  "near_duplicate_rejection_count": 0,
-  "provisional_note": "Direct export requested on 2026-08-05: excluded 66 unreviewed queries after API budget exhaustion; used observed coverage floors 35 combined positives and 12 alignment positives instead of planned 100/15.",
+  "near_duplicate_rejection_count": 53,
+  "provisional_note": null,
   "query_data_schema_version": 4,
   "query_review_schema_version": 4,
   "review_completion": {
-    "generated_query_count": 11523,
-    "missing_review_count": 66,
-    "missing_review_policy": "exclude_unreviewed",
-    "missing_review_query_ids": [
-      "cq-155a54c2caa18dbf-v2",
-      "cq-284676c43823660d-v0",
-      "cq-40cdc3f0902b989f-v0",
-      "cq-40cdc3f0902b989f-v1",
-      "cq-4229ebbed38bac3c-v1",
-      "cq-4229ebbed38bac3c-v2",
-      "cq-52393f53276d7747-v0",
-      "cq-52393f53276d7747-v2",
-      "cq-541e9258a3418e73-v0",
-      "cq-541e9258a3418e73-v1",
-      "cq-541e9258a3418e73-v2",
-      "cq-54abca82652f7c41-v0",
-      "cq-54abca82652f7c41-v1",
-      "cq-54abca82652f7c41-v2",
-      "cq-5c80b5166362823a-v0",
-      "cq-5c80b5166362823a-v2",
-      "cq-5d1aec5e628f3a2a-v2",
-      "cq-64a263add6c17c01-v0",
-      "cq-64a263add6c17c01-v1",
-      "cq-64a263add6c17c01-v2",
-      "cq-7ac9ba0d558393b4-v2",
-      "cq-8a53d0edc30517d3-v0",
-      "cq-8a53d0edc30517d3-v1",
-      "cq-8a53d0edc30517d3-v2",
-      "cq-8df455a25fc5c90c-v0",
-      "cq-8df455a25fc5c90c-v1",
-      "cq-a5f6b57c43206ed3-v0",
-      "cq-ad4c51353856ab3d-v0",
-      "cq-ad4c51353856ab3d-v1",
-      "cq-ad4c51353856ab3d-v2",
-      "cq-b578a33c94069aea-v1",
-      "cq-b578a33c94069aea-v2",
-      "cq-b90195c5f7b5d34f-v0",
-      "cq-b90195c5f7b5d34f-v1",
-      "cq-b90195c5f7b5d34f-v2",
-      "cq-bdcc53c099247341-v2",
-      "cq-c0f5276bb0a4bd85-v0",
-      "cq-c0f5276bb0a4bd85-v1",
-      "cq-c0f5276bb0a4bd85-v2",
-      "cq-c11d57dee18a7d4f-v2",
-      "cq-ca244c163c540f9f-v2",
-      "cq-cb445701e5370524-v0",
-      "cq-cb445701e5370524-v1",
-      "cq-cb445701e5370524-v2",
-      "cq-ce19ca48acc79268-v0",
-      "cq-ce19ca48acc79268-v1",
-      "cq-ce19ca48acc79268-v2",
-      "cq-da0451d8e45113b6-v1",
-      "cq-da0451d8e45113b6-v2",
-      "cq-dc12a10d34dbe01c-v0",
-      "cq-dc12a10d34dbe01c-v1",
-      "cq-dc12a10d34dbe01c-v2",
-      "cq-e3ecec78db9a6b3c-v0",
-      "cq-e3ecec78db9a6b3c-v1",
-      "cq-e3ecec78db9a6b3c-v2",
-      "cq-ef79ccdb43db69e6-v1",
-      "cq-f2ecdeead8d0ae59-v0",
-      "cq-f2ecdeead8d0ae59-v1",
-      "cq-f2ecdeead8d0ae59-v2",
-      "cq-f3fd1ccf00dc3080-v0",
-      "cq-f3fd1ccf00dc3080-v1",
-      "cq-f3fd1ccf00dc3080-v2",
-      "cq-f6c8d9a47b28157e-v0",
-      "cq-f6c8d9a47b28157e-v2",
-      "cq-f934befa49b4e01a-v1",
-      "cq-f934befa49b4e01a-v2"
-    ],
-    "reviewed_query_count": 11457
+    "generated_query_count": 18570,
+    "missing_review_count": 0,
+    "missing_review_policy": "require_complete",
+    "missing_review_query_ids": [],
+    "reviewed_query_count": 18570
   },
-  "reviewed_query_count": 11457,
+  "reviewed_query_count": 18570,
   "routing_profile_schema_version": 3,
   "seed": 20260720,
   "semantic_split_query_counts": {
-    "test": 380,
-    "train": 6450,
-    "validation": 297
+    "test": 866,
+    "train": 16760,
+    "validation": 855
   },
   "single_skill_alignment": {
     "accepted_candidate_count": 166,
-    "accepted_query_count": 3050,
+    "accepted_query_count": 2979,
     "candidate_count": 166,
     "curation_source_counts": {
-      "model_generated": 3050
+      "model_generated": 2979
     },
-    "generated_query_count": 3216,
-    "mean_queries_per_skill": 18.373493975903614,
-    "min_queries_per_skill": 12,
-    "min_queries_per_skill_required": 12,
+    "generated_query_count": 2988,
+    "mean_queries_per_skill": 17.94578313253012,
+    "min_queries_per_skill": 15,
+    "min_queries_per_skill_required": 15,
     "review_source_counts": {
-      "model_review": 3050
+      "model_review": 2979
     }
   },
   "skills_below_min_train_positives": {},
@@ -195,110 +128,99 @@
   "skills_without_train_positive_ids": [],
   "split_domain_counts": {
     "test": {
-      "agent_system_automation": 41,
-      "business_operations": 69,
-      "communication": 75,
-      "data_analysis": 32,
-      "documents_office": 117,
-      "education_knowledge": 26,
-      "files_knowledge_memory": 74,
-      "finance_investment": 26,
-      "health_fitness": 19,
-      "media_audio_video": 41,
-      "media_image_design": 51,
-      "news_research": 43,
-      "productivity_planning": 36,
-      "shopping_food": 39,
-      "smart_home_iot": 7,
-      "social_content": 53,
-      "software_development": 88,
-      "travel_local": 32,
-      "weather_environment": 3
+      "agent_system_automation": 105,
+      "business_operations": 105,
+      "communication": 79,
+      "data_analysis": 29,
+      "documents_office": 130,
+      "education_knowledge": 164,
+      "files_knowledge_memory": 110,
+      "finance_investment": 69,
+      "health_fitness": 29,
+      "media_audio_video": 134,
+      "media_image_design": 94,
+      "news_research": 110,
+      "productivity_planning": 55,
+      "shopping_food": 105,
+      "smart_home_iot": 5,
+      "social_content": 95,
+      "software_development": 120,
+      "travel_local": 55
     },
     "train": {
-      "agent_system_automation": 2278,
-      "business_operations": 3254,
-      "communication": 3150,
-      "data_analysis": 1380,
-      "documents_office": 5872,
-      "education_knowledge": 2108,
-      "files_knowledge_memory": 4272,
-      "finance_investment": 1914,
-      "health_fitness": 1558,
-      "media_audio_video": 3404,
-      "media_image_design": 3422,
-      "news_research": 2768,
-      "productivity_planning": 1628,
-      "shopping_food": 3164,
-      "smart_home_iot": 198,
-      "social_content": 3034,
-      "software_development": 4666,
-      "travel_local": 2558,
-      "weather_environment": 234
+      "agent_system_automation": 2844,
+      "business_operations": 2910,
+      "communication": 2406,
+      "data_analysis": 1650,
+      "documents_office": 6468,
+      "education_knowledge": 3736,
+      "files_knowledge_memory": 3404,
+      "finance_investment": 3156,
+      "health_fitness": 1776,
+      "media_audio_video": 3764,
+      "media_image_design": 4594,
+      "news_research": 3996,
+      "productivity_planning": 1570,
+      "shopping_food": 3500,
+      "smart_home_iot": 328,
+      "social_content": 3044,
+      "software_development": 4530,
+      "travel_local": 3834,
+      "weather_environment": 450
     },
     "validation": {
-      "agent_system_automation": 33,
-      "business_operations": 41,
-      "communication": 21,
-      "data_analysis": 27,
-      "documents_office": 65,
-      "education_knowledge": 36,
-      "files_knowledge_memory": 50,
-      "finance_investment": 21,
-      "health_fitness": 28,
-      "media_audio_video": 56,
-      "media_image_design": 39,
-      "news_research": 35,
-      "productivity_planning": 31,
-      "shopping_food": 30,
-      "smart_home_iot": 6,
-      "social_content": 51,
-      "software_development": 57,
-      "travel_local": 38,
-      "weather_environment": 9
+      "agent_system_automation": 100,
+      "business_operations": 80,
+      "communication": 45,
+      "data_analysis": 25,
+      "documents_office": 120,
+      "education_knowledge": 174,
+      "files_knowledge_memory": 90,
+      "finance_investment": 30,
+      "health_fitness": 30,
+      "media_audio_video": 174,
+      "media_image_design": 159,
+      "news_research": 135,
+      "productivity_planning": 30,
+      "shopping_food": 98,
+      "smart_home_iot": 5,
+      "social_content": 103,
+      "software_development": 124,
+      "travel_local": 39
     }
   },
   "split_qrel_counts": {
-    "test": 1106,
-    "train": 65520,
-    "validation": 839
+    "test": 1732,
+    "train": 67040,
+    "validation": 1710
   },
   "split_query_counts": {
-    "test": 380,
-    "train": 21146,
-    "validation": 297
+    "test": 866,
+    "train": 33520,
+    "validation": 855
   },
   "split_target_count_distribution": {
     "test": {
-      "2": 148,
-      "3": 118,
-      "4": 114
+      "2": 866
     },
     "train": {
-      "2": 4654,
-      "3": 9756,
-      "4": 6736
+      "2": 33520
     },
     "validation": {
-      "2": 115,
-      "3": 119,
-      "4": 63
+      "2": 855
     }
   },
   "target_count_distribution": {
-    "2": 4917,
-    "3": 9993,
-    "4": 6913
+    "2": 35241
   },
   "target_order_augmentation": {
     "actual_variants_distribution": {
-      "2": 2327,
-      "4": 4123
+      "2": 16760
     },
-    "augmentation_factor": 3.278449612403101,
-    "augmented_train_query_count": 21146,
-    "requested_variants_per_query": 4,
-    "semantic_train_query_count": 6450
+    "augmentation_factor": 2.0,
+    "augmented_train_query_count": 33520,
+    "requested_variants_per_query": 2,
+    "semantic_train_query_count": 16760
   },
   "train_positive_skill_count": 166
 }

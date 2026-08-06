@@ -1,0 +1,174 @@
+{
+  "candidate_count": 166,
+  "candidate_registry_exact": true,
+  "created_at": "2026-08-05T11:00:35.912710Z",
+  "distribution_match": {
+    "domain_note": "Candidate-level minimum coverage constrains exact domain matching.",
+    "first_person_rate_delta": 0.02726332537788384,
+    "polite_request_rate_delta": -0.003846459824980112,
+    "query_length_mean_delta": -2.81192521877486,
+    "sequence_marker_rate_delta": 0.03184964200477325,
+    "style_gate_failures": [],
+    "style_gate_pass": true,
+    "target_domain_total_variation": 0.282478122513922,
+    "terminal_punctuation_rate_delta": 0.0
+  },
+  "heldout_leak_count": 0,
+  "leaks": [],
+  "minimum_semantic_train_per_skill": 149,
+  "minimum_semantic_train_per_skill_required": 100,
+  "privacy": {
+    "distribution_profile_contains_heldout_query_text": false,
+    "report_contains_heldout_query_text": false
+  },
+  "reference_distribution": {
+    "query_count": 75,
+    "query_length": {
+      "maximum": 35,
+      "mean": 27.253333333333334,
+      "median": 27,
+      "minimum": 20,
+      "p10": 23.0,
+      "p90": 32.0
+    },
+    "style_rates": {
+      "first_person": 0.17333333333333334,
+      "polite_request": 0.013333333333333334,
+      "sequence_marker": 0.32,
+      "terminal_punctuation": 0.0
+    },
+    "target_count_distribution": {
+      "2": 75
+    }
+  },
+  "split_stats": {
+    "test": {
+      "length": {
+        "maximum": 40,
+        "mean": 23.72286374133949,
+        "median": 23.0,
+        "minimum": 20,
+        "p10": 20.0,
+        "p90": 28.0
+      },
+      "semantic_query_count": 866,
+      "style_rates": {
+        "first_person": 0.20092378752886836,
+        "implicit": 0.18937644341801385,
+        "polite_request": 0.012702078521939953,
+        "sequence_marker": 0.4064665127020785,
+        "terminal_punctuation": 0.0
+      },
+      "target_count_distribution": {
+        "2": 866
+      },
+      "target_domain_counts": {
+        "agent_system_automation": 110,
+        "business_operations": 110,
+        "communication": 79,
+        "data_analysis": 29,
+        "documents_office": 145,
+        "education_knowledge": 169,
+        "files_knowledge_memory": 115,
+        "finance_investment": 69,
+        "health_fitness": 29,
+        "media_audio_video": 134,
+        "media_image_design": 128,
+        "news_research": 120,
+        "productivity_planning": 55,
+        "shopping_food": 120,
+        "smart_home_iot": 5,
+        "social_content": 95,
+        "software_development": 165,
+        "travel_local": 55
+      }
+    },
+    "train": {
+      "length": {
+        "maximum": 40,
+        "mean": 24.441408114558474,
+        "median": 23.0,
+        "minimum": 20,
+        "p10": 20.0,
+        "p90": 30.0
+      },
+      "semantic_query_count": 16760,
+      "style_rates": {
+        "first_person": 0.20059665871121718,
+        "implicit": 0.1937947494033413,
+        "polite_request": 0.009486873508353222,
+        "sequence_marker": 0.35184964200477326,
+        "terminal_punctuation": 0.0
+      },
+      "target_count_distribution": {
+        "2": 16760
+      },
+      "target_domain_counts": {
+        "agent_system_automation": 1980,
+        "business_operations": 1599,
+        "communication": 1208,
+        "data_analysis": 840,
+        "documents_office": 3294,
+        "education_knowledge": 2105,
+        "files_knowledge_memory": 1787,
+        "finance_investment": 1681,
+        "health_fitness": 1063,
+        "media_audio_video": 2162,
+        "media_image_design": 3242,
+        "news_research": 2203,
+        "productivity_planning": 815,
+        "shopping_food": 1805,
+        "smart_home_iot": 164,
+        "social_content": 1597,
+        "software_development": 3624,
+        "travel_local": 2126,
+        "weather_environment": 225
+      }
+    },
+    "validation": {
+      "length": {
+        "maximum": 40,
+        "mean": 24.742690058479532,
+        "median": 24,
+        "minimum": 20,
+        "p10": 21.0,
+        "p90": 32.0
+      },
+      "semantic_query_count": 855,
+      "style_rates": {
+        "first_person": 0.20116959064327486,
+        "implicit": 0.19649122807017544,
+        "polite_request": 0.016374269005847954,
+        "sequence_marker": 0.36374269005847953,
+        "terminal_punctuation": 0.0
+      },
+      "target_count_distribution": {
+        "2": 855
+      },
+      "target_domain_counts": {
+        "agent_system_automation": 100,
+        "business_operations": 80,
+        "communication": 45,
+        "data_analysis": 25,
+        "documents_office": 125,
+        "education_knowledge": 189,
+        "files_knowledge_memory": 95,
+        "finance_investment": 30,
+        "health_fitness": 30,
+        "media_audio_video": 174,
+        "media_image_design": 214,
+        "news_research": 140,
+        "productivity_planning": 30,
+        "shopping_food": 103,
+        "smart_home_iot": 5,
+        "social_content": 103,
+        "software_development": 173,
+        "travel_local": 49
+      }
+    }
+  },
+  "stage": "0804_teststyle_final_audit",
+  "status": "pass",
+  "undercovered_skill_count": 0,
+  "undercovered_skills": {}
+}

@@ -62,6 +62,15 @@ def test_single_skill_variant_allows_short_mobile_query_and_file_format() -> Non
     assert document["query"] == "把这个 DOCX 转成 PDF"
 
 
+def test_single_skill_variant_allows_concise_phone_command() -> None:
+    row = _validate_variant(
+        {"query": "打给爸爸", "evidence": "打给爸爸"},
+        _profile("phone"),
+        0,
+    )
+    assert row["query"] == "打给爸爸"
+
+
 def test_single_skill_variant_allows_a_declared_slash_command() -> None:
     profile = {
         **_profile("smart-followups"),
