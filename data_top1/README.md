@@ -7,12 +7,13 @@ conversion step is required.
 Each line must contain structured messages and one direct candidate-name target:
 
 ```json
-{"id":"q1","messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500元以内"}],"target_candidate_name":"Ecommerce"}
+{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500元以内"}],"target_candidate_name":"Ecommerce"}
 ```
 
 `messages` supports `user`, `assistant`, and `tool`; the final non-system message
 must be `user`. Training requires `target_candidate_name`; inference does not.
-The target must exist in `configs/top1_candidates.json`.
+The target must exist in `configs/top1_candidates.json`. Optional metadata fields,
+including `id` and `query_id`, are ignored by validation and training.
 
 Validate the files before loading a model:
 

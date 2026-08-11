@@ -63,6 +63,24 @@ def test_validator_accepts_user_jsonl_and_unlabeled_test_rows(tmp_path) -> None:
     )
 
 
+def test_validator_ignores_missing_invalid_and_duplicate_ids(tmp_path) -> None:
+    train = tmp_path / "train.jsonl"
+    rows = [_row(index, name) for index, name in enumerate(CANDIDATE_NAMES)]
+    rows[0].pop("id")
+    rows[1]["id"] = "duplicate"
+    rows[2]["id"] = "duplicate"
+    rows[3]["id"] = {"arbitrary": "metadata"}
+    rows[4]["query_id"] = 42
+    write_jsonl(train, rows)
+
+    report = validate_data_files(
+        candidate_registry="configs/top1_candidates.json",
+        split_paths={"train": train},
+    )
+
+    assert report["splits"]["train"]["rows"] == len(CANDIDATE_NAMES)
+
+
 def test_validator_rejects_conversation_leakage_across_splits(tmp_path) -> None:
     train = tmp_path / "train.jsonl"
     validation = tmp_path / "validation.jsonl"

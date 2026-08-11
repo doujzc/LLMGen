@@ -42,7 +42,6 @@ def validate_data_files(
     legal_names = set(routes_by_name)
     conversation_splits: dict[str, str] = {}
     family_splits: dict[str, str] = {}
-    seen_ids: dict[str, str] = {}
     report: dict[str, Any] = {
         "routing_mode": "candidate_name_top1",
         "candidate_names": list(routes_by_name),
@@ -74,19 +73,6 @@ def validate_data_files(
                 )
             else:
                 duplicate_conversations += 1
-
-            row_id = row.get("id", row.get("query_id"))
-            if row_id is not None:
-                if not isinstance(row_id, str) or not row_id.strip():
-                    raise RouterDataError(f"{path}:{row_number} has an invalid id")
-                row_id = row_id.strip()
-                previous_id_split = seen_ids.get(row_id)
-                if previous_id_split is None:
-                    seen_ids[row_id] = split
-                else:
-                    raise RouterDataError(
-                        f"duplicate id {row_id!r} in {previous_id_split}/{split}"
-                    )
 
             family = row.get("scenario_family")
             if family is not None:
