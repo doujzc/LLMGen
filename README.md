@@ -8,6 +8,46 @@ LLMGen 将固定候选集中的 Agent Skills 编码为短层级 token，并微�
 <SK_L1_3><SK_L2_4>
 ```
 
+## PromptGen：多轮 Top1 直接路由
+
+`top1_intension_retrieval` 分支额外支持不经过 RQ-VAE/codebook 的直接模式。
+输入保留 `user`、`assistant`、`tool` 多轮记录，训练目标仅为
+`候选英文名 + EOS`，推理始终返回一个候选。输出空间为两个真实路由
+`StockQuery`、`Ecommerce` 和五个虚拟路由 `StockAdvice`、`StockOther`、
+`ProductOther`、`ChitChat`、`NoAvailable`。
+
+仓库已包含转换后的 5,000 条数据。设置模型路径即可进行 4 卡 ZeRO-3 全参训练和评测：
+
+```bash
+export ROUTER_MODEL=/models/Qwen3-1.7B
+bash scripts/promptgen/full.sh
+```
+
+分阶段执行：
+
+```bash
+bash scripts/promptgen/01_train.sh
+bash scripts/promptgen/02_evaluate.sh
+```
+
+单条和多轮推理分别使用：
+
+```bash
+python scripts/infer_candidate_router.py \
+  --model-name-or-path runs/promptgen-qwen3-1.7b-top1/router/retrieval \
+  --query "看看贵州茅台今天的走势" \
+  --output-jsonl /tmp/prediction.jsonl
+
+python scripts/infer_candidate_router.py \
+  --model-name-or-path runs/promptgen-qwen3-1.7b-top1/router/retrieval \
+  --messages-json /path/to/conversation.json \
+  --output-jsonl /tmp/prediction.jsonl
+```
+
+`conversation.json` 可以是消息数组，也可以是 `{"messages": [...]}`。训练时不会新增
+候选 code token，也不会调整模型词表；全参/LoRA、DeepSpeed 和 checkpoint 恢复仍复用
+原训练器。
+
 训练、评估、解码和 Web 调试始终使用同一候选集。目前提供两套闭集数据：
 
 | 数据集 | 候选数 | 默认 codebook | 配置 | 默认运行目录 |

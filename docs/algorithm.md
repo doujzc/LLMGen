@@ -1651,3 +1651,39 @@ registry。增量更新用于缩短日常变更时延，周期性重训负责消
 观察了未找到目标候选的 case，发现集中于两类：
 - 直接指定候选名
 - 某个 skill 描述比较宽泛 / 抽象，功能不明确
+
+## 6. PromptGen 多轮 Top1 直接候选名模式
+
+对于候选极少、输出只需 Top1 的 PromptGen 场景，层级 code 的索引收益小于其
+构建成本。因此当前实现提供独立的 `candidate_name_top1` 模式，完整跳过
+embedding、RQ-VAE、Sinkhorn、code 分配和虚拟 token 扩词表。
+
+输入是以 user 结束的结构化消息序列
+$H=(m_1,\ldots,m_t)$。训练和推理使用同一序列化器，将较早消息放入
+`history`，最后一条 user 消息放入 `current_user_request`；长度不足时先删除最早
+历史，再从中间截断当前请求，绝不直接截掉监督后缀。
+
+候选集合固定为
+
+```text
+StockAdvice, StockOther, StockQuery, ProductOther,
+Ecommerce, ChitChat, NoAvailable
+```
+
+其中只有 `StockQuery` 和 `Ecommerce` 对应真实下游 Agent，其余五个是无后端
+路由的虚拟候选。模型直接生成候选名的原生 tokenizer token 序列及 EOS。设目标名
+$y=(y_1,\ldots,y_M)$，仍采用 target-only causal cross-entropy：
+
+```math
+\mathcal L_{\mathrm{name}}
+=
+-\sum_{j=1}^{M+1}
+\log P_\theta(y_j\mid H,y_{<j}),
+\qquad y_{M+1}=\mathrm{EOS}.
+```
+
+Prompt token 的 label 全部为 $-100$。推理使用由七个候选名 token 序列建立的
+变长 trie；每一步只保留仍可形成合法名称的 token，完整名称后只允许 EOS。
+Greedy 或 Beam 均只返回最佳的一条序列，因此不存在多候选换行文法、碰撞桶或
+候选名二次解码。`candidate_registry.json` 和训练 system prompt 随 checkpoint
+保存并校验 hash，避免训练与部署的候选定义漂移。
