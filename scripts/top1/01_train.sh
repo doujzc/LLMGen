@@ -2,11 +2,17 @@
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-promptgen_require_file "$PROMPTGEN_DATA_DIR/train.jsonl"
-promptgen_require_file "$PROMPTGEN_DATA_DIR/validation.jsonl"
-promptgen_require_file "$PROMPTGEN_DATA_DIR/candidate_registry.json"
-promptgen_require_file "$PROMPTGEN_SYSTEM_PROMPT"
-promptgen_train_launch
+top1_require_file "$TOP1_TRAIN_DATA"
+top1_require_file "$TOP1_CANDIDATE_REGISTRY"
+top1_require_file "$TOP1_SYSTEM_PROMPT"
+"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/00_validate.sh"
+top1_train_launch
+
+VALIDATION_ARGS=()
+if [[ -n "$TOP1_VALIDATION_DATA" ]]; then
+  top1_require_file "$TOP1_VALIDATION_DATA"
+  VALIDATION_ARGS=(--retrieval-validation "$TOP1_VALIDATION_DATA")
+fi
 
 PRECISION_ARGS=()
 case "$ROUTER_PRECISION" in
@@ -18,7 +24,7 @@ esac
 
 DEEPSPEED_ARGS=()
 if [[ -n "$ROUTER_DEEPSPEED_CONFIG" && "$ROUTER_DEEPSPEED_CONFIG" != "none" ]]; then
-  promptgen_require_file "$ROUTER_DEEPSPEED_CONFIG"
+  top1_require_file "$ROUTER_DEEPSPEED_CONFIG"
   DEEPSPEED_ARGS=(--deepspeed "$ROUTER_DEEPSPEED_CONFIG")
 fi
 
@@ -60,16 +66,16 @@ if [[ -n "$ROUTER_EXTRA_ARGS" ]]; then
   EXTRA_ARGS=($ROUTER_EXTRA_ARGS)
 fi
 
-promptgen_step "01" "train multi-turn candidate-name Top1 router"
-"${PROMPTGEN_LAUNCH[@]}" scripts/train_router.py \
+top1_step "01" "train multi-turn candidate-name Top1 router"
+"${TOP1_LAUNCH[@]}" scripts/train_router.py \
   --routing-mode candidate_name_top1 \
   --model-name-or-path "$ROUTER_MODEL" \
-  --candidate-registry "$PROMPTGEN_DATA_DIR/candidate_registry.json" \
-  --retrieval-system-prompt-file "$PROMPTGEN_SYSTEM_PROMPT" \
-  --output-dir "$PROMPTGEN_RUN_DIR/router" \
+  --candidate-registry "$TOP1_CANDIDATE_REGISTRY" \
+  --retrieval-system-prompt-file "$TOP1_SYSTEM_PROMPT" \
+  --output-dir "$TOP1_RUN_DIR/router" \
   --stage retrieval \
-  --retrieval-train "$PROMPTGEN_DATA_DIR/train.jsonl" \
-  --retrieval-validation "$PROMPTGEN_DATA_DIR/validation.jsonl" \
+  --retrieval-train "$TOP1_TRAIN_DATA" \
+  "${VALIDATION_ARGS[@]}" \
   --retrieval-epochs "$ROUTER_EPOCHS" \
   --retrieval-learning-rate "$LEARNING_RATE" \
   --max-length "$ROUTER_MAX_LENGTH" \

@@ -25,8 +25,8 @@ class CharacterTokenizer:
         return [100 + ord(character) for character in text]
 
 
-def test_promptgen_registry_has_two_real_and_five_virtual_candidates() -> None:
-    routes = load_candidate_registry("configs/promptgen_candidates.json")
+def test_top1_registry_has_two_real_and_five_virtual_candidates() -> None:
+    routes = load_candidate_registry("configs/top1_candidates.json")
 
     assert [route.name for route in routes] == [
         "StockAdvice",
