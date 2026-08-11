@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "routing_mode": "candidate_name_top1",
+  "source": "xiaoyi_intent_v1.jsonl",
+  "source_sha256": "8b46dccc67bdbdbc9dd4e3ab975560290852e4f397c34b6914a9d82bd2540584",
+  "candidate_registry": "candidate_registry.json",
+  "candidate_registry_sha256": "ad0d3637d61b6583024036bad13f6e53ba5b358ebcf276fb23f693606610783b",
+  "candidate_names": [
+    "StockAdvice",
+    "StockOther",
+    "StockQuery",
+    "ProductOther",
+    "Ecommerce",
+    "ChitChat",
+    "NoAvailable"
+  ],
+  "virtual_candidate_names": [
+    "StockAdvice",
+    "StockOther",
+    "ProductOther",
+    "ChitChat",
+    "NoAvailable"
+  ],
+  "rows": 5000,
+  "candidate_counts": {
+    "ChitChat": 156,
+    "Ecommerce": 1200,
+    "NoAvailable": 546,
+    "ProductOther": 1014,
+    "StockAdvice": 260,
+    "StockOther": 624,
+    "StockQuery": 1200
+  },
+  "artifacts": {
+    "train": {
+      "path": "train.jsonl",
+      "rows": 3934,
+      "sha256": "62dd01f950099b9cebd62718d4680e8fba0d0a68e3229a0d4884ba3b6d84c736",
+      "candidate_counts": {
+        "ChitChat": 104,
+        "Ecommerce": 953,
+        "NoAvailable": 442,
+        "ProductOther": 806,
+        "StockAdvice": 208,
+        "StockOther": 468,
+        "StockQuery": 953
+      },
+      "multi_turn_rows": 1596
+    },
+    "validation": {
+      "path": "validation.jsonl",
+      "rows": 533,
+      "sha256": "e6b0e30c260af39fb36c9ecf1c08fe700d99653760a234d81150b4631b33800f",
+      "candidate_counts": {
+        "ChitChat": 26,
+        "Ecommerce": 141,
+        "NoAvailable": 52,
+        "ProductOther": 104,
+        "StockAdvice": 26,
+        "StockOther": 78,
+        "StockQuery": 106
+      },
+      "multi_turn_rows": 244
+    },
+    "test": {
+      "path": "test.jsonl",
+      "rows": 533,
+      "sha256": "38c1e2fc202a58cef54524dcd185b3f3015c375a08f1d4ad0f0c3e558caaaccf",
+      "candidate_counts": {
+        "ChitChat": 26,
+        "Ecommerce": 106,
+        "NoAvailable": 52,
+        "ProductOther": 104,
+        "StockAdvice": 26,
+        "StockOther": 78,
+        "StockQuery": 141
+      },
+      "multi_turn_rows": 246
+    }
+  },
+  "source_label_mapping": {
+    "stock_market_information": "StockQuery",
+    "ecommerce_product_recommendation": "Ecommerce",
+    "no_route_stock_advice": "StockAdvice",
+    "no_route_stock_research": "StockOther",
+    "no_route_stock_other": "StockOther",
+    "no_route_other_finance": "StockOther",
+    "no_route_product_information": "ProductOther",
+    "no_route_product_other": "ProductOther",
+    "no_route_non_retail": "ProductOther",
+    "no_route_multi_product": "ProductOther",
+    "no_route_chitchat": "ChitChat",
+    "no_route_no_request": "NoAvailable",
+    "no_route_no_available": "NoAvailable",
+    "no_route_product_context": "ProductOther",
+    "no_route_product_excluded": "ProductOther"
+  }
+}
