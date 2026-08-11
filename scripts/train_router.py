@@ -8,6 +8,7 @@ data and metric tests remain runnable without a GPU training environment.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import importlib.metadata
 import inspect
 import json
@@ -16,6 +17,14 @@ from pathlib import Path
 import sys
 from typing import Any, Sequence
 
+from llmgen.direct_router import (
+    DIRECT_ROUTING_MODE,
+    candidate_registry_payload,
+    candidate_token_sequences,
+    encode_candidate_name_example,
+    load_candidate_registry,
+    target_candidate_name,
+)
 from llmgen.router import (
     RouterDataError,
     code_token_id_map,
@@ -36,13 +45,27 @@ RETRIEVAL_SYSTEM_PROMPT = (
     "Select every Agent Skill needed for the user request in execution order. "
     "Output one hierarchical skill code per line, with no other text."
 )
+DIRECT_RETRIEVAL_SYSTEM_PROMPT = (
+    "Select exactly one candidate name for the user's current intent. "
+    "Output the candidate name only, with no explanation or punctuation."
+)
+HIERARCHICAL_ROUTING_MODE = "hierarchical_code"
 SUPPORTED_DEEPSPEED_VERSION = "0.16.4"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the generative skill router.")
     parser.add_argument("--model-name-or-path", required=True)
-    parser.add_argument("--virtual-tokens", required=True)
+    parser.add_argument(
+        "--routing-mode",
+        choices=(HIERARCHICAL_ROUTING_MODE, DIRECT_ROUTING_MODE),
+        default=HIERARCHICAL_ROUTING_MODE,
+    )
+    parser.add_argument("--virtual-tokens")
+    parser.add_argument(
+        "--candidate-registry",
+        help="Direct-mode JSON registry containing every legal generated name.",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--phase-output-subdir",
@@ -91,10 +114,14 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
     )
-    parser.add_argument("--num-levels", type=int, required=True)
+    parser.add_argument("--num-levels", type=int)
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--memorization-system-prompt", default=MEMORIZATION_SYSTEM_PROMPT)
     parser.add_argument("--retrieval-system-prompt", default=RETRIEVAL_SYSTEM_PROMPT)
+    parser.add_argument(
+        "--retrieval-system-prompt-file",
+        help="UTF-8 prompt file; overrides --retrieval-system-prompt.",
+    )
 
     parser.add_argument("--per-device-train-batch-size", type=int, default=2)
     parser.add_argument("--per-device-eval-batch-size", type=int, default=4)
@@ -217,7 +244,10 @@ def _module_name_for(model: Any, target: Any) -> str | None:
     return None
 
 
-def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ...]):
+def _load_training_stack(
+    args: argparse.Namespace,
+    virtual_tokens: tuple[str, ...] = (),
+):
     try:
         import torch
         import transformers
@@ -243,14 +273,16 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
         raise RouterDataError("base tokenizer must define an EOS token")
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    existing_special = list(getattr(tokenizer, "additional_special_tokens", ()))
-    tokenizer.add_special_tokens(
-        {
-            "additional_special_tokens": existing_special
-            + [token for token in virtual_tokens if token not in existing_special]
-        }
-    )
-    token_ids = code_token_id_map(tokenizer, virtual_tokens)
+    token_ids: dict[str, int] = {}
+    if virtual_tokens:
+        existing_special = list(getattr(tokenizer, "additional_special_tokens", ()))
+        tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": existing_special
+                + [token for token in virtual_tokens if token not in existing_special]
+            }
+        )
+        token_ids = code_token_id_map(tokenizer, virtual_tokens)
 
     model_kwargs: dict[str, Any] = {
         "trust_remote_code": args.trust_remote_code,
@@ -263,7 +295,8 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
         args.model_name_or_path,
         **model_kwargs,
     )
-    model.resize_token_embeddings(len(tokenizer))
+    if virtual_tokens:
+        model.resize_token_embeddings(len(tokenizer))
     if args.gradient_checkpointing:
         model.config.use_cache = False
 
@@ -284,16 +317,23 @@ def _load_training_stack(args: argparse.Namespace, virtual_tokens: tuple[str, ..
             raise SystemExit("--lora requires the peft package.") from exc
 
         if args.lora_modules_to_save == "auto":
-            modules_to_save = []
-            for target in (model.get_input_embeddings(), model.get_output_embeddings()):
-                name = _module_name_for(model, target)
-                if name and name not in modules_to_save:
-                    modules_to_save.append(name)
+            # Hierarchical routing adds code tokens, so LoRA must preserve the
+            # resized embeddings. Direct-name routing uses the untouched base
+            # vocabulary and therefore needs only the LoRA delta.
+            modules_to_save = [] if virtual_tokens else None
+            if virtual_tokens:
+                for target in (
+                    model.get_input_embeddings(),
+                    model.get_output_embeddings(),
+                ):
+                    name = _module_name_for(model, target)
+                    if name and name not in modules_to_save:
+                        modules_to_save.append(name)
         elif args.lora_modules_to_save.strip().casefold() == "none":
             modules_to_save = None
         else:
             modules_to_save = _csv(args.lora_modules_to_save)
-        if modules_to_save == []:
+        if virtual_tokens and modules_to_save == []:
             raise RouterDataError(
                 "LoRA must checkpoint the resized input/output embeddings; "
                 "set --lora-modules-to-save explicitly for this architecture, "
@@ -335,7 +375,9 @@ def _dataset_class(torch: Any):
             tokenizer: Any,
             token_ids: dict[str, int],
             *,
-            num_levels: int,
+            routing_mode: str,
+            candidate_names: tuple[str, ...],
+            num_levels: int | None,
             max_length: int,
             system_prompt: str,
             phase_system_prompts: dict[str, str] | None = None,
@@ -343,6 +385,13 @@ def _dataset_class(torch: Any):
             self.rows = rows
             self.tokenizer = tokenizer
             self.token_ids = token_ids
+            self.routing_mode = routing_mode
+            self.candidate_names = candidate_names
+            self.candidate_name_tokens = (
+                candidate_token_sequences(tokenizer, candidate_names)
+                if routing_mode == DIRECT_ROUTING_MODE
+                else None
+            )
             self.num_levels = num_levels
             self.max_length = max_length
             self.system_prompt = system_prompt
@@ -356,6 +405,17 @@ def _dataset_class(torch: Any):
             row_system_prompt = self.phase_system_prompts.get(
                 str(row.get("phase", "")), self.system_prompt
             )
+            if self.routing_mode == DIRECT_ROUTING_MODE:
+                return encode_candidate_name_example(
+                    self.tokenizer,
+                    row,
+                    candidate_names=self.candidate_names,
+                    candidate_name_tokens=self.candidate_name_tokens,
+                    max_length=self.max_length,
+                    system_prompt=row_system_prompt,
+                )
+            if self.num_levels is None:
+                raise RouterDataError("hierarchical routing requires num_levels")
             return encode_target_only_example(
                 self.tokenizer,
                 row,
@@ -463,6 +523,7 @@ def _run_phase(
     tokenizer: Any,
     model: Any,
     token_ids: dict[str, int],
+    candidate_names: tuple[str, ...] = (),
     training_args: Any | None = None,
     replay_inputs: Sequence[tuple[str, str | None, float]] = (),
     replay_system_prompt: str | None = None,
@@ -514,11 +575,44 @@ def _run_phase(
         mixture.append(f"total={len(train_rows)}")
         print(f"[{phase}] training mixture: " + ", ".join(mixture), flush=True)
     validation_rows = read_jsonl(validation_path) if validation_path else []
+    if args.routing_mode == DIRECT_ROUTING_MODE:
+        legal_names = set(candidate_names)
+        train_name_counts = Counter(
+            target_candidate_name(row) for row in train_rows
+        )
+        unknown_names = set(train_name_counts).difference(legal_names)
+        if unknown_names:
+            raise RouterDataError(
+                "direct training data contains candidates outside the registry: "
+                + ", ".join(sorted(unknown_names))
+            )
+        missing_names = legal_names.difference(train_name_counts)
+        if missing_names:
+            raise RouterDataError(
+                "direct training data has no supervision for candidates: "
+                + ", ".join(sorted(missing_names))
+            )
+        for row in validation_rows:
+            name = target_candidate_name(row)
+            if name not in legal_names:
+                raise RouterDataError(
+                    f"direct validation target {name!r} is outside the registry"
+                )
+        if args.local_rank in (-1, 0):
+            print(
+                "[retrieval] candidate supervision: "
+                + ", ".join(
+                    f"{name}={train_name_counts[name]}" for name in candidate_names
+                ),
+                flush=True,
+            )
     Dataset = _dataset_class(torch)
     train_dataset = Dataset(
         train_rows,
         tokenizer,
         token_ids,
+        routing_mode=args.routing_mode,
+        candidate_names=candidate_names,
         num_levels=args.num_levels,
         max_length=args.max_length,
         system_prompt=system_prompt,
@@ -533,6 +627,8 @@ def _run_phase(
             validation_rows,
             tokenizer,
             token_ids,
+            routing_mode=args.routing_mode,
+            candidate_names=candidate_names,
             num_levels=args.num_levels,
             max_length=args.max_length,
             system_prompt=system_prompt,
@@ -602,7 +698,8 @@ def _run_phase(
                 stage1_checkpoint_sha256 = index_source.get("checkpoint_sha256")
                 index_manifest_sha256 = index_source.get("sha256")
         all_rows = [*train_rows, *validation_rows]
-        max_target_paths = max(
+        is_direct = args.routing_mode == DIRECT_ROUTING_MODE
+        max_target_paths = 1 if is_direct else max(
             (
                 len(row["target_paths"])
                 if isinstance(row.get("target_paths"), list)
@@ -611,12 +708,19 @@ def _run_phase(
             for row in all_rows
         )
         state = {
-            "schema_version": 2,
+            "schema_version": 3,
+            "routing_mode": args.routing_mode,
             "phase": phase,
             "curriculum_stage": phase_output_name,
             "num_levels": args.num_levels,
-            "virtual_tokens": str(Path(args.virtual_tokens).resolve()),
-            "virtual_tokens_sha256": sha256_file(args.virtual_tokens),
+            "virtual_tokens": (
+                str(Path(args.virtual_tokens).resolve())
+                if args.virtual_tokens
+                else None
+            ),
+            "virtual_tokens_sha256": (
+                sha256_file(args.virtual_tokens) if args.virtual_tokens else None
+            ),
             "train_data": str(Path(train_path).resolve()),
             "train_data_sha256": sha256_file(train_path),
             "replay_data": replay_sources.get("memorization", {}).get("data"),
@@ -672,12 +776,18 @@ def _run_phase(
             "max_length": args.max_length,
             "generation_contract": {
                 "mode": (
-                    "autoregressive_multi_path"
+                    DIRECT_ROUTING_MODE
+                    if is_direct
+                    else "autoregressive_multi_path"
                     if phase == "retrieval"
                     else "single_path"
                 ),
-                "path_separator": "\n" if phase == "retrieval" else None,
+                "path_separator": (
+                    None if is_direct else "\n" if phase == "retrieval" else None
+                ),
                 "max_target_paths": max_target_paths,
+                "candidate_names": list(candidate_names) if is_direct else None,
+                "target_suffix": "eos" if is_direct else None,
             },
             "examples": {
                 "train": len(train_rows),
@@ -703,6 +813,29 @@ def _run_phase(
                 supervision_phase=phase,
                 supervision_rows=train_rows,
             )
+        if is_direct:
+            routes = load_candidate_registry(args.candidate_registry)
+            bundled_registry = phase_dir / "candidate_registry.json"
+            bundled_registry.write_text(
+                json.dumps(
+                    candidate_registry_payload(routes),
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            bundled_prompt = phase_dir / "router_system_prompt.md"
+            bundled_prompt.write_text(system_prompt.rstrip() + "\n", encoding="utf-8")
+            state["candidate_registry"] = {
+                "path": bundled_registry.name,
+                "sha256": sha256_file(bundled_registry),
+                "count": len(routes),
+            }
+            state["system_prompt_artifact"] = {
+                "path": bundled_prompt.name,
+                "sha256": sha256_file(bundled_prompt),
+            }
         with (phase_dir / "router_manifest.json").open(
             "w", encoding="utf-8"
         ) as handle:
@@ -724,6 +857,18 @@ def main() -> None:
         os.environ["PATH"] = os.pathsep.join((python_bin, *path_entries))
 
     args = parse_args()
+    if args.retrieval_system_prompt_file:
+        prompt_path = Path(args.retrieval_system_prompt_file).expanduser()
+        if not prompt_path.is_file():
+            raise RouterDataError(f"retrieval system prompt does not exist: {prompt_path}")
+        args.retrieval_system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+        if not args.retrieval_system_prompt:
+            raise RouterDataError("retrieval system prompt file is empty")
+    elif (
+        args.routing_mode == DIRECT_ROUTING_MODE
+        and args.retrieval_system_prompt == RETRIEVAL_SYSTEM_PROMPT
+    ):
+        args.retrieval_system_prompt = DIRECT_RETRIEVAL_SYSTEM_PROMPT
     environment_local_rank = os.environ.get("LOCAL_RANK")
     if args.local_rank < 0 and environment_local_rank is not None:
         try:
@@ -741,8 +886,46 @@ def main() -> None:
         raise RouterDataError(
             "--skill-catalog, --skill-codes, and --skill-registry must be set together"
         )
-    if args.num_levels < 1 or args.max_length <= args.num_levels + 1:
-        raise RouterDataError("invalid num_levels/max_length combination")
+    candidate_names: tuple[str, ...] = ()
+    if args.routing_mode == HIERARCHICAL_ROUTING_MODE:
+        if not args.virtual_tokens or args.num_levels is None:
+            raise RouterDataError(
+                "hierarchical routing requires --virtual-tokens and --num-levels"
+            )
+        if args.candidate_registry:
+            raise RouterDataError(
+                "--candidate-registry is only valid for candidate_name_top1 routing"
+            )
+        if args.num_levels < 1 or args.max_length <= args.num_levels + 1:
+            raise RouterDataError("invalid num_levels/max_length combination")
+    else:
+        if args.stage != "retrieval":
+            raise RouterDataError(
+                "candidate_name_top1 routing has one retrieval phase; use --stage retrieval"
+            )
+        if not args.candidate_registry:
+            raise RouterDataError(
+                "candidate_name_top1 routing requires --candidate-registry"
+            )
+        if args.virtual_tokens or args.num_levels is not None or any(decoder_inputs):
+            raise RouterDataError(
+                "direct candidate-name routing does not use virtual tokens, num_levels, "
+                "skill codes, or a Stage-1 registry"
+            )
+        routes = load_candidate_registry(args.candidate_registry)
+        candidate_names = tuple(route.name for route in routes)
+        missing_prompt_names = [
+            name
+            for name in candidate_names
+            if name not in args.retrieval_system_prompt
+        ]
+        if missing_prompt_names:
+            raise RouterDataError(
+                "direct router system prompt must list every candidate name; missing: "
+                + ", ".join(missing_prompt_names)
+            )
+        if args.max_length < 4:
+            raise RouterDataError("max_length is too small for direct routing")
     if args.eval_steps < 1 or args.save_steps < 1:
         raise RouterDataError("save_steps and eval_steps must be positive")
     if args.save_steps % args.eval_steps:
@@ -773,6 +956,12 @@ def main() -> None:
             )
     if sum(fraction for _, _, fraction in replay_arguments) >= 1.0:
         raise RouterDataError("total retrieval replay fraction must be less than 1")
+    if args.routing_mode == DIRECT_ROUTING_MODE and any(
+        path or fraction for _, path, fraction in replay_arguments
+    ):
+        raise RouterDataError(
+            "candidate_name_top1 does not accept hierarchical replay datasets"
+        )
     if args.adapter_name_or_path and args.lora:
         raise RouterDataError("use either --adapter-name-or-path or --lora, not both")
     if args.deepspeed and args.stage == "both":
@@ -829,7 +1018,11 @@ def main() -> None:
                 "deepspeed installation and JSON config"
             ) from exc
 
-    virtual_tokens = load_virtual_tokens(args.virtual_tokens)
+    virtual_tokens = (
+        load_virtual_tokens(args.virtual_tokens)
+        if args.routing_mode == HIERARCHICAL_ROUTING_MODE
+        else ()
+    )
     torch, transformers, tokenizer, model, token_ids = _load_training_stack(
         args, virtual_tokens
     )
@@ -853,6 +1046,7 @@ def main() -> None:
             tokenizer=tokenizer,
             model=model,
             token_ids=token_ids,
+            candidate_names=candidate_names,
             training_args=deepspeed_training_args,
             replay_inputs=(),
             replay_system_prompt=None,
@@ -874,6 +1068,7 @@ def main() -> None:
             tokenizer=tokenizer,
             model=model,
             token_ids=token_ids,
+            candidate_names=candidate_names,
             training_args=deepspeed_training_args,
             replay_inputs=replay_arguments,
             replay_system_prompt=args.memorization_system_prompt,
