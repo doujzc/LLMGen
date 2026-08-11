@@ -15,6 +15,8 @@ must be `user`. Training requires `target_candidate_name`; inference does not.
 The target must exist in `configs/top1_candidates.json`. Optional metadata fields,
 including `id`, `query_id`, and `scenario_family`, are ignored by validation and
 training. Splits may contain repeated conversations or shared scenario families.
+The training split does not need to contain supervision for every registered
+candidate.
 
 Validate the files before loading a model:
 

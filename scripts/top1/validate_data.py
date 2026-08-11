@@ -34,7 +34,7 @@ def validate_data_files(
     candidate_registry: str | Path,
     split_paths: dict[str, str | Path | None],
 ) -> dict[str, Any]:
-    """Validate schemas, targets, and candidate coverage."""
+    """Validate schemas and targets without enforcing class coverage."""
 
     routes = load_candidate_registry(candidate_registry)
     routes_by_name = {route.name: route for route in routes}
@@ -91,12 +91,6 @@ def validate_data_files(
             },
         }
 
-    train_counts = report["splits"].get("train", {}).get("candidate_counts", {})
-    missing = [name for name in routes_by_name if not train_counts.get(name)]
-    if missing:
-        raise RouterDataError(
-            "training JSONL has no supervision for candidates: " + ", ".join(missing)
-        )
     return report
 
 

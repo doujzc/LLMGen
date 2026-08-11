@@ -5,9 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-import pytest
-
-from llmgen.router import RouterDataError, write_jsonl
+from llmgen.router import write_jsonl
 from scripts.top1.validate_data import validate_data_files
 
 
@@ -101,15 +99,16 @@ def test_validator_allows_shared_conversations_and_families_across_splits(
     assert report["splits"]["validation"]["rows"] == 1
 
 
-def test_validator_requires_training_coverage_for_every_candidate(tmp_path) -> None:
+def test_validator_allows_partial_training_candidate_coverage(tmp_path) -> None:
     train = tmp_path / "train.jsonl"
     write_jsonl(train, [_row(0, "StockQuery")])
 
-    with pytest.raises(RouterDataError, match="no supervision"):
-        validate_data_files(
-            candidate_registry="configs/top1_candidates.json",
-            split_paths={"train": train},
-        )
+    report = validate_data_files(
+        candidate_registry="configs/top1_candidates.json",
+        split_paths={"train": train},
+    )
+
+    assert report["splits"]["train"]["candidate_counts"] == {"StockQuery": 1}
 
 
 def test_top1_validation_shell_reads_user_data_paths_directly(tmp_path) -> None:
