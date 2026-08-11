@@ -8,38 +8,42 @@ LLMGen 将固定候选集中的 Agent Skills 编码为短层级 token，并微�
 <SK_L1_3><SK_L2_4>
 ```
 
-## PromptGen：多轮 Top1 直接路由
+## 多轮 Top1 直接路由
 
-`top1_intension_retrieval` 分支额外支持不经过 RQ-VAE/codebook 的直接模式。
+项目支持不经过 RQ-VAE/codebook 的直接候选名模式。
 输入保留 `user`、`assistant`、`tool` 多轮记录，训练目标仅为
 `候选英文名 + EOS`，推理始终返回一个候选。输出空间为两个真实路由
 `StockQuery`、`Ecommerce` 和五个虚拟路由 `StockAdvice`、`StockOther`、
 `ProductOther`、`ChitChat`、`NoAvailable`。
 
-仓库已包含转换后的 5,000 条数据。设置模型路径即可进行 4 卡 ZeRO-3 全参训练和评测：
+训练直接读取用户提供的 JSONL，不依赖任何上游数据仓库或转换步骤。设置数据和模型路径
+即可进行 4 卡 ZeRO-3 全参训练：
 
 ```bash
 export ROUTER_MODEL=/models/Qwen3-1.7B
-bash scripts/promptgen/full.sh
+export TOP1_TRAIN_DATA=/data/my_router/train.jsonl
+export TOP1_VALIDATION_DATA=/data/my_router/validation.jsonl
+bash scripts/top1/01_train.sh
 ```
 
-分阶段执行：
+有测试集时执行评测，或者直接运行训练加评测：
 
 ```bash
-bash scripts/promptgen/01_train.sh
-bash scripts/promptgen/02_evaluate.sh
+export TOP1_TEST_DATA=/data/my_router/test.jsonl
+bash scripts/top1/02_evaluate.sh
+bash scripts/top1/full.sh
 ```
 
 单条和多轮推理分别使用：
 
 ```bash
 python scripts/infer_candidate_router.py \
-  --model-name-or-path runs/promptgen-qwen3-1.7b-top1/router/retrieval \
+  --model-name-or-path runs/qwen3-1.7b-top1/router/retrieval \
   --query "看看贵州茅台今天的走势" \
   --output-jsonl /tmp/prediction.jsonl
 
 python scripts/infer_candidate_router.py \
-  --model-name-or-path runs/promptgen-qwen3-1.7b-top1/router/retrieval \
+  --model-name-or-path runs/qwen3-1.7b-top1/router/retrieval \
   --messages-json /path/to/conversation.json \
   --output-jsonl /tmp/prediction.jsonl
 ```

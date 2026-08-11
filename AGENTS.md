@@ -7,7 +7,7 @@ Core Python code lives in `src/llmgen/`; adapted ToolWeaver code is isolated in
 dataset flows in `scripts/skillret/`, `scripts/clawhub_data/`, and
 `scripts/incremental/`. Runtime settings belong in `configs/`. The API and browser
 UI are in `web_server/`; documentation is in `docs/`. Tests and small fixtures live
-in `tests/` and `tests/fixtures/`. Treat `data/`, `data_light/`, and `runs/` as
+in `tests/` and `tests/fixtures/`. Treat `data/`, `data_light/`, `data_top1/`, and `runs/` as
 datasets or generated artifacts, not application modules.
 
 ## Development Threads & Commit Coordination

@@ -1652,9 +1652,9 @@ registry。增量更新用于缩短日常变更时延，周期性重训负责消
 - 直接指定候选名
 - 某个 skill 描述比较宽泛 / 抽象，功能不明确
 
-## 6. PromptGen 多轮 Top1 直接候选名模式
+## 6. 多轮 Top1 直接候选名模式
 
-对于候选极少、输出只需 Top1 的 PromptGen 场景，层级 code 的索引收益小于其
+对于候选极少、输出只需 Top1 的场景，层级 code 的索引收益小于其
 构建成本。因此当前实现提供独立的 `candidate_name_top1` 模式，完整跳过
 embedding、RQ-VAE、Sinkhorn、code 分配和虚拟 token 扩词表。
 
