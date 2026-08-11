@@ -81,20 +81,24 @@ def test_validator_ignores_missing_invalid_and_duplicate_ids(tmp_path) -> None:
     assert report["splits"]["train"]["rows"] == len(CANDIDATE_NAMES)
 
 
-def test_validator_rejects_conversation_leakage_across_splits(tmp_path) -> None:
+def test_validator_allows_shared_conversations_and_families_across_splits(
+    tmp_path,
+) -> None:
     train = tmp_path / "train.jsonl"
     validation = tmp_path / "validation.jsonl"
     train_rows = [_row(index, name) for index, name in enumerate(CANDIDATE_NAMES)]
+    train_rows[0]["scenario_family"] = "shared-family"
     leaked = dict(train_rows[0])
     leaked["id"] = "different-id"
     write_jsonl(train, train_rows)
     write_jsonl(validation, [leaked])
 
-    with pytest.raises(RouterDataError, match="also occurs in train"):
-        validate_data_files(
-            candidate_registry="configs/top1_candidates.json",
-            split_paths={"train": train, "validation": validation},
-        )
+    report = validate_data_files(
+        candidate_registry="configs/top1_candidates.json",
+        split_paths={"train": train, "validation": validation},
+    )
+
+    assert report["splits"]["validation"]["rows"] == 1
 
 
 def test_validator_requires_training_coverage_for_every_candidate(tmp_path) -> None:

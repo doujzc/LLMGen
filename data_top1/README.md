@@ -13,7 +13,8 @@ Each line must contain structured messages and one direct candidate-name target:
 `messages` supports `user`, `assistant`, and `tool`; the final non-system message
 must be `user`. Training requires `target_candidate_name`; inference does not.
 The target must exist in `configs/top1_candidates.json`. Optional metadata fields,
-including `id` and `query_id`, are ignored by validation and training.
+including `id`, `query_id`, and `scenario_family`, are ignored by validation and
+training. Splits may contain repeated conversations or shared scenario families.
 
 Validate the files before loading a model:
 
