@@ -200,3 +200,58 @@ def test_training_accepts_prompt_without_candidate_names(tmp_path, monkeypatch) 
 
     with pytest.raises(RuntimeError, match="reached training stack"):
         train_router.main()
+
+
+def test_direct_training_phase_allows_partial_candidate_coverage(
+    tmp_path, monkeypatch
+) -> None:
+    train_path = tmp_path / "train.jsonl"
+    train_path.write_text(
+        json.dumps(
+            {
+                "messages": [{"role": "user", "content": "查一下股票价格"}],
+                "target_candidate_name": "StockQuery",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class StopAfterValidation(Exception):
+        pass
+
+    def stop_before_dataset(*args, **kwargs):
+        del args, kwargs
+        raise StopAfterValidation
+
+    args = type(
+        "Args",
+        (),
+        {
+            "seed": 42,
+            "local_rank": -1,
+            "routing_mode": "candidate_name_top1",
+            "num_levels": None,
+            "max_length": 128,
+        },
+    )()
+    monkeypatch.setattr(train_router, "_dataset_class", stop_before_dataset)
+
+    with pytest.raises(StopAfterValidation):
+        train_router._run_phase(
+            phase="retrieval",
+            train_path=str(train_path),
+            validation_path=None,
+            system_prompt="route",
+            epochs=1.0,
+            learning_rate=1e-5,
+            resume_from_checkpoint=None,
+            args=args,
+            torch=object(),
+            transformers=object(),
+            tokenizer=object(),
+            model=object(),
+            token_ids={},
+            candidate_names=("StockQuery", "Ecommerce"),
+        )

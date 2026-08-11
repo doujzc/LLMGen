@@ -586,12 +586,6 @@ def _run_phase(
                 "direct training data contains candidates outside the registry: "
                 + ", ".join(sorted(unknown_names))
             )
-        missing_names = legal_names.difference(train_name_counts)
-        if missing_names:
-            raise RouterDataError(
-                "direct training data has no supervision for candidates: "
-                + ", ".join(sorted(missing_names))
-            )
         for row in validation_rows:
             name = target_candidate_name(row)
             if name not in legal_names:
