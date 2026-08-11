@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
+from scripts import train_router
 from llmgen.direct_router import (
     CandidateNameTokenTrie,
     candidate_token_sequences,
@@ -165,3 +167,36 @@ def test_registry_rejects_virtual_candidate_with_backend_intent(tmp_path) -> Non
 
     with pytest.raises(RouterDataError, match="exactly when non-virtual"):
         load_candidate_registry(path)
+
+
+def test_training_accepts_prompt_without_candidate_names(tmp_path, monkeypatch) -> None:
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("只选择最匹配的候选名称。", encoding="utf-8")
+
+    def stop_before_model_loading(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("reached training stack")
+
+    monkeypatch.setattr(train_router, "_load_training_stack", stop_before_model_loading)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_router.py",
+            "--model-name-or-path",
+            "unused-model",
+            "--routing-mode",
+            "candidate_name_top1",
+            "--candidate-registry",
+            "configs/top1_candidates.json",
+            "--retrieval-system-prompt-file",
+            str(prompt_path),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--stage",
+            "retrieval",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="reached training stack"):
+        train_router.main()

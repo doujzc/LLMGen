@@ -914,16 +914,6 @@ def main() -> None:
             )
         routes = load_candidate_registry(args.candidate_registry)
         candidate_names = tuple(route.name for route in routes)
-        missing_prompt_names = [
-            name
-            for name in candidate_names
-            if name not in args.retrieval_system_prompt
-        ]
-        if missing_prompt_names:
-            raise RouterDataError(
-                "direct router system prompt must list every candidate name; missing: "
-                + ", ".join(missing_prompt_names)
-            )
         if args.max_length < 4:
             raise RouterDataError("max_length is too small for direct routing")
     if args.eval_steps < 1 or args.save_steps < 1:
