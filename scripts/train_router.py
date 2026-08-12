@@ -124,7 +124,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--per-device-train-batch-size", type=int, default=2)
-    parser.add_argument("--per-device-eval-batch-size", type=int, default=4)
+    parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
+    parser.add_argument("--eval-accumulation-steps", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=8)
     parser.add_argument("--memorization-epochs", type=float, default=1.0)
     parser.add_argument("--retrieval-epochs", type=float, default=3.0)
@@ -471,6 +472,7 @@ def _build_training_arguments(
         "num_train_epochs": epochs,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "eval_accumulation_steps": args.eval_accumulation_steps,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": learning_rate,
         "weight_decay": args.weight_decay,
@@ -491,6 +493,10 @@ def _build_training_arguments(
         "deepspeed": args.deepspeed,
         "local_rank": args.local_rank,
         "remove_unused_columns": False,
+        # Router checkpoint selection uses eval_loss only. Explicit loss-only
+        # evaluation prevents full-vocabulary logits from being retained for
+        # every validation batch by Trainer implementations and future metrics.
+        "prediction_loss_only": True,
         "report_to": [],
         "seed": args.seed,
         "data_seed": args.seed,
@@ -910,8 +916,15 @@ def main() -> None:
         candidate_names = tuple(route.name for route in routes)
         if args.max_length < 4:
             raise RouterDataError("max_length is too small for direct routing")
-    if args.eval_steps < 1 or args.save_steps < 1:
-        raise RouterDataError("save_steps and eval_steps must be positive")
+    if min(
+        args.eval_steps,
+        args.save_steps,
+        args.per_device_train_batch_size,
+        args.per_device_eval_batch_size,
+        args.eval_accumulation_steps,
+        args.gradient_accumulation_steps,
+    ) < 1:
+        raise RouterDataError("steps and per-device batch sizes must be positive")
     if args.save_steps % args.eval_steps:
         raise RouterDataError(
             "save_steps must be a multiple of eval_steps when validation is enabled"

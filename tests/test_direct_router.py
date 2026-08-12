@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from argparse import Namespace
 import json
 import sys
 
@@ -255,3 +256,58 @@ def test_direct_training_phase_allows_partial_candidate_coverage(
             token_ids={},
             candidate_names=("StockQuery", "Ecommerce"),
         )
+
+
+def test_training_arguments_use_memory_safe_loss_only_evaluation(tmp_path) -> None:
+    captured = {}
+
+    class TrainingArguments:
+        def __init__(
+            self,
+            output_dir,
+            per_device_eval_batch_size,
+            eval_accumulation_steps,
+            prediction_loss_only,
+            evaluation_strategy,
+        ):
+            captured.update(locals())
+
+    transformers = type(
+        "Transformers", (), {"TrainingArguments": TrainingArguments}
+    )()
+    args = Namespace(
+        output_dir=str(tmp_path),
+        per_device_train_batch_size=4,
+        per_device_eval_batch_size=1,
+        eval_accumulation_steps=1,
+        gradient_accumulation_steps=4,
+        weight_decay=0.01,
+        warmup_ratio=0.05,
+        logging_steps=5,
+        save_steps=25,
+        eval_steps=25,
+        save_total_limit=2,
+        bf16=True,
+        fp16=False,
+        gradient_checkpointing=True,
+        gradient_checkpointing_mode="auto",
+        dataloader_num_workers=4,
+        deepspeed="configs/deepspeed_zero3.json",
+        local_rank=-1,
+        seed=42,
+    )
+
+    train_router._build_training_arguments(
+        phase="retrieval",
+        has_validation=True,
+        epochs=3.0,
+        learning_rate=1e-5,
+        resume_from_checkpoint=None,
+        args=args,
+        transformers=transformers,
+    )
+
+    assert captured["per_device_eval_batch_size"] == 1
+    assert captured["eval_accumulation_steps"] == 1
+    assert captured["prediction_loss_only"] is True
+    assert captured["evaluation_strategy"] == "steps"

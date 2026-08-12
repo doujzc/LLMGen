@@ -26,6 +26,9 @@ export TOP1_VALIDATION_DATA=/data/my_router/validation.jsonl
 bash scripts/top1/01_train.sh
 ```
 
+评估默认使用每卡 batch 1，并仅保留 loss，避免长多轮样本的全词表 logits 在 eval
+开始时造成显存峰值。显存充足时可用 `ROUTER_PER_DEVICE_EVAL_BATCH_SIZE` 调大。
+
 有测试集时执行评测，或者直接运行训练加评测：
 
 ```bash

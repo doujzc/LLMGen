@@ -142,3 +142,24 @@ def test_top1_validation_shell_reads_user_data_paths_directly(tmp_path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert '"rows": 7' in completed.stdout
     assert str(train) in completed.stdout
+
+
+def test_top1_defaults_use_memory_safe_eval_batch() -> None:
+    completed = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "unset ROUTER_PER_DEVICE_EVAL_BATCH_SIZE "
+            "ROUTER_EVAL_ACCUMULATION_STEPS; "
+            "source configs/top1.env; "
+            "printf '%s:%s' \"$ROUTER_PER_DEVICE_EVAL_BATCH_SIZE\" "
+            "\"$ROUTER_EVAL_ACCUMULATION_STEPS\"",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "1:1"

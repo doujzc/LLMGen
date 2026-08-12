@@ -81,6 +81,7 @@ top1_step "01" "train multi-turn candidate-name Top1 router"
   --max-length "$ROUTER_MAX_LENGTH" \
   --per-device-train-batch-size "$ROUTER_PER_DEVICE_TRAIN_BATCH_SIZE" \
   --per-device-eval-batch-size "$ROUTER_PER_DEVICE_EVAL_BATCH_SIZE" \
+  --eval-accumulation-steps "$ROUTER_EVAL_ACCUMULATION_STEPS" \
   --gradient-accumulation-steps "$ROUTER_GRADIENT_ACCUMULATION_STEPS" \
   --weight-decay "$ROUTER_WEIGHT_DECAY" \
   --warmup-ratio "$ROUTER_WARMUP_RATIO" \
