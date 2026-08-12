@@ -152,11 +152,13 @@ def _resolve_artifacts(
 
 
 def _normalize_input_row(row: Mapping[str, Any], row_number: int) -> dict[str, Any]:
-    row_id = row.get("query_id", row.get("id", f"row-{row_number:06d}"))
-    if not isinstance(row_id, str) or not row_id.strip():
-        raise RouterDataError(f"query row {row_number} has an invalid id")
+    row_id = row.get("query_id")
+    if row_id is None:
+        row_id = row.get("id")
+    if row_id is None:
+        row_id = f"row-{row_number:06d}"
     messages = messages_from_row(row)
-    return {**dict(row), "id": row_id.strip(), "messages": list(messages)}
+    return {**dict(row), "id": row_id, "messages": list(messages)}
 
 
 def _load_queries(args: argparse.Namespace) -> list[dict[str, Any]]:
@@ -197,9 +199,6 @@ def _load_queries(args: argparse.Namespace) -> list[dict[str, Any]]:
         _normalize_input_row(row, row_number)
         for row_number, row in enumerate(rows, start=1)
     ]
-    ids = [row["id"] for row in normalized]
-    if len(ids) != len(set(ids)):
-        raise RouterDataError("query JSONL contains duplicate ids")
     return normalized
 
 

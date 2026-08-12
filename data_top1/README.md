@@ -16,7 +16,8 @@ The target must exist in `configs/top1_candidates.json`. Optional metadata field
 including `id`, `query_id`, and `scenario_family`, are ignored by validation and
 training. Splits may contain repeated conversations or shared scenario families.
 The training split does not need to contain supervision for every registered
-candidate.
+candidate. Batch evaluation also treats IDs as opaque metadata: they may be absent,
+repeated, or use any JSON value; missing IDs are generated from the input line number.
 
 Validate the files before loading a model:
 

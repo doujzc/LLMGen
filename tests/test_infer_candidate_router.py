@@ -93,6 +93,39 @@ def test_messages_json_preserves_structured_multiturn_input(tmp_path) -> None:
     ]
 
 
+def test_query_jsonl_does_not_validate_ids(tmp_path) -> None:
+    path = tmp_path / "queries.jsonl"
+    source_rows = [
+        {"query": "missing id"},
+        {"id": 42, "query": "numeric id"},
+        {"id": "duplicate", "query": "first duplicate"},
+        {"query_id": "duplicate", "query": "second duplicate"},
+        {"id": {"opaque": True}, "query": "structured id"},
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in source_rows),
+        encoding="utf-8",
+    )
+
+    rows = _load_queries(
+        Namespace(
+            query=None,
+            query_txt=None,
+            queries=str(path),
+            messages_json=None,
+            query_id="unused",
+        )
+    )
+
+    assert [row["id"] for row in rows] == [
+        "row-000001",
+        42,
+        "duplicate",
+        "duplicate",
+        {"opaque": True},
+    ]
+
+
 def test_top1_generation_returns_name_and_downstream_route() -> None:
     trie = CandidateNameTokenTrie(
         {"StockQuery": (10,), "Ecommerce": (11, 12)},
