@@ -211,6 +211,62 @@ def _dtype(torch: Any, value: str):
     }[value]
 
 
+def _vocabulary_capacity(module: Any) -> int | None:
+    """Return the token dimension of an embedding/projection module."""
+
+    for attribute in ("num_embeddings", "out_features"):
+        value = getattr(module, attribute, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    weight = getattr(module, "weight", None)
+    shape = getattr(weight, "shape", ())
+    if shape and isinstance(shape[0], int) and shape[0] > 0:
+        return int(shape[0])
+    return None
+
+
+def _validate_model_tokenizer_vocabulary(model: Any, tokenizer: Any) -> None:
+    """Ensure every tokenizer ID is representable by the loaded model.
+
+    Model vocabulary capacity may legitimately exceed ``len(tokenizer)``. Qwen3,
+    for example, pads its embedding matrix with unused rows. Compatibility is
+    therefore an ID-boundary check rather than a size-equality check.
+    """
+
+    vocabulary = tokenizer.get_vocab()
+    if not isinstance(vocabulary, Mapping) or not vocabulary:
+        raise RouterDataError("router tokenizer has an empty or invalid vocabulary")
+    token_ids = tuple(vocabulary.values())
+    if any(
+        isinstance(token_id, bool)
+        or not isinstance(token_id, int)
+        or token_id < 0
+        for token_id in token_ids
+    ):
+        raise RouterDataError("router tokenizer contains an invalid token id")
+    max_token_id = max(token_ids)
+
+    input_capacity = _vocabulary_capacity(model.get_input_embeddings())
+    if input_capacity is None:
+        raise RouterDataError("cannot determine model input vocabulary capacity")
+    output_embeddings = model.get_output_embeddings()
+    output_capacity = (
+        _vocabulary_capacity(output_embeddings)
+        if output_embeddings is not None
+        else None
+    )
+    capacities = [("input", input_capacity)]
+    if output_capacity is not None:
+        capacities.append(("output", output_capacity))
+    for name, capacity in capacities:
+        if max_token_id >= capacity:
+            raise RouterDataError(
+                "model/tokenizer vocabulary mismatch: tokenizer max token id "
+                f"{max_token_id} is outside the {name} vocabulary with {capacity} "
+                f"rows (maximum id {capacity - 1})"
+            )
+
+
 def _load_model_and_tokenizer(
     args: argparse.Namespace,
     *,
@@ -257,8 +313,7 @@ def _load_model_and_tokenizer(
         model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path, **model_kwargs
         )
-    if model.get_input_embeddings().num_embeddings != len(tokenizer):
-        raise RouterDataError("model/tokenizer vocabulary mismatch")
+    _validate_model_tokenizer_vocabulary(model, tokenizer)
     model.to(args.device)
     model.eval()
 

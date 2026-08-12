@@ -10,10 +10,12 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 from llmgen.direct_router import CandidateNameTokenTrie, CandidateRoute
+from llmgen.router import RouterDataError
 from scripts.infer_candidate_router import (
     _generate_batch,
     _load_queries,
     _logits_processor_class,
+    _validate_model_tokenizer_vocabulary,
 )
 
 
@@ -58,6 +60,18 @@ class FakeModel:
         assert beam_indices is None
         assert normalize_logits is True
         return torch.tensor([[-0.1, -0.2, -0.3]])
+
+
+class VocabularyModel:
+    def __init__(self, input_size: int, output_size: int) -> None:
+        self.input_embeddings = SimpleNamespace(num_embeddings=input_size)
+        self.output_embeddings = SimpleNamespace(out_features=output_size)
+
+    def get_input_embeddings(self):
+        return self.input_embeddings
+
+    def get_output_embeddings(self):
+        return self.output_embeddings
 
 
 def test_messages_json_preserves_structured_multiturn_input(tmp_path) -> None:
@@ -124,6 +138,29 @@ def test_query_jsonl_does_not_validate_ids(tmp_path) -> None:
         "duplicate",
         {"opaque": True},
     ]
+
+
+def test_vocabulary_validation_allows_qwen_reserved_embedding_rows() -> None:
+    tokenizer = SimpleNamespace(
+        get_vocab=lambda: {"first": 0, "last": 151668}
+    )
+    model = VocabularyModel(input_size=151936, output_size=151936)
+
+    _validate_model_tokenizer_vocabulary(model, tokenizer)
+
+
+@pytest.mark.parametrize(
+    ("input_size", "output_size", "expected"),
+    ((10, 20, "input"), (20, 10, "output")),
+)
+def test_vocabulary_validation_rejects_unrepresentable_token_ids(
+    input_size, output_size, expected
+) -> None:
+    tokenizer = SimpleNamespace(get_vocab=lambda: {"last": 10})
+    model = VocabularyModel(input_size=input_size, output_size=output_size)
+
+    with pytest.raises(RouterDataError, match=f"{expected} vocabulary"):
+        _validate_model_tokenizer_vocabulary(model, tokenizer)
 
 
 def test_top1_generation_returns_name_and_downstream_route() -> None:
