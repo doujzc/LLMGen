@@ -54,6 +54,20 @@ bash scripts/top1/full.sh
 不会改变模型直接生成的虚拟无路由候选。预测文件同时保留原始候选、置信度和是否触发
 阈值，指标文件额外报告路由覆盖率、拒绝率和路由决策准确性。
 
+可用标签文件绘制正、负样本准确率随阈值变化的曲线。标签按预测结果的行序对齐，
+每行是 intent label（JSON 字符串或裸字符串），负样本写 `null`：
+
+```bash
+python scripts/top1/visualize_threshold.py \
+  --predictions "$TOP1_RUN_DIR/evaluation/predictions.jsonl" \
+  --labels /data/my_router/test.labels.jsonl \
+  --output "$TOP1_RUN_DIR/evaluation/threshold.svg"
+```
+
+非 `null` 标签是正样本，要求阈值处理后的 intent 与标签完全一致；`null` 标签是负样本，
+要求处理后不路由。只有原始 intent 非空且 `candidate_confidence >= threshold` 才保留路由。
+脚本同时在同目录写出 `threshold.json`，保存每个阈值的曲线数值。
+
 单条和多轮推理分别使用：
 
 ```bash
