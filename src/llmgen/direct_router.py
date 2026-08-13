@@ -349,6 +349,46 @@ def target_candidate_name(row: Mapping[str, Any]) -> str:
     raise RouterDataError("training row has no target_candidate_name")
 
 
+def standard_candidate_sft_row(
+    row: Mapping[str, Any],
+    *,
+    legal_candidate_names: set[str],
+    system_prompt: str,
+    tokenizer: Any | None = None,
+    candidate_name_tokens: Mapping[str, Sequence[int]] | None = None,
+    max_length: int = 1024,
+) -> dict[str, list[dict[str, str]]]:
+    """Represent one direct-router example as standard conversational SFT data."""
+
+    name = target_candidate_name(row)
+    if name not in legal_candidate_names:
+        raise RouterDataError(f"unknown target candidate name: {name!r}")
+    source_messages = messages_from_row(row)
+    fitted_messages = source_messages
+    if tokenizer is not None:
+        if candidate_name_tokens is None or name not in candidate_name_tokens:
+            raise RouterDataError("candidate token sequences are required for fitting")
+        target_length = len(candidate_name_tokens[name]) + 1
+        if max_length <= target_length:
+            raise RouterDataError("max_length leaves no room for a router prompt")
+        _, fitted_messages = fit_candidate_router_prompt(
+            tokenizer,
+            source_messages,
+            system_prompt,
+            max_prompt_tokens=max_length - target_length,
+        )
+    return {
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": build_conversation_user_prompt(fitted_messages),
+            },
+            {"role": "assistant", "content": name},
+        ]
+    }
+
+
 def encode_candidate_name_example(
     tokenizer: Any,
     row: Mapping[str, Any],

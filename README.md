@@ -29,6 +29,17 @@ bash scripts/top1/01_train.sh
 评估默认使用每卡 batch 1，并仅保留 loss，避免长多轮样本的全词表 logits 在 eval
 开始时造成显存峰值。显存充足时可用 `ROUTER_PER_DEVICE_EVAL_BATCH_SIZE` 调大。
 
+训练启动时会自动将实际使用的标准 system/user/assistant 消息写入：
+
+```bash
+$TOP1_RUN_DIR/router/retrieval/sft_input.jsonl
+```
+
+每行仅包含 `{"messages":[...]}`，且使用训练时已经加载的 tokenizer 复现历史清洗
+和长度裁剪，不需要额外配置。也可在不训练时运行 `bash scripts/top1/export_sft.sh`
+单独生成（独立脚本不加载模型 tokenizer，因此不执行 token 长度裁剪）。通用框架
+应启用 assistant-only/response-only loss，以保持只拟合候选名和 EOS。
+
 有测试集时执行评测，或者直接运行训练加评测：
 
 ```bash

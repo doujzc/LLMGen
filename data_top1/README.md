@@ -26,3 +26,13 @@ TOP1_TRAIN_DATA=/data/router/train.jsonl \
 TOP1_VALIDATION_DATA=/data/router/validation.jsonl \
   bash scripts/top1/00_validate.sh
 ```
+
+Training automatically exports standard messages-only SFT JSONL to:
+
+```bash
+$TOP1_RUN_DIR/router/retrieval/sft_input.jsonl
+```
+
+Each output row contains exactly a system message, the router's serialized user
+conversation, and an assistant message whose content is the candidate name. Run
+`bash scripts/top1/export_sft.sh` to create the same artifact without training.

@@ -23,6 +23,7 @@ from llmgen.direct_router import (
     candidate_token_sequences,
     encode_candidate_name_example,
     load_candidate_registry,
+    standard_candidate_sft_row,
     target_candidate_name,
 )
 from llmgen.router import (
@@ -32,6 +33,7 @@ from llmgen.router import (
     load_virtual_tokens,
     mix_replay_sources,
     read_jsonl,
+    write_jsonl,
 )
 from llmgen.router_bundle import dump_router_decoder_artifacts
 from llmgen.skillret import sha256_file
@@ -449,6 +451,38 @@ def _collator(torch: Any, pad_token_id: int):
     return collate
 
 
+def _write_direct_sft_input(
+    *,
+    rows: Sequence[dict[str, Any]],
+    destination: Path,
+    tokenizer: Any,
+    candidate_names: tuple[str, ...],
+    max_length: int,
+    system_prompt: str,
+) -> None:
+    """Dump the exact normalized direct-router examples as messages JSONL."""
+
+    token_sequences = candidate_token_sequences(tokenizer, candidate_names)
+    legal_names = set(candidate_names)
+    converted = (
+        standard_candidate_sft_row(
+            row,
+            legal_candidate_names=legal_names,
+            system_prompt=system_prompt,
+            tokenizer=tokenizer,
+            candidate_name_tokens=token_sequences,
+            max_length=max_length,
+        )
+        for row in rows
+    )
+    temporary = destination.with_name(destination.name + ".tmp")
+    try:
+        write_jsonl(temporary, converted)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _require_phase_path(path: str | None, phase: str) -> str:
     if not path:
         raise RouterDataError(f"--{phase}-train is required for stage {phase!r}")
@@ -659,6 +693,28 @@ def _run_phase(
         eval_dataset=validation_dataset,
         data_collator=_collator(torch, int(tokenizer.pad_token_id)),
     )
+    sft_input_path = None
+    if args.routing_mode == DIRECT_ROUTING_MODE:
+        sft_input_path = phase_dir / "sft_input.jsonl"
+        if trainer.is_world_process_zero():
+            _write_direct_sft_input(
+                rows=train_rows,
+                destination=sft_input_path,
+                tokenizer=tokenizer,
+                candidate_names=candidate_names,
+                max_length=args.max_length,
+                system_prompt=system_prompt,
+            )
+            print(
+                f"[retrieval] SFT messages: {sft_input_path} "
+                f"({len(train_rows)} rows)",
+                flush=True,
+            )
+        wait_for_export = getattr(
+            getattr(trainer, "accelerator", None), "wait_for_everyone", None
+        )
+        if callable(wait_for_export):
+            wait_for_export()
     try:
         launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
     except ValueError as exc:
@@ -835,6 +891,14 @@ def _run_phase(
             state["system_prompt_artifact"] = {
                 "path": bundled_prompt.name,
                 "sha256": sha256_file(bundled_prompt),
+            }
+            if sft_input_path is None or not sft_input_path.is_file():
+                raise RouterDataError("direct-router SFT input artifact is missing")
+            state["sft_input_artifact"] = {
+                "path": sft_input_path.name,
+                "sha256": sha256_file(sft_input_path),
+                "rows": len(train_rows),
+                "format": "messages_jsonl",
             }
         with (phase_dir / "router_manifest.json").open(
             "w", encoding="utf-8"
