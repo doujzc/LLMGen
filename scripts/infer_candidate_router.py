@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 from collections import Counter, defaultdict
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
 from llmgen.direct_router import (
     DIRECT_ROUTING_MODE,
     CandidateNameTokenTrie,
+    CandidateRoute,
     candidate_token_sequences,
     fit_candidate_router_prompt,
     load_candidate_registry,
@@ -23,6 +25,16 @@ from llmgen.skillret import sha256_file
 
 
 DECODING_MODES = ("greedy", "beam_search")
+
+
+def _parse_route_threshold(value: str) -> float:
+    try:
+        threshold = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("route threshold must be a number") from exc
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise argparse.ArgumentTypeError("route threshold must be between 0 and 1")
+    return threshold
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +79,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="Beam width; inference still returns only the best candidate name.",
+    )
+    parser.add_argument(
+        "--route-threshold",
+        type=_parse_route_threshold,
+        help=(
+            "Abstain when an executable candidate's constrained path probability "
+            "is below this value (0 to 1). Virtual no-route candidates are unchanged."
+        ),
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
@@ -362,6 +382,60 @@ def _chunks(rows: list[dict[str, Any]], size: int):
         yield rows[start : start + size]
 
 
+def _candidate_confidence(score: float | None) -> float | None:
+    """Convert a constrained candidate-path log probability into probability."""
+
+    if score is None:
+        return None
+    if math.isnan(score):
+        raise RouterDataError("candidate generation produced a NaN path score")
+    if score == -math.inf:
+        return 0.0
+    if score == math.inf:
+        raise RouterDataError("candidate generation produced an infinite path score")
+    return max(0.0, min(1.0, math.exp(min(0.0, score))))
+
+
+def _route_decision(
+    *,
+    route: CandidateRoute,
+    score: float | None,
+    route_threshold: float | None,
+) -> dict[str, Any]:
+    """Apply optional abstention without obscuring the model's raw prediction."""
+
+    confidence = _candidate_confidence(score)
+    raw_should_route = route.intent_label is not None
+    if route_threshold is not None and confidence is None:
+        raise RouterDataError(
+            "--route-threshold requires normalized generation transition scores"
+        )
+    threshold_triggered = bool(
+        raw_should_route
+        and route_threshold is not None
+        and confidence is not None
+        and confidence < route_threshold
+    )
+    return {
+        "raw_selected_candidate_id": route.candidate_id,
+        "raw_intent_label": route.intent_label,
+        "raw_should_route": raw_should_route,
+        "candidate_confidence": confidence,
+        "route_threshold": route_threshold,
+        "threshold_triggered": threshold_triggered,
+        "selected_candidate_id": None if threshold_triggered else route.candidate_id,
+        "intent_label": None if threshold_triggered else route.intent_label,
+        "should_route": raw_should_route and not threshold_triggered,
+        "status": (
+            "abstained"
+            if threshold_triggered
+            else "routed"
+            if raw_should_route
+            else "no_route"
+        ),
+    }
+
+
 def _generate_batch(
     *,
     batch: list[dict[str, Any]],
@@ -436,6 +510,11 @@ def _generate_batch(
             generated.scores,
             **score_kwargs,
         )
+    route_threshold = getattr(args, "route_threshold", None)
+    if route_threshold is not None and transition_scores is None:
+        raise RouterDataError(
+            "--route-threshold requires a model with normalized transition scores"
+        )
 
     results: list[dict[str, Any]] = []
     for index, row in enumerate(batch):
@@ -452,15 +531,17 @@ def _generate_batch(
         score = None
         if transition_scores is not None:
             score = float(transition_scores[index, : eos_position + 1].sum().item())
+        decision = _route_decision(
+            route=route,
+            score=score,
+            route_threshold=route_threshold,
+        )
         results.append(
             {
                 "query_id": row["id"],
                 "messages": row["messages"],
                 "candidate_name": name,
-                "selected_candidate_id": route.candidate_id,
-                "intent_label": route.intent_label,
-                "should_route": route.intent_label is not None,
-                "status": "routed" if route.intent_label is not None else "no_route",
+                **decision,
                 "generated_text": name,
                 "score": score,
                 "decoding": {
@@ -475,34 +556,35 @@ def _generate_batch(
 
 
 def _metrics(
-    queries: list[dict[str, Any]], results: list[dict[str, Any]]
+    queries: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    routes_by_name: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    labeled: list[tuple[str, str, str | None, str | None]] = []
+    labeled: list[tuple[str, dict[str, Any], str | None]] = []
     for query, result in zip(queries, results, strict=True):
         try:
             expected_name = target_candidate_name(query)
         except RouterDataError:
             continue
-        labeled.append(
-            (
-                expected_name,
-                result["candidate_name"],
-                query.get("expected_system_output"),
-                result["intent_label"],
-            )
-        )
+        labeled.append((expected_name, result, query.get("expected_system_output")))
     if not labeled:
         return None
     per_name_total: Counter[str] = Counter()
     per_name_correct: Counter[str] = Counter()
     confusion: dict[str, Counter[str]] = defaultdict(Counter)
-    for expected, predicted, _, _ in labeled:
+    for expected, result, _ in labeled:
+        predicted = result["candidate_name"]
         per_name_total[expected] += 1
         per_name_correct[expected] += expected == predicted
         confusion[expected][predicted] += 1
-    candidate_correct = sum(expected == predicted for expected, predicted, _, _ in labeled)
-    output_correct = sum(expected == predicted for _, _, expected, predicted in labeled)
-    return {
+    candidate_correct = sum(
+        expected == result["candidate_name"] for expected, result, _ in labeled
+    )
+    output_correct = sum(
+        expected_output == result["intent_label"]
+        for _, result, expected_output in labeled
+    )
+    metrics: dict[str, Any] = {
         "examples": len(labeled),
         "candidate_accuracy": candidate_correct / len(labeled),
         "system_output_accuracy": output_correct / len(labeled),
@@ -518,6 +600,97 @@ def _metrics(
             for expected, predictions in sorted(confusion.items())
         },
     }
+    if routes_by_name is not None:
+        policy_rows = [
+            (expected, result, routes_by_name[expected].intent_label is not None)
+            for expected, result, _ in labeled
+            if expected in routes_by_name
+        ]
+        if policy_rows:
+            routed = sum(bool(result["should_route"]) for _, result, _ in policy_rows)
+            triggered = sum(
+                bool(result.get("threshold_triggered"))
+                for _, result, _ in policy_rows
+            )
+            accepted = len(policy_rows) - triggered
+            accepted_correct = sum(
+                expected == result["candidate_name"]
+                and not result.get("threshold_triggered", False)
+                for expected, result, _ in policy_rows
+            )
+            true_positive = sum(
+                expected_route and bool(result["should_route"])
+                for _, result, expected_route in policy_rows
+            )
+            false_positive = sum(
+                not expected_route and bool(result["should_route"])
+                for _, result, expected_route in policy_rows
+            )
+            false_negative = sum(
+                expected_route and not bool(result["should_route"])
+                for _, result, expected_route in policy_rows
+            )
+            true_negative = (
+                len(policy_rows) - true_positive - false_positive - false_negative
+            )
+            correct_routed = sum(
+                expected == result["candidate_name"] and bool(result["should_route"])
+                for expected, result, _ in policy_rows
+            )
+            expected_routed = true_positive + false_negative
+            expected_no_route = false_positive + true_negative
+            route_precision = (
+                true_positive / (true_positive + false_positive)
+                if true_positive + false_positive
+                else None
+            )
+            route_recall = (
+                true_positive / expected_routed if expected_routed else None
+            )
+            route_f1 = (
+                2 * route_precision * route_recall / (route_precision + route_recall)
+                if route_precision is not None
+                and route_recall is not None
+                and route_precision + route_recall
+                else None
+            )
+            threshold_values = {
+                result.get("route_threshold") for _, result, _ in policy_rows
+            }
+            metrics["routing_policy"] = {
+                "route_threshold": (
+                    next(iter(threshold_values)) if len(threshold_values) == 1 else None
+                ),
+                "examples": len(policy_rows),
+                "output_route_coverage": routed / len(policy_rows),
+                "threshold_triggered_examples": triggered,
+                "threshold_abstention_rate": triggered / len(policy_rows),
+                "selective_candidate_accuracy": (
+                    accepted_correct / accepted if accepted else None
+                ),
+                "binary_route_precision": route_precision,
+                "binary_route_recall": route_recall,
+                "binary_route_f1": route_f1,
+                "false_route_rate": (
+                    false_positive / expected_no_route if expected_no_route else None
+                ),
+                "false_no_route_rate": (
+                    false_negative / expected_routed if expected_routed else None
+                ),
+                "routed_candidate_precision": (
+                    correct_routed / routed if routed else None
+                ),
+                "end_to_end_route_recall": (
+                    correct_routed / expected_routed if expected_routed else None
+                ),
+                "decision_confusion": {
+                    "true_positive": true_positive,
+                    "false_positive": false_positive,
+                    "false_negative": false_negative,
+                    "true_negative": true_negative,
+                },
+            }
+    return metrics
 
 
 def main() -> None:
@@ -563,7 +736,7 @@ def main() -> None:
         print(f"[inference] {len(results)}/{len(queries)}", flush=True)
     write_jsonl(args.output_jsonl, results)
 
-    metrics = _metrics(queries, results)
+    metrics = _metrics(queries, results, routes_by_name)
     if metrics is not None:
         print(json.dumps(metrics, ensure_ascii=False, indent=2))
         if args.metrics_output:

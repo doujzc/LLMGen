@@ -45,8 +45,14 @@ $TOP1_RUN_DIR/router/retrieval/sft_input.jsonl
 ```bash
 export TOP1_TEST_DATA=/data/my_router/test.jsonl
 bash scripts/top1/02_evaluate.sh
+bash scripts/top1/02_evaluate.sh --route-threshold 0.6  # 低置信度真实路由改为无候选
 bash scripts/top1/full.sh
 ```
+
+`--route-threshold` 取值为 `[0, 1]`，比较的是合法候选名称整条生成路径的归一化
+概率；不传时保持原有行为。阈值只拦截 `StockQuery`、`Ecommerce` 等真实路由，
+不会改变模型直接生成的虚拟无路由候选。预测文件同时保留原始候选、置信度和是否触发
+阈值，指标文件额外报告路由覆盖率、拒绝率和路由决策准确性。
 
 单条和多轮推理分别使用：
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from argparse import Namespace
+from argparse import ArgumentTypeError, Namespace
 import json
 from types import SimpleNamespace
 
@@ -15,6 +15,8 @@ from scripts.infer_candidate_router import (
     _generate_batch,
     _load_queries,
     _logits_processor_class,
+    _metrics,
+    _parse_route_threshold,
     _validate_model_tokenizer_vocabulary,
 )
 
@@ -199,6 +201,7 @@ def test_top1_generation_returns_name_and_downstream_route() -> None:
             device="cpu",
             decoding_mode="greedy",
             num_beams=4,
+            route_threshold=None,
         ),
     )[0]
 
@@ -208,6 +211,172 @@ def test_top1_generation_returns_name_and_downstream_route() -> None:
     assert result["selected_candidate_id"] == "ecommerce_product_recommendation"
     assert result["intent_label"] == "RecommendProduct"
     assert result["score"] == pytest.approx(-0.6)
+    assert result["candidate_confidence"] == pytest.approx(0.5488116361)
+    assert result["threshold_triggered"] is False
+
+
+def test_route_threshold_abstains_below_confidence_and_preserves_raw_route() -> None:
+    trie = CandidateNameTokenTrie({"Ecommerce": (11, 12)}, eos_token_id=2)
+    model = FakeModel()
+    route = CandidateRoute(
+        "Ecommerce",
+        "ecommerce_product_recommendation",
+        "RecommendProduct",
+        False,
+    )
+
+    result = _generate_batch(
+        batch=[
+            {
+                "id": "q1",
+                "messages": [{"role": "user", "content": "推荐耳机"}],
+            }
+        ],
+        tokenizer=FakeTokenizer(),
+        model=model,
+        torch=torch,
+        trie=trie,
+        routes_by_name={"Ecommerce": route},
+        system_prompt="route",
+        args=Namespace(
+            max_input_length=256,
+            device="cpu",
+            decoding_mode="greedy",
+            num_beams=4,
+            route_threshold=0.6,
+        ),
+    )[0]
+
+    assert result["candidate_name"] == "Ecommerce"
+    assert result["raw_selected_candidate_id"] == route.candidate_id
+    assert result["raw_intent_label"] == "RecommendProduct"
+    assert result["raw_should_route"] is True
+    assert result["candidate_confidence"] == pytest.approx(0.5488116361)
+    assert result["route_threshold"] == 0.6
+    assert result["threshold_triggered"] is True
+    assert result["selected_candidate_id"] is None
+    assert result["intent_label"] is None
+    assert result["should_route"] is False
+    assert result["status"] == "abstained"
+
+
+def test_route_threshold_does_not_reject_virtual_candidate() -> None:
+    trie = CandidateNameTokenTrie({"Ecommerce": (11, 12)}, eos_token_id=2)
+    model = FakeModel()
+    route = CandidateRoute("Ecommerce", "no_route_product_other", None, True)
+
+    result = _generate_batch(
+        batch=[
+            {
+                "id": "q1",
+                "messages": [{"role": "user", "content": "随便聊聊"}],
+            }
+        ],
+        tokenizer=FakeTokenizer(),
+        model=model,
+        torch=torch,
+        trie=trie,
+        routes_by_name={"Ecommerce": route},
+        system_prompt="route",
+        args=Namespace(
+            max_input_length=256,
+            device="cpu",
+            decoding_mode="greedy",
+            num_beams=4,
+            route_threshold=0.99,
+        ),
+    )[0]
+
+    assert result["threshold_triggered"] is False
+    assert result["selected_candidate_id"] == "no_route_product_other"
+    assert result["should_route"] is False
+    assert result["status"] == "no_route"
+
+
+@pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf", "not-a-number"])
+def test_route_threshold_rejects_invalid_values(value) -> None:
+    with pytest.raises(ArgumentTypeError, match="route threshold"):
+        _parse_route_threshold(value)
+
+
+def test_route_threshold_requires_transition_scores() -> None:
+    trie = CandidateNameTokenTrie({"Ecommerce": (11, 12)}, eos_token_id=2)
+    model = FakeModel()
+    model.compute_transition_scores = None
+    route = CandidateRoute(
+        "Ecommerce",
+        "ecommerce_product_recommendation",
+        "RecommendProduct",
+        False,
+    )
+
+    with pytest.raises(RouterDataError, match="transition scores"):
+        _generate_batch(
+            batch=[
+                {
+                    "id": "q1",
+                    "messages": [{"role": "user", "content": "推荐耳机"}],
+                }
+            ],
+            tokenizer=FakeTokenizer(),
+            model=model,
+            torch=torch,
+            trie=trie,
+            routes_by_name={"Ecommerce": route},
+            system_prompt="route",
+            args=Namespace(
+                max_input_length=256,
+                device="cpu",
+                decoding_mode="greedy",
+                num_beams=4,
+                route_threshold=0.6,
+            ),
+        )
+
+
+def test_metrics_keep_raw_accuracy_separate_from_threshold_policy() -> None:
+    routes = {
+        "StockQuery": CandidateRoute(
+            "StockQuery", "stock", "SearchStockQuotes", False
+        ),
+        "NoAvailable": CandidateRoute(
+            "NoAvailable", "no_route", None, True
+        ),
+    }
+    queries = [
+        {
+            "target_candidate_name": "StockQuery",
+            "expected_system_output": "SearchStockQuotes",
+        },
+        {"target_candidate_name": "NoAvailable", "expected_system_output": None},
+    ]
+    results = [
+        {
+            "candidate_name": "StockQuery",
+            "intent_label": None,
+            "should_route": False,
+            "threshold_triggered": True,
+            "route_threshold": 0.6,
+        },
+        {
+            "candidate_name": "NoAvailable",
+            "intent_label": None,
+            "should_route": False,
+            "threshold_triggered": False,
+            "route_threshold": 0.6,
+        },
+    ]
+
+    metrics = _metrics(queries, results, routes)
+
+    assert metrics is not None
+    assert metrics["candidate_accuracy"] == 1.0
+    assert metrics["system_output_accuracy"] == 0.5
+    assert metrics["routing_policy"]["route_threshold"] == 0.6
+    assert metrics["routing_policy"]["output_route_coverage"] == 0.0
+    assert metrics["routing_policy"]["threshold_abstention_rate"] == 0.5
+    assert metrics["routing_policy"]["selective_candidate_accuracy"] == 1.0
+    assert metrics["routing_policy"]["false_no_route_rate"] == 1.0
 
 
 def test_finished_rows_can_only_repeat_eos_while_batch_continues() -> None:
