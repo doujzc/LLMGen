@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -81,10 +80,10 @@ def test_load_examples_rejects_row_count_mismatch(tmp_path) -> None:
         load_examples(predictions, labels)
 
 
-def test_main_writes_svg_and_curve_values(tmp_path) -> None:
+def test_main_writes_interactive_html_and_curve_values(tmp_path) -> None:
     predictions = tmp_path / "predictions.jsonl"
     labels = tmp_path / "labels.jsonl"
-    output = tmp_path / "threshold.svg"
+    output = tmp_path / "threshold.html"
     _write_jsonl(
         predictions,
         [
@@ -110,11 +109,13 @@ def test_main_writes_svg_and_curve_values(tmp_path) -> None:
         ]
     )
 
-    svg = output.read_text(encoding="utf-8")
-    ET.parse(output)
+    html = output.read_text(encoding="utf-8")
     metrics = json.loads(output.with_suffix(".json").read_text(encoding="utf-8"))
-    assert "Positive accuracy" in svg
-    assert "Negative accuracy" in svg
+    assert "Plotly.newPlot" in html
+    assert "Positive accuracy" in html
+    assert "Negative accuracy" in html
+    assert "hovertemplate" in html
+    assert "x unified" in html
     assert metrics["positive_examples"] == 1
     assert metrics["negative_examples"] == 1
     assert len(metrics["points"]) == 3

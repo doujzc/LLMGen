@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
-from html import escape
 import json
 import math
 from pathlib import Path
@@ -55,7 +54,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--output",
         required=True,
-        help="Destination SVG curve.",
+        help="Destination interactive HTML curve.",
     )
     parser.add_argument(
         "--metrics-output",
@@ -202,113 +201,105 @@ def compute_curve(
     return points
 
 
-def _step_path(
-    points: Sequence[ThresholdPoint],
-    *,
-    value_field: str,
-    left: float,
-    top: float,
-    width: float,
-    height: float,
-) -> str:
-    coordinates = [
-        (
-            left + point.threshold * width,
-            top + (1.0 - float(getattr(point, value_field))) * height,
-        )
-        for point in points
-    ]
-    commands = [f"M {coordinates[0][0]:.2f} {coordinates[0][1]:.2f}"]
-    for x, y in coordinates[1:]:
-        commands.extend((f"H {x:.2f}", f"V {y:.2f}"))
-    return " ".join(commands)
-
-
-def render_svg(
+def write_interactive_plot(
     points: Sequence[ThresholdPoint],
     *,
     positive_count: int,
     negative_count: int,
     title: str,
-) -> str:
-    """Render a dependency-free SVG chart."""
+    best: ThresholdPoint,
+    destination: str | Path,
+) -> None:
+    """Write a standalone Plotly chart with shared hover values."""
 
-    canvas_width, canvas_height = 1000, 640
-    left, top, plot_width, plot_height = 100.0, 90.0, 840.0, 450.0
-    bottom = top + plot_height
-    positive_path = _step_path(
-        points,
-        value_field="positive_accuracy",
-        left=left,
-        top=top,
-        width=plot_width,
-        height=plot_height,
-    )
-    negative_path = _step_path(
-        points,
-        value_field="negative_accuracy",
-        left=left,
-        top=top,
-        width=plot_width,
-        height=plot_height,
-    )
-    grid: list[str] = []
-    for index in range(6):
-        value = index / 5
-        x = left + value * plot_width
-        y = bottom - value * plot_height
-        grid.extend(
-            (
-                f'<line class="grid" x1="{x:.2f}" y1="{top:.2f}" '
-                f'x2="{x:.2f}" y2="{bottom:.2f}"/>',
-                f'<line class="grid" x1="{left:.2f}" y1="{y:.2f}" '
-                f'x2="{left + plot_width:.2f}" y2="{y:.2f}"/>',
-                f'<text class="tick" x="{x:.2f}" y="{bottom + 28:.2f}" '
-                f'text-anchor="middle">{value:.1f}</text>',
-                f'<text class="tick" x="{left - 14:.2f}" y="{y + 5:.2f}" '
-                f'text-anchor="end">{value:.1f}</text>',
-            )
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:  # pragma: no cover - dependency error path
+        raise SystemExit(
+            "Interactive threshold plots require plotly. Install with "
+            "python -m pip install 'plotly>=6,<7'."
+        ) from exc
+
+    thresholds = [point.threshold for point in points]
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds,
+            y=[point.positive_accuracy for point in points],
+            mode="lines",
+            name=f"Positive accuracy (n={positive_count})",
+            line={"color": "#2563eb", "width": 3, "shape": "hv"},
+            hovertemplate=(
+                "Threshold: %{x:.3f}<br>Positive accuracy: %{y:.2%}<extra></extra>"
+            ),
         )
-    safe_title = escape(title)
-    return f'''<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width}" height="{canvas_height}"
-     viewBox="0 0 {canvas_width} {canvas_height}" role="img">
-  <title>{safe_title}</title>
-  <style>
-    text {{ font-family: Inter, "Noto Sans", Arial, sans-serif; fill: #263042; }}
-    .title {{ font-size: 24px; font-weight: 650; }}
-    .subtitle {{ font-size: 14px; fill: #667085; }}
-    .grid {{ stroke: #e4e7ec; stroke-width: 1; }}
-    .axis {{ stroke: #667085; stroke-width: 1.5; }}
-    .tick {{ font-size: 13px; fill: #667085; }}
-    .axis-label {{ font-size: 15px; font-weight: 600; }}
-    .legend {{ font-size: 14px; font-weight: 600; }}
-    .curve {{ fill: none; stroke-width: 3; stroke-linejoin: round; }}
-  </style>
-  <rect width="100%" height="100%" fill="#ffffff"/>
-  <text class="title" x="{left:.0f}" y="38">{safe_title}</text>
-  <text class="subtitle" x="{left:.0f}" y="63">Positive n={positive_count} · Negative n={negative_count}</text>
-  {''.join(grid)}
-  <line class="axis" x1="{left}" y1="{bottom}" x2="{left + plot_width}" y2="{bottom}"/>
-  <line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{bottom}"/>
-  <path class="curve" stroke="#2563eb" d="{positive_path}"/>
-  <path class="curve" stroke="#ea580c" d="{negative_path}"/>
-  <text class="axis-label" x="{left + plot_width / 2:.0f}" y="606" text-anchor="middle">Threshold</text>
-  <text class="axis-label" x="28" y="{top + plot_height / 2:.0f}" text-anchor="middle"
-        transform="rotate(-90 28 {top + plot_height / 2:.0f})">Accuracy</text>
-  <line x1="{left + 545}" y1="55" x2="{left + 577}" y2="55" stroke="#2563eb" stroke-width="3"/>
-  <text class="legend" x="{left + 586}" y="60">Positive accuracy</text>
-  <line x1="{left + 710}" y1="55" x2="{left + 742}" y2="55" stroke="#ea580c" stroke-width="3"/>
-  <text class="legend" x="{left + 751}" y="60">Negative accuracy</text>
-</svg>
-'''
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=thresholds,
+            y=[point.negative_accuracy for point in points],
+            mode="lines",
+            name=f"Negative accuracy (n={negative_count})",
+            line={"color": "#ea580c", "width": 3, "shape": "hv"},
+            hovertemplate=(
+                "Threshold: %{x:.3f}<br>Negative accuracy: %{y:.2%}<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        template="plotly_white",
+        title={
+            "text": (
+                f"{title}<br><sup>Best balanced accuracy "
+                f"{best.balanced_accuracy:.2%} at threshold "
+                f"{best.threshold:.3f}</sup>"
+            ),
+            "x": 0.04,
+            "xanchor": "left",
+        },
+        xaxis={
+            "title": "Threshold",
+            "range": [0, 1],
+            "tickformat": ".1f",
+            "showspikes": True,
+            "spikemode": "across",
+            "spikesnap": "cursor",
+        },
+        yaxis={
+            "title": "Accuracy",
+            "range": [0, 1.01],
+            "tickformat": ".0%",
+        },
+        hovermode="x unified",
+        legend={
+            "orientation": "h",
+            "yanchor": "bottom",
+            "y": 1.02,
+            "xanchor": "right",
+            "x": 1,
+        },
+        margin={"l": 80, "r": 40, "t": 120, "b": 75},
+        height=650,
+    )
+    figure.write_html(
+        str(destination),
+        include_plotlyjs=True,
+        full_html=True,
+        auto_open=False,
+        config={
+            "displaylogo": False,
+            "responsive": True,
+            "scrollZoom": True,
+            "toImageButtonOptions": {"format": "png", "scale": 2},
+        },
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     output_path = Path(args.output).expanduser()
-    if output_path.suffix.lower() != ".svg":
-        raise RouterDataError("--output must use the .svg extension")
+    if output_path.suffix.lower() != ".html":
+        raise RouterDataError("--output must use the .html extension")
     examples = load_examples(args.predictions, args.labels)
     points = compute_curve(examples, num_thresholds=args.num_thresholds)
     positive_count = sum(row.expected_intent is not None for row in examples)
@@ -316,14 +307,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     best = max(points, key=lambda point: point.balanced_accuracy)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        render_svg(
-            points,
-            positive_count=positive_count,
-            negative_count=negative_count,
-            title=args.title,
-        ),
-        encoding="utf-8",
+    write_interactive_plot(
+        points,
+        positive_count=positive_count,
+        negative_count=negative_count,
+        title=args.title,
+        best=best,
+        destination=output_path,
     )
     metrics_path = (
         Path(args.metrics_output).expanduser()

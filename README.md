@@ -61,12 +61,13 @@ bash scripts/top1/full.sh
 python scripts/top1/visualize_threshold.py \
   --predictions "$TOP1_RUN_DIR/evaluation/predictions.jsonl" \
   --labels /data/my_router/test.labels.jsonl \
-  --output "$TOP1_RUN_DIR/evaluation/threshold.svg"
+  --output "$TOP1_RUN_DIR/evaluation/threshold.html"
 ```
 
 非 `null` 标签是正样本，要求阈值处理后的 intent 与标签完全一致；`null` 标签是负样本，
 要求处理后不路由。只有原始 intent 非空且 `candidate_confidence >= threshold` 才保留路由。
-脚本同时在同目录写出 `threshold.json`，保存每个阈值的曲线数值。
+生成的 HTML 内嵌 Plotly.js，可离线打开并悬停查看同一阈值的两项准确率，也支持缩放和
+导出图片。脚本同时在同目录写出 `threshold.json`，保存每个阈值的曲线数值。
 
 单条和多轮推理分别使用：
 
