@@ -45,6 +45,15 @@ docstrings for non-obvious behavior. Follow `snake_case` for functions/files,
 scripts should use `set -euo pipefail`, quote expansions, and expose defaults through
 environment variables. Match the existing two-space style in JavaScript and CSS.
 
+## Modeling Constraints
+
+Never implement project behavior or inference methods using keyword lists or regular-
+expression matching. This permanent constraint applies to routing, intent detection,
+conversation relevance, filtering, labeling, evaluation, and fallback heuristics. Use
+explicit structured signals or learned/model-based methods instead. If neither is
+available, state the limitation and request a design decision rather than adding a
+keyword or regex approximation.
+
 ## Testing Guidelines
 
 Pytest is configured through `pyproject.toml`. Name files `test_<area>.py` and tests
