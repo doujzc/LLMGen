@@ -40,6 +40,11 @@ $TOP1_RUN_DIR/router/retrieval/sft_input.jsonl
 单独生成（独立脚本不加载模型 tokenizer，因此不执行 token 长度裁剪）。通用框架
 应启用 assistant-only/response-only loss，以保持只拟合候选名和 EOS。
 
+新训练默认使用 `standalone_request_v2` 上下文模板：模型先在内部把末轮还原为
+可独立理解的请求，只补充历史中不可缺少的信息；末轮已经完整或切换目标时忽略旧
+目标，然后仍只生成候选名。它不使用关键词/正则，也不增加第二次模型调用。模板版本
+写入 `router_manifest.json`，推理会自动复现训练格式；旧模型继续使用原模板。
+
 有测试集时执行评测，或者直接运行训练加评测：
 
 ```bash

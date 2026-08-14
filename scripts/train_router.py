@@ -18,6 +18,7 @@ import sys
 from typing import Any, Sequence
 
 from llmgen.direct_router import (
+    CURRENT_CONVERSATION_TEMPLATE,
     DIRECT_ROUTING_MODE,
     candidate_registry_payload,
     candidate_token_sequences,
@@ -416,6 +417,7 @@ def _dataset_class(torch: Any):
                     candidate_name_tokens=self.candidate_name_tokens,
                     max_length=self.max_length,
                     system_prompt=row_system_prompt,
+                    conversation_template=CURRENT_CONVERSATION_TEMPLATE,
                 )
             if self.num_levels is None:
                 raise RouterDataError("hierarchical routing requires num_levels")
@@ -472,6 +474,7 @@ def _write_direct_sft_input(
             tokenizer=tokenizer,
             candidate_name_tokens=token_sequences,
             max_length=max_length,
+            conversation_template=CURRENT_CONVERSATION_TEMPLATE,
         )
         for row in rows
     )
@@ -844,6 +847,9 @@ def _run_phase(
                 "max_target_paths": max_target_paths,
                 "candidate_names": list(candidate_names) if is_direct else None,
                 "target_suffix": "eos" if is_direct else None,
+                "conversation_template": (
+                    CURRENT_CONVERSATION_TEMPLATE if is_direct else None
+                ),
             },
             "examples": {
                 "train": len(train_rows),

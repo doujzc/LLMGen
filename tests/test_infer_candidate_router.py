@@ -9,9 +9,15 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
-from llmgen.direct_router import CandidateNameTokenTrie, CandidateRoute
+from llmgen.direct_router import (
+    CURRENT_CONVERSATION_TEMPLATE,
+    LEGACY_CONVERSATION_TEMPLATE,
+    CandidateNameTokenTrie,
+    CandidateRoute,
+)
 from llmgen.router import RouterDataError
 from scripts.infer_candidate_router import (
+    _conversation_template_from_manifest,
     _generate_batch,
     _load_queries,
     _logits_processor_class,
@@ -19,6 +25,31 @@ from scripts.infer_candidate_router import (
     _parse_route_threshold,
     _validate_model_tokenizer_vocabulary,
 )
+
+
+def test_manifest_selects_the_training_conversation_template() -> None:
+    assert (
+        _conversation_template_from_manifest(None)
+        == CURRENT_CONVERSATION_TEMPLATE
+    )
+    assert (
+        _conversation_template_from_manifest({"generation_contract": {}})
+        == LEGACY_CONVERSATION_TEMPLATE
+    )
+    assert (
+        _conversation_template_from_manifest(
+            {
+                "generation_contract": {
+                    "conversation_template": CURRENT_CONVERSATION_TEMPLATE
+                }
+            }
+        )
+        == CURRENT_CONVERSATION_TEMPLATE
+    )
+    with pytest.raises(RouterDataError, match="unsupported conversation template"):
+        _conversation_template_from_manifest(
+            {"generation_contract": {"conversation_template": "future-v9"}}
+        )
 
 
 class FakeTokenizer:

@@ -8,7 +8,10 @@ import pytest
 
 from scripts import train_router
 from llmgen.direct_router import (
+    CURRENT_CONVERSATION_TEMPLATE,
+    LEGACY_CONVERSATION_TEMPLATE,
     CandidateNameTokenTrie,
+    build_conversation_user_prompt,
     candidate_token_sequences,
     encode_candidate_name_example,
     fit_candidate_router_prompt,
@@ -77,6 +80,42 @@ def test_conversation_must_end_with_user() -> None:
         )
 
 
+def test_current_template_requests_latent_standalone_rewrite() -> None:
+    prompt = build_conversation_user_prompt(
+        [
+            {"role": "user", "content": "推荐耳机"},
+            {"role": "assistant", "content": "预算是多少？"},
+            {"role": "user", "content": "500 元以内"},
+        ]
+    )
+
+    assert "<contextualize>" in prompt
+    assert "还原为可独立理解的请求" in prompt
+    assert "若当前请求完整或已切换目标，忽略 history" in prompt
+    assert prompt.endswith("仅输出候选名称：")
+
+
+def test_legacy_template_reproduces_original_prompt() -> None:
+    prompt = build_conversation_user_prompt(
+        [{"role": "user", "content": "查询贵州茅台"}],
+        conversation_template=LEGACY_CONVERSATION_TEMPLATE,
+    )
+
+    assert prompt == (
+        '<conversation_json>{"current_user_request":"查询贵州茅台"}'
+        "</conversation_json>\n输出候选名称："
+    )
+    assert CURRENT_CONVERSATION_TEMPLATE not in prompt
+
+
+def test_unknown_conversation_template_is_rejected() -> None:
+    with pytest.raises(RouterDataError, match="unsupported conversation template"):
+        build_conversation_user_prompt(
+            [{"role": "user", "content": "hello"}],
+            conversation_template="unknown-v9",
+        )
+
+
 def test_prompt_fitting_drops_old_history_before_latest_request() -> None:
     tokenizer = CharacterTokenizer()
     messages = [
@@ -89,7 +128,7 @@ def test_prompt_fitting_drops_old_history_before_latest_request() -> None:
         tokenizer,
         messages,
         "route",
-        max_prompt_tokens=180,
+        max_prompt_tokens=420,
     )
 
     assert kept == ({"role": "user", "content": "最新请求"},)
@@ -110,7 +149,7 @@ def test_direct_target_loss_covers_only_candidate_name_and_eos() -> None:
         tokenizer,
         row,
         candidate_names=("StockQuery", "Ecommerce"),
-        max_length=256,
+        max_length=512,
         system_prompt="route",
     )
 

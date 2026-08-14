@@ -18,9 +18,19 @@ from llmgen.router import RouterDataError
 
 
 DIRECT_ROUTING_MODE = "candidate_name_top1"
+LEGACY_CONVERSATION_TEMPLATE = "conversation_json_v1"
+CURRENT_CONVERSATION_TEMPLATE = "standalone_request_v2"
+SUPPORTED_CONVERSATION_TEMPLATES = frozenset(
+    {LEGACY_CONVERSATION_TEMPLATE, CURRENT_CONVERSATION_TEMPLATE}
+)
 LATEST_TRUNCATION_MARKER = "\n...[当前用户消息中间内容已截断]...\n"
 HISTORY_TRUNCATION_MARKER = "\n...[历史消息中间内容已截断]...\n"
 ALLOWED_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
+STANDALONE_REQUEST_INSTRUCTION = (
+    "在内部将 current_user_request 还原为可独立理解的请求。只从 history 补充"
+    "必要信息；若当前请求完整或已切换目标，忽略 history。保持当前目标，不猜测、"
+    "不回答、不输出改写。"
+)
 
 
 @dataclass(frozen=True)
@@ -210,18 +220,36 @@ def conversation_query_group(messages: Sequence[Mapping[str, str]]) -> str:
     return f"conversation:{digest}"
 
 
-def build_conversation_user_prompt(messages: Sequence[Mapping[str, str]]) -> str:
-    """Serialize history and current request without flattening role boundaries."""
+def _validate_conversation_template(value: str) -> str:
+    if value not in SUPPORTED_CONVERSATION_TEMPLATES:
+        supported = ", ".join(sorted(SUPPORTED_CONVERSATION_TEMPLATES))
+        raise RouterDataError(
+            f"unsupported conversation template {value!r}; expected {supported}"
+        )
+    return value
 
+
+def build_conversation_user_prompt(
+    messages: Sequence[Mapping[str, str]],
+    *,
+    conversation_template: str = CURRENT_CONVERSATION_TEMPLATE,
+) -> str:
+    """Serialize a conversation with a versioned standalone-request template."""
+
+    template = _validate_conversation_template(conversation_template)
     normalized = normalize_conversation_messages(messages)
     payload: dict[str, Any] = {}
     if len(normalized) > 1:
         payload["history"] = list(normalized[:-1])
     payload["current_user_request"] = normalized[-1]["content"]
     conversation = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    prefix = f"<conversation_json>{conversation}</conversation_json>\n"
+    if template == LEGACY_CONVERSATION_TEMPLATE:
+        return prefix + "输出候选名称："
     return (
-        f"<conversation_json>{conversation}</conversation_json>\n"
-        "输出候选名称："
+        prefix
+        + f"<contextualize>{STANDALONE_REQUEST_INSTRUCTION}</contextualize>\n"
+        "仅输出候选名称："
     )
 
 
@@ -229,11 +257,16 @@ def render_candidate_router_prompt(
     tokenizer: Any,
     messages: Sequence[Mapping[str, str]],
     system_prompt: str,
+    *,
+    conversation_template: str = CURRENT_CONVERSATION_TEMPLATE,
 ) -> str:
     """Render the fixed router prompt for a normalized multi-turn conversation."""
 
     system_prompt = _nonempty_string(system_prompt, field="system_prompt")
-    user_prompt = build_conversation_user_prompt(messages)
+    user_prompt = build_conversation_user_prompt(
+        messages,
+        conversation_template=conversation_template,
+    )
     chat_messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -265,6 +298,7 @@ def fit_candidate_router_prompt(
     system_prompt: str,
     *,
     max_prompt_tokens: int,
+    conversation_template: str = CURRENT_CONVERSATION_TEMPLATE,
 ) -> tuple[str, tuple[dict[str, str], ...]]:
     """Fit a prompt by dropping old history before truncating the current turn."""
 
@@ -274,7 +308,10 @@ def fit_candidate_router_prompt(
 
     def render(candidate_messages: Sequence[Mapping[str, str]]) -> tuple[str, list[int]]:
         prompt = render_candidate_router_prompt(
-            tokenizer, candidate_messages, system_prompt
+            tokenizer,
+            candidate_messages,
+            system_prompt,
+            conversation_template=conversation_template,
         )
         return prompt, _encode_text(tokenizer, prompt)
 
@@ -357,6 +394,7 @@ def standard_candidate_sft_row(
     tokenizer: Any | None = None,
     candidate_name_tokens: Mapping[str, Sequence[int]] | None = None,
     max_length: int = 1024,
+    conversation_template: str = CURRENT_CONVERSATION_TEMPLATE,
 ) -> dict[str, list[dict[str, str]]]:
     """Represent one direct-router example as standard conversational SFT data."""
 
@@ -376,13 +414,17 @@ def standard_candidate_sft_row(
             source_messages,
             system_prompt,
             max_prompt_tokens=max_length - target_length,
+            conversation_template=conversation_template,
         )
     return {
         "messages": [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": build_conversation_user_prompt(fitted_messages),
+                "content": build_conversation_user_prompt(
+                    fitted_messages,
+                    conversation_template=conversation_template,
+                ),
             },
             {"role": "assistant", "content": name},
         ]
@@ -397,6 +439,7 @@ def encode_candidate_name_example(
     candidate_name_tokens: Mapping[str, Sequence[int]] | None = None,
     max_length: int,
     system_prompt: str,
+    conversation_template: str = CURRENT_CONVERSATION_TEMPLATE,
 ) -> dict[str, list[int]]:
     """Encode ``candidate name + EOS`` with loss only on the generated target."""
 
@@ -420,6 +463,7 @@ def encode_candidate_name_example(
         messages_from_row(row),
         system_prompt,
         max_prompt_tokens=max_length - len(target_ids),
+        conversation_template=conversation_template,
     )
     prompt_ids = _encode_text(tokenizer, prompt)
     input_ids = [*prompt_ids, *target_ids]

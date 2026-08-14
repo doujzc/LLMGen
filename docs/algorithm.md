@@ -1660,8 +1660,27 @@ embedding、RQ-VAE、Sinkhorn、code 分配和虚拟 token 扩词表。
 
 输入是以 user 结束的结构化消息序列
 $H=(m_1,\ldots,m_t)$。训练和推理使用同一序列化器，将较早消息放入
-`history`，最后一条 user 消息放入 `current_user_request`；长度不足时先删除最早
-历史，再从中间截断当前请求，绝不直接截掉监督后缀。
+`history`，最后一条 user 消息放入 `current_user_request`。`standalone_request_v2`
+模板要求模型在内部把末轮还原为无需历史即可理解的独立请求：只补充理解末轮不可
+缺少的信息；若末轮已经完整或转向新目标，则不继承历史中的对象、动作或约束。这个
+中间请求不参与输出，模型仍直接生成候选名，因此只需一次前向。长度不足时先删除
+最早历史，再从中间截断当前请求，绝不直接截掉监督后缀。
+
+该设计采用 conversational query rewriting 的 standalone-query 目标。LlamaIndex 的
+[Condense Question](https://docs.llamaindex.ai/en/v0.10.33/api_reference/chat_engines/condense_question/)
+和 NVIDIA RAG 的
+[Query Rewriting](https://docs.nvidia.com/rag/latest/multiturn.html#option-1-query-rewriting-enable-queryrewriter)
+都先把历史和末轮语义化为独立请求；
+[CONQRR](https://research.google/pubs/conqrr-conversational-query-rewriting-for-retrieval-with-reinforcement-learning/)
+也验证了该目标对对话检索的有效性。
+本模式把改写指令融合进 Router，而不单独调用改写模型，以避免 NVIDIA 文档指出的
+额外时延。[LongLLMLingua](https://aclanthology.org/2024.acl-long.91/) 一类 token
+级压缩需要额外小模型，更适合万 token 长上下文，因此不作为短对话 Top1 路由的
+默认方案。
+
+模板名保存在 `router_manifest.json` 的 `generation_contract.conversation_template`。
+缺少该字段的旧 checkpoint 使用 `conversation_json_v1`，新训练固定使用
+`standalone_request_v2`，避免训练与推理的提示格式漂移。
 
 候选集合固定为
 

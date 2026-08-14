@@ -12,6 +12,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from llmgen.direct_router import CURRENT_CONVERSATION_TEMPLATE
 from llmgen.router import RouterDataError, read_jsonl, write_jsonl
 from scripts import train_router
 from scripts.top1.export_sft_data import export_sft_jsonl
@@ -62,6 +63,7 @@ def test_export_writes_standard_messages_only_jsonl(tmp_path) -> None:
     assert report["rows"] == 2
     assert report["candidate_counts"] == {"Ecommerce": 1, "ChitChat": 1}
     assert report["token_length_fitted"] is False
+    assert report["conversation_template"] == CURRENT_CONVERSATION_TEMPLATE
     assert [set(row) for row in rows] == [{"messages"}, {"messages"}]
     assert rows[0]["messages"][0] == {
         "role": "system",
@@ -77,6 +79,8 @@ def test_export_writes_standard_messages_only_jsonl(tmp_path) -> None:
     assert user_content.startswith("<conversation_json>")
     assert '"history":[{"role":"user","content":"推荐一款耳机"}' in user_content
     assert '"current_user_request":"500 元以内"' in user_content
+    assert "<contextualize>" in user_content
+    assert user_content.endswith("仅输出候选名称：")
     assert "untrusted source prompt" not in user_content
 
 
@@ -111,12 +115,12 @@ def test_tokenizer_aware_export_applies_router_length_fitting(tmp_path) -> None:
         candidate_registry=ROOT / "configs/top1_candidates.json",
         system_prompt_file=prompt,
         tokenizer=CharacterTokenizer(),
-        max_length=180,
+        max_length=512,
     )
     user_content = read_jsonl(destination)[0]["messages"][1]["content"]
 
     assert report["token_length_fitted"] is True
-    assert report["max_length"] == 180
+    assert report["max_length"] == 512
     assert "500 元以内" in user_content
     assert "very old context" not in user_content
 

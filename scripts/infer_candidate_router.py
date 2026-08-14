@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from llmgen.direct_router import (
+    CURRENT_CONVERSATION_TEMPLATE,
     DIRECT_ROUTING_MODE,
+    LEGACY_CONVERSATION_TEMPLATE,
+    SUPPORTED_CONVERSATION_TEMPLATES,
     CandidateNameTokenTrie,
     CandidateRoute,
     candidate_token_sequences,
@@ -119,6 +122,26 @@ def _load_manifest(model_path: str | Path) -> tuple[dict[str, Any] | None, Path 
     if not isinstance(contract, dict) or contract.get("mode") != DIRECT_ROUTING_MODE:
         raise RouterDataError("checkpoint has an incompatible generation contract")
     return payload, path
+
+
+def _conversation_template_from_manifest(
+    manifest: Mapping[str, Any] | None,
+) -> str:
+    """Preserve the prompt contract of checkpoints created before versioning."""
+
+    if manifest is None:
+        return CURRENT_CONVERSATION_TEMPLATE
+    contract = manifest.get("generation_contract")
+    value = (
+        contract.get("conversation_template", LEGACY_CONVERSATION_TEMPLATE)
+        if isinstance(contract, Mapping)
+        else LEGACY_CONVERSATION_TEMPLATE
+    )
+    if value not in SUPPORTED_CONVERSATION_TEMPLATES:
+        raise RouterDataError(
+            f"checkpoint uses an unsupported conversation template: {value!r}"
+        )
+    return value
 
 
 def _resolve_artifacts(
@@ -453,6 +476,11 @@ def _generate_batch(
             row["messages"],
             system_prompt,
             max_prompt_tokens=args.max_input_length,
+            conversation_template=getattr(
+                args,
+                "conversation_template",
+                CURRENT_CONVERSATION_TEMPLATE,
+            ),
         )[0]
         for row in batch
     ]
@@ -700,7 +728,10 @@ def main() -> None:
     if args.decoding_mode == "beam_search" and args.num_beams < 2:
         raise RouterDataError("beam_search requires num_beams >= 2")
 
-    registry_path, system_prompt, _, trained_max_length = _resolve_artifacts(args)
+    registry_path, system_prompt, manifest, trained_max_length = _resolve_artifacts(
+        args
+    )
+    args.conversation_template = _conversation_template_from_manifest(manifest)
     routes = load_candidate_registry(registry_path)
     routes_by_name = {route.name: route for route in routes}
     queries = _load_queries(args)

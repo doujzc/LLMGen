@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from llmgen.direct_router import (
+    CURRENT_CONVERSATION_TEMPLATE,
     candidate_token_sequences,
     load_candidate_registry,
     standard_candidate_sft_row,
@@ -82,6 +83,7 @@ def export_sft_jsonl(
                 tokenizer=tokenizer,
                 candidate_name_tokens=token_sequences,
                 max_length=max_length,
+                conversation_template=CURRENT_CONVERSATION_TEMPLATE,
             )
         except RouterDataError as exc:
             raise RouterDataError(f"{source}:{row_number}: {exc}") from exc
@@ -97,6 +99,7 @@ def export_sft_jsonl(
         },
         "token_length_fitted": tokenizer is not None,
         "max_length": max_length if tokenizer is not None else None,
+        "conversation_template": CURRENT_CONVERSATION_TEMPLATE,
     }
 
 
