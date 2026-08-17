@@ -9,13 +9,13 @@ import inspect
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from xml.sax.saxutils import escape as escape_xml_text
 
 
 ROUTING_MODE = "candidate_name_top1"
-CONVERSATION_TEMPLATE = "routing_envelope_xml_v1"
+CONVERSATION_TEMPLATE = "routing_envelope_markdown_v1"
 TARGET_CONTRACT = "candidate_name_tokens_plus_eos"
-INFERENCE_DECISION_RULE = "candidate_path_sum_logprob"
+INFERENCE_SCORING_RULE = "candidate_path_sum_logprob"
+INFERENCE_DECISION_RULE = "backend_group_threshold_v1"
 MEMORIZATION_SOURCE_TYPE = "label_description"
 MEMORIZATION_DESCRIPTION_TYPES = (
     "label_term",
@@ -125,10 +125,15 @@ def _nonempty_string(value: Any, *, field: str) -> str:
     return value.strip()
 
 
-def _escape_xml_content(content: str) -> str:
-    """Escape untrusted conversation text without changing its natural layout."""
+def _escape_markdown_content(content: str) -> str:
+    """Keep one message on one line without adding per-turn markup."""
 
-    return escape_xml_text(content)
+    return (
+        content.replace("\\", "\\\\")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
 
 
 def load_candidate_names(path: str | Path) -> tuple[str, ...]:
@@ -256,22 +261,18 @@ def target_candidate_name(row: Mapping[str, Any]) -> str:
 
 
 def build_user_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
-    """Serialize conversation data using the fixed XML routing envelope."""
+    """Serialize conversation data using the fixed Markdown routing envelope."""
 
     normalized = normalize_messages(messages)
-    lines = ["<routing_input>", "<history>"]
+    lines = ["## Dialogue Context"]
     lines.extend(
-        f'<message role="{message["role"]}">'
-        f'{_escape_xml_content(message["content"])}</message>'
+        f'{message["role"]}: {_escape_markdown_content(message["content"])}'
         for message in normalized[:-1]
     )
     lines.extend(
         (
-            "</history>",
-            "<current_user_request>"
-            f'{_escape_xml_content(normalized[-1]["content"])}'
-            "</current_user_request>",
-            "</routing_input>",
+            "## Turn T - Current Customer Utterance",
+            _escape_markdown_content(normalized[-1]["content"]),
         )
     )
     return "\n".join(lines)
@@ -431,7 +432,7 @@ def prompt_implementation_sha256() -> str:
 
     functions = (
         _nonempty_string,
-        _escape_xml_content,
+        _escape_markdown_content,
         _truncate_middle,
         normalize_messages,
         messages_from_row,

@@ -45,6 +45,11 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 - `target_candidate_name` 必须存在于 `configs/top1_candidates.json`。
 - 不要求训练集覆盖全部候选，其他元数据字段会被忽略。
 
+训练保留七个细粒度候选，但部署决策按照
+`configs/top1_decision_policy.json` 显式映射：`StockQuery` 和 `Ecommerce` 是可用后端，
+`StockAdvice`、`StockOther`、`ProductOther`、`ChitChat` 和 `NoAvailable` 都映射为
+后端 `NoAvailable`。代码不会根据候选名称或文本内容推断该映射。
+
 仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。
 默认还会读取 `data_top1/top1_labeldesc_paper_v1.jsonl`，先执行 description → label
 memorization。该公开 LabelDesc 文件已作为 `data_top1/` 中唯一的数据例外取消忽略；
@@ -105,16 +110,19 @@ runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
 
 训练和产物只有一套固定契约：
 
-1. `routing_envelope_xml_v1` 始终生成 `<history>` 和 `<current_user_request>`；较早消息
-   按时间顺序写入带 `role` 的 `<message>`，最后一轮 user 消息单独放在 Envelope 末尾。
-2. 对话正文会进行 XML 转义；固定判别和输出规则只存在于 system prompt，Envelope
-   内部只包含对话数据。
+1. `routing_envelope_markdown_v1` 始终生成 `## Dialogue Context` 和
+   `## Turn T - Current Customer Utterance`；较早消息按时间顺序写成紧凑的
+   `user:`、`assistant:` 或 `tool:` 行，最后一轮 user 消息单独放在末尾。
+2. 对话正文中的反斜杠和换行控制字符会进行单行转义；固定判别和输出规则只存在于
+   system prompt，Markdown Envelope 内部只包含对话数据。
 3. 超长输入先删除最早的完整历史消息，再从中间截断当前请求。
 4. prompt 始终为“最长候选 token 路径 + EOS”预留空间，绝不根据当前 label 改变裁剪。
 5. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
 6. Top1 模式不新增 token，也不调整模型词表。
 7. 启用 memorization 时，42 条 description → candidate 样本按照固定 seed 重排并重复，
    先执行配置数量的完整 optimizer steps；随后才进入主训练样本。
+8. 推理先计算七个候选路径分数，再按照结构化 decision policy 聚合为后端概率；禁止
+   对七分类先取 argmax、再进行后端映射。
 
 两阶段共用同一个 Trainer、模型、优化器、候选 token、system prompt 和
 `prepare_router_prompt()`。memorization 样本数按有效全局 batch 对齐，阶段边界不会把
@@ -157,6 +165,7 @@ final/
   model/                           # 唯一可部署目录
     model_artifact.json            # 全部模型文件哈希与稳定 model_id
     candidate_registry.json
+    decision_policy.json           # 候选到后端的映射、默认阈值与 temperature
     router_system_prompt.md
     router_manifest.json
   curves.json                      # train/eval loss、LR、grad norm 曲线数据
@@ -189,6 +198,19 @@ uv run --no-sync python scripts/evaluate_top1.py \
 评分阶段会显示按数据行计数的进度条；每一行完成全部候选路径评分（以及可选的
 history ablation）后推进一次。
 
+调整可用/OOS 倾向时，只覆盖阈值，不修改或重新训练模型：
+
+```bash
+uv run --no-sync python scripts/evaluate_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model \
+  --data /data/router/test.jsonl \
+  --available-threshold 0.7
+```
+
+阈值越高，越倾向输出后端 `NoAvailable`。决策使用
+`P(available)=P(StockQuery)+P(Ecommerce)`；其余五个候选的概率共同组成 `P(OOS)`。
+达到阈值后才在可用后端内选择概率最大的一个。
+
 分析多轮历史的净收益，并对比候选名长度偏置：
 
 ```bash
@@ -208,7 +230,8 @@ runs/evaluations/top1/<model_id前缀>/<evaluation_id>/
   logs/system.json
   predictions.jsonl               # 无原始文本的逐样本候选分数与诊断
   metrics.json
-  confusion_matrix.json
+  confusion_matrix.json           # 原始七分类混淆矩阵
+  backend_confusion_matrix.json   # StockQuery/Ecommerce/NoAvailable 业务口径
   summary.json
 runs/evaluations/top1/evaluation_index.jsonl
 runs/evaluations/top1/suites/<suite_id>/members.jsonl
@@ -217,7 +240,12 @@ runs/evaluations/top1/suites/<suite_id>/members.jsonl
 `model_id` 来自最终模型目录内所有文件的 SHA256；每次评测前都会重新校验，确认模型没有
 被改动。`evaluation_id` 每次都不同，而相同模型、数据快照和语义推理参数会得到相同的
 `evaluation_signature`，可用于发现重复实验。`batch_size`、设备和精度作为执行参数记录，
-不会混入语义签名；数据哈希和 history ablation 会混入签名。
+不会混入语义签名；数据哈希、decision policy、有效 available threshold 和 history
+ablation 会混入签名。`predictions.jsonl` 同时保留原始候选预测及 `backend_decision`；
+`summary.json` 的 `top1_accuracy` 使用后端业务口径，并另存 `raw_candidate_accuracy`。
+
+新训练 bundle 会自动携带默认 decision policy。旧 schema 2 bundle 没有该文件时，可在
+评测命令中显式指定 `--decision-policy configs/top1_decision_policy.json`。
 `evaluation_index.jsonl` 是所有评测的追加式索引；用同一个 `--suite-id` 可把一组数据集或
 参数扫描聚合到同一 suite 的 `members.jsonl`，而每个成员仍保持独立、不可变。
 

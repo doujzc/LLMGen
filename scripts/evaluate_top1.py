@@ -9,7 +9,11 @@ import inspect
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from llmgen.evaluation import aggregate_predictions, prediction_from_scores
+from llmgen.evaluation import (
+    aggregate_predictions,
+    load_backend_decision_policy,
+    prediction_from_scores,
+)
 from llmgen.experiment import (
     EVALUATION_RUN_SCHEMA_VERSION,
     RunStore,
@@ -32,6 +36,7 @@ from llmgen.top1 import (
     ROUTING_MODE,
     TARGET_CONTRACT,
     Top1DataError,
+    INFERENCE_SCORING_RULE,
     candidate_token_sequences,
     load_candidate_names,
     messages_from_row,
@@ -55,6 +60,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--evaluation-id")
     parser.add_argument("--suite-id")
     parser.add_argument("--candidate-registry")
+    parser.add_argument("--decision-policy")
+    parser.add_argument("--available-threshold", type=float)
     parser.add_argument("--system-prompt-file")
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--batch-size", type=int, default=32)
@@ -95,8 +102,9 @@ def _load_router_contract(model_dir: Path) -> dict[str, Any]:
     if not manifest_path.is_file():
         raise Top1DataError(f"router manifest does not exist: {manifest_path}")
     manifest = read_json_object(manifest_path)
-    if manifest.get("schema_version") != 2:
-        raise Top1DataError("router manifest schema_version must be 2")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {2, 3}:
+        raise Top1DataError("router manifest schema_version must be 2 or 3")
     if manifest.get("routing_mode") != ROUTING_MODE:
         raise Top1DataError("router manifest has an incompatible routing mode")
     if manifest.get("target") != TARGET_CONTRACT:
@@ -112,15 +120,53 @@ def _load_router_contract(model_dir: Path) -> dict[str, Any]:
     if conversation != expected_conversation:
         raise Top1DataError("router manifest has an incompatible prompt contract")
     inference = manifest.get("inference")
-    if inference != {
-        "decision_rule": INFERENCE_DECISION_RULE,
-        "include_eos": True,
-    }:
+    expected_inference = (
+        {
+            "scoring_rule": INFERENCE_SCORING_RULE,
+            "decision_rule": INFERENCE_DECISION_RULE,
+            "include_eos": True,
+        }
+        if schema_version == 3
+        else {
+            "decision_rule": INFERENCE_SCORING_RULE,
+            "include_eos": True,
+        }
+    )
+    if inference != expected_inference:
         raise Top1DataError("router manifest has an incompatible inference contract")
+    if schema_version == 3:
+        decision_policy = manifest.get("backend_decision_policy")
+        if (
+            not isinstance(decision_policy, Mapping)
+            or decision_policy.get("decision_rule") != INFERENCE_DECISION_RULE
+            or not isinstance(decision_policy.get("path"), str)
+            or not isinstance(decision_policy.get("sha256"), str)
+        ):
+            raise Top1DataError(
+                "router manifest has invalid backend decision policy metadata"
+            )
     max_length = manifest.get("max_length")
     if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
         raise Top1DataError("router manifest max_length must be a positive integer")
     return manifest
+
+
+def _validate_bundled_decision_policy(
+    manifest: Mapping[str, Any],
+    *,
+    model_dir: Path,
+    decision_policy_path: Path,
+) -> None:
+    """Verify the default policy when evaluation uses the bundled file."""
+
+    if manifest.get("schema_version") != 3:
+        return
+    metadata = manifest["backend_decision_policy"]
+    bundled_path = (model_dir / str(metadata["path"])).resolve()
+    if decision_policy_path == bundled_path and metadata["sha256"] != sha256_file(
+        decision_policy_path
+    ):
+        raise Top1DataError("bundled backend decision policy differs from manifest")
 
 
 def _apply_router_contract(
@@ -492,6 +538,22 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not system_prompt:
         raise Top1DataError("system prompt file is empty")
     candidate_names = load_candidate_names(registry_path)
+    decision_policy_path = _resolve_bundle_file(
+        args.decision_policy,
+        model_dir,
+        "decision_policy.json",
+        label="backend decision policy",
+    )
+    decision_policy = load_backend_decision_policy(
+        decision_policy_path,
+        candidate_names,
+        available_threshold=args.available_threshold,
+    )
+    _validate_bundled_decision_policy(
+        router_contract,
+        model_dir=model_dir,
+        decision_policy_path=decision_policy_path,
+    )
     _apply_router_contract(
         args,
         router_contract,
@@ -515,6 +577,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "max_rows": args.max_rows,
         "score_mode": "sum_logprob",
         "history_ablation": args.history_ablation,
+        "backend_decision": decision_policy.payload(),
     }
     evaluation_signature = canonical_sha256(semantic_config)
     evaluation_id = _safe_component(
@@ -554,6 +617,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         "dataset": {
             "path": str(data_path),
             "sha256": semantic_config["dataset_sha256"],
+        },
+        "decision_policy": {
+            "path": str(decision_policy_path),
+            "sha256": sha256_file(decision_policy_path),
+            "effective": decision_policy.payload(),
         },
         "semantic_inference": semantic_config,
         "execution": {
@@ -661,6 +729,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         scores=scores[row_index],
                         target_candidate_name=row["target_candidate_name"],
                         diagnostics=row["diagnostics"],
+                        decision_policy=decision_policy,
                         history_ablation_scores=ablation_scores.get(row_index),
                     )
                     append_jsonl(prediction_path, record)
@@ -676,22 +745,37 @@ def main(argv: Sequence[str] | None = None) -> None:
                     )
         finally:
             progress.close()
-        metrics = aggregate_predictions(predictions, candidate_names)
+        metrics = aggregate_predictions(
+            predictions,
+            candidate_names,
+            decision_policy,
+        )
         write_json(run_dir / "metrics.json", metrics)
         write_json(run_dir / "confusion_matrix.json", metrics["confusion_matrix"])
+        write_json(
+            run_dir / "backend_confusion_matrix.json",
+            metrics["backend"]["confusion_matrix"],
+        )
+        backend_metrics = metrics["backend"]
         summary = {
             "schema_version": 1,
             "evaluation_id": evaluation_id,
             "evaluation_signature": evaluation_signature,
             "model_id": model_artifact["model_id"],
             "rows": metrics["rows"],
-            "top1_accuracy": metrics["top1_accuracy"],
+            "top1_accuracy": backend_metrics["accuracy"],
+            "backend_accuracy": backend_metrics["accuracy"],
+            "raw_candidate_accuracy": metrics["top1_accuracy"],
             "macro_recall_observed_candidates": metrics[
                 "macro_recall_observed_candidates"
             ],
-            "expected_calibration_error": metrics["calibration"][
+            "expected_calibration_error": backend_metrics["calibration"][
                 "expected_calibration_error"
             ],
+            "raw_candidate_expected_calibration_error": metrics["calibration"][
+                "expected_calibration_error"
+            ],
+            "available_oos": backend_metrics["available_oos"],
             "resolved_precision": resolved_precision,
             "completed_at": utc_now(),
         }
@@ -707,7 +791,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             "dataset_sha256": semantic_config["dataset_sha256"],
             "score_mode": "sum_logprob",
             "rows": metrics["rows"],
-            "top1_accuracy": metrics["top1_accuracy"],
+            "top1_accuracy": backend_metrics["accuracy"],
+            "backend_accuracy": backend_metrics["accuracy"],
+            "raw_candidate_accuracy": metrics["top1_accuracy"],
+            "available_threshold": decision_policy.available_threshold,
         }
         append_jsonl(evaluation_root / "evaluation_index.jsonl", index_record)
         if suite_id:

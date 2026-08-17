@@ -15,6 +15,10 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from llmgen.diagnostics import build_curve_summary, build_data_profile
+from llmgen.evaluation import (
+    BackendDecisionPolicy,
+    load_backend_decision_policy,
+)
 from llmgen.experiment import (
     TRAINING_RUN_SCHEMA_VERSION,
     RunStore,
@@ -34,6 +38,7 @@ from llmgen.top1 import (
     MAX_HISTORY_CHARACTERS,
     MAX_HISTORY_MESSAGES,
     INFERENCE_DECISION_RULE,
+    INFERENCE_SCORING_RULE,
     ROUTING_MODE,
     TARGET_CONTRACT,
     Top1DataError,
@@ -70,6 +75,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--validation-data")
     parser.add_argument("--candidate-registry", required=True)
+    parser.add_argument("--decision-policy", required=True)
     parser.add_argument("--system-prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--experiment-name", default="top1")
@@ -175,6 +181,7 @@ def _validate_args(args: argparse.Namespace) -> None:
     required_files = {
         "train data": args.train_data,
         "candidate registry": args.candidate_registry,
+        "decision policy": args.decision_policy,
         "system prompt": args.system_prompt_file,
     }
     if args.validation_data:
@@ -527,6 +534,7 @@ def _write_bundle(
     model: Any,
     candidate_names: tuple[str, ...],
     candidate_tokens: Mapping[str, Sequence[int]],
+    decision_policy: BackendDecisionPolicy,
     system_prompt: str,
     train_report: Mapping[str, Any],
     memorization_report: Mapping[str, Any] | None,
@@ -542,6 +550,8 @@ def _write_bundle(
     tokenizer.save_pretrained(str(output_dir))
     bundled_registry = output_dir / "candidate_registry.json"
     write_json(bundled_registry, candidate_registry_payload(candidate_names))
+    bundled_decision_policy = output_dir / "decision_policy.json"
+    write_json(bundled_decision_policy, decision_policy.payload())
     bundled_prompt = output_dir / "router_system_prompt.md"
     bundled_prompt.write_text(system_prompt.rstrip() + "\n", encoding="utf-8")
     base_model_dependency = _base_model_dependency(args, model)
@@ -551,7 +561,7 @@ def _write_bundle(
         getattr(model.config, "_commit_hash", None),
     )
     manifest = {
-        "schema_version": 2,
+        "schema_version": 3,
         "routing_mode": ROUTING_MODE,
         "base_model": args.model_name_or_path,
         "base_model_revision": base_model_revision,
@@ -588,6 +598,11 @@ def _write_bundle(
                 name: list(candidate_tokens[name]) for name in candidate_names
             },
         },
+        "backend_decision_policy": {
+            "path": bundled_decision_policy.name,
+            "sha256": sha256_file(bundled_decision_policy),
+            "decision_rule": decision_policy.payload()["decision_rule"],
+        },
         "system_prompt": {
             "path": bundled_prompt.name,
             "sha256": sha256_file(bundled_prompt),
@@ -605,6 +620,7 @@ def _write_bundle(
         ),
         "target": TARGET_CONTRACT,
         "inference": {
+            "scoring_rule": INFERENCE_SCORING_RULE,
             "decision_rule": INFERENCE_DECISION_RULE,
             "include_eos": True,
         },
@@ -705,6 +721,7 @@ def _build_run_manifest(
         repository / "src" / "llmgen" / "top1.py",
         repository / "src" / "llmgen" / "experiment.py",
         repository / "src" / "llmgen" / "diagnostics.py",
+        repository / "src" / "llmgen" / "evaluation.py",
     )
     code = {
         "git": git_snapshot(repository),
@@ -737,6 +754,7 @@ def _build_run_manifest(
                 sha256_file(args.validation_data) if args.validation_data else None
             ),
             "candidate_registry_sha256": sha256_file(args.candidate_registry),
+            "decision_policy_sha256": sha256_file(args.decision_policy),
             "system_prompt_sha256": sha256_file(args.system_prompt_file),
         },
         "configuration": {
@@ -896,6 +914,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not system_prompt:
             raise Top1DataError("system prompt file is empty")
         candidate_names = load_candidate_names(args.candidate_registry)
+        decision_policy = load_backend_decision_policy(
+            args.decision_policy,
+            candidate_names,
+        )
         train_rows = read_jsonl(args.train_data)
         memorization_rows = (
             read_jsonl(args.memorization_data) if args.memorization_data else []
@@ -1149,6 +1171,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model=model,
                 candidate_names=candidate_names,
                 candidate_tokens=candidate_tokens,
+                decision_policy=decision_policy,
                 system_prompt=system_prompt,
                 train_report=train_report,
                 memorization_report=memorization_report,

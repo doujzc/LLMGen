@@ -7,6 +7,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
+from llmgen.evaluation import BackendDecisionPolicy, load_backend_decision_policy
 from llmgen.top1 import Top1DataError, read_jsonl, write_jsonl
 from scripts import evaluate_top1, train_top1
 from test_top1_core import CharacterTokenizer
@@ -32,6 +33,7 @@ def _training_args(root: Path) -> Namespace:
         memorization_steps=0,
         validation_data=None,
         candidate_registry="configs/top1_candidates.json",
+        decision_policy="configs/top1_decision_policy.json",
         system_prompt_file=str(prompt),
         output_dir=str(root / "output"),
         experiment_name="test-top1",
@@ -213,6 +215,16 @@ class Top1TrainingTests(unittest.TestCase):
 
             tokenizer = Tokenizer()
             model = SimpleNamespace(config=SimpleNamespace(_commit_hash="revision"))
+            decision_policy = BackendDecisionPolicy(
+                candidate_to_backend={
+                    "StockQuery": "StockQuery",
+                    "Ecommerce": "NoAvailable",
+                },
+                backend_labels=("StockQuery", "NoAvailable"),
+                fallback_backend_label="NoAvailable",
+                available_threshold=0.5,
+                temperature=1.0,
+            )
             train_top1._write_bundle(
                 args=args,
                 output_dir=model_output,
@@ -220,6 +232,7 @@ class Top1TrainingTests(unittest.TestCase):
                 model=model,
                 candidate_names=("StockQuery", "Ecommerce"),
                 candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                decision_policy=decision_policy,
                 system_prompt="route",
                 train_report={
                     "rows": 1,
@@ -238,12 +251,12 @@ class Top1TrainingTests(unittest.TestCase):
             )
 
             manifest = json.loads((model_output / "router_manifest.json").read_text())
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 3)
             self.assertEqual(manifest["routing_mode"], "candidate_name_top1")
             self.assertEqual(manifest["target"], "candidate_name_tokens_plus_eos")
             self.assertEqual(
                 manifest["conversation"]["template"],
-                "routing_envelope_xml_v1",
+                "routing_envelope_markdown_v1",
             )
             self.assertEqual(
                 manifest["training"]["effective_global_batch_size"],
@@ -253,6 +266,14 @@ class Top1TrainingTests(unittest.TestCase):
             self.assertEqual(
                 registry["candidates"],
                 ["StockQuery", "Ecommerce"],
+            )
+            bundled_policy = load_backend_decision_policy(
+                model_output / "decision_policy.json",
+                ("StockQuery", "Ecommerce"),
+            )
+            self.assertEqual(
+                bundled_policy.candidate_to_backend["Ecommerce"],
+                "NoAvailable",
             )
             self.assertEqual(
                 read_jsonl(prepared),

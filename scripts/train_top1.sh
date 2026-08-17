@@ -49,6 +49,7 @@ require_file() {
 
 require_file "$TOP1_TRAIN_DATA"
 require_file "$TOP1_CANDIDATE_REGISTRY"
+require_file "$TOP1_DECISION_POLICY"
 require_file "$TOP1_SYSTEM_PROMPT"
 if [[ -n "$TOP1_MEMORIZATION_DATA" ]]; then
   require_file "$TOP1_MEMORIZATION_DATA"
@@ -122,6 +123,7 @@ exec "${LAUNCH[@]}" scripts/train_top1.py \
   --model-name-or-path "$TOP1_MODEL" \
   --train-data "$TOP1_TRAIN_DATA" \
   --candidate-registry "$TOP1_CANDIDATE_REGISTRY" \
+  --decision-policy "$TOP1_DECISION_POLICY" \
   --system-prompt-file "$TOP1_SYSTEM_PROMPT" \
   --output-dir "$TOP1_OUTPUT_DIR" \
   --experiment-name "$TOP1_EXPERIMENT_NAME" \

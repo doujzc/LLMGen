@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "routing_mode": "candidate_name_top1",
+  "decision_rule": "backend_group_threshold_v1",
+  "backend_labels": [
+    "StockQuery",
+    "Ecommerce",
+    "NoAvailable"
+  ],
+  "fallback_backend_label": "NoAvailable",
+  "candidate_to_backend": {
+    "StockAdvice": "NoAvailable",
+    "StockOther": "NoAvailable",
+    "StockQuery": "StockQuery",
+    "ProductOther": "NoAvailable",
+    "Ecommerce": "Ecommerce",
+    "ChitChat": "NoAvailable",
+    "NoAvailable": "NoAvailable"
+  },
+  "available_threshold": 0.5,
+  "temperature": 1.0
+}
