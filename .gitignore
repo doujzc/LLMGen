@@ -9,3 +9,4 @@ dist/
 runs/
 data_top1/*
 !data_top1/README.md
+!data_top1/top1_labeldesc_paper_v1.jsonl

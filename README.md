@@ -47,7 +47,8 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 
 仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。
 默认还会读取 `data_top1/top1_labeldesc_paper_v1.jsonl`，先执行 description → label
-memorization；该文件和主训练数据一样不进入 Git，需要单独同步到训练服务器。
+memorization。该公开 LabelDesc 文件已作为 `data_top1/` 中唯一的数据例外取消忽略；
+其它主训练、验证和评测数据仍不进入 Git。
 
 ## 训练
 
