@@ -58,11 +58,19 @@ def load_backend_decision_policy(
         raise Top1DataError(f"invalid backend decision policy: {source}") from exc
     if not isinstance(payload, dict):
         raise Top1DataError("backend decision policy must be a JSON object")
-    if payload.get("schema_version") != 2:
-        raise Top1DataError("backend decision policy schema_version must be 2")
+    schema_version = payload.get("schema_version")
+    if schema_version not in {1, 2}:
+        raise Top1DataError(
+            "backend decision policy schema_version must be 1 or 2"
+        )
     if payload.get("routing_mode") != ROUTING_MODE:
         raise Top1DataError("backend decision policy has an incompatible routing mode")
-    if payload.get("decision_rule") != INFERENCE_DECISION_RULE:
+    expected_decision_rule = (
+        "backend_group_threshold_v1"
+        if schema_version == 1
+        else INFERENCE_DECISION_RULE
+    )
+    if payload.get("decision_rule") != expected_decision_rule:
         raise Top1DataError("backend decision policy has an incompatible decision rule")
 
     backend_values = payload.get("backend_labels")

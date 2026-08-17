@@ -306,6 +306,51 @@ class Top1TrainingTests(unittest.TestCase):
                 candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
                 transformers_version="5.5.4",
             )
+            legacy_manifest = {
+                **manifest,
+                "schema_version": 3,
+                "inference": {
+                    "scoring_rule": "candidate_path_sum_logprob",
+                    "decision_rule": "backend_group_threshold_v1",
+                    "include_eos": True,
+                },
+                "backend_decision_policy": {
+                    **manifest["backend_decision_policy"],
+                    "decision_rule": "backend_group_threshold_v1",
+                },
+            }
+            (model_output / "router_manifest.json").write_text(
+                json.dumps(legacy_manifest),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                evaluate_top1._load_router_contract(model_output)["schema_version"],
+                3,
+            )
+            legacy_schema2 = {
+                key: value
+                for key, value in manifest.items()
+                if key != "backend_decision_policy"
+            }
+            legacy_schema2.update(
+                schema_version=2,
+                inference={
+                    "decision_rule": "candidate_path_sum_logprob",
+                    "include_eos": True,
+                },
+            )
+            (model_output / "router_manifest.json").write_text(
+                json.dumps(legacy_schema2),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                evaluate_top1._load_router_contract(model_output)["schema_version"],
+                2,
+            )
+            (model_output / "router_manifest.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
             tokenizer.chat_template = "changed"
             with self.assertRaisesRegex(Top1DataError, "differs from training"):
                 evaluate_top1._validate_loaded_tokenizer(

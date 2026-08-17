@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -240,6 +243,30 @@ class EvaluationTests(unittest.TestCase):
         )
         self.assertEqual(policy.candidate_to_backend["StockAdvice"], "NoAvailable")
         self.assertEqual(policy.candidate_to_backend["ChitChat"], "NoAvailable")
+
+    def test_schema1_policy_is_normalized_for_new_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "decision_policy.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "routing_mode": "candidate_name_top1",
+                        "decision_rule": "backend_group_threshold_v1",
+                        "backend_labels": ["A", "Fallback"],
+                        "fallback_backend_label": "Fallback",
+                        "candidate_to_backend": {"A": "A", "B": "Fallback"},
+                        "available_threshold": 0.5,
+                        "temperature": 1.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            policy = load_backend_decision_policy(path, ("A", "B"))
+
+            self.assertEqual(policy.payload()["schema_version"], 2)
+            self.assertEqual(policy.candidate_to_backend["B"], "Fallback")
 
 
 if __name__ == "__main__":

@@ -117,14 +117,34 @@ def _resolve_bundle_file(
     return path.resolve()
 
 
+def _resolve_decision_policy(explicit: str | None, model_dir: Path) -> Path:
+    """Resolve policy from CLI, bundle, or the repository compatibility default."""
+
+    if explicit:
+        candidates = (Path(explicit).expanduser(),)
+    else:
+        candidates = (
+            model_dir / "decision_policy.json",
+            Path(__file__).resolve().parents[1]
+            / "configs"
+            / "top1_decision_policy.json",
+        )
+    for path in candidates:
+        if path.is_file():
+            return path.resolve()
+    raise Top1DataError(
+        "backend decision policy does not exist; pass --decision-policy"
+    )
+
+
 def _load_router_contract(model_dir: Path) -> dict[str, Any]:
     manifest_path = model_dir / "router_manifest.json"
     if not manifest_path.is_file():
         raise Top1DataError(f"router manifest does not exist: {manifest_path}")
     manifest = read_json_object(manifest_path)
     schema_version = manifest.get("schema_version")
-    if schema_version != 4:
-        raise Top1DataError("router manifest schema_version must be 4")
+    if schema_version not in {2, 3, 4}:
+        raise Top1DataError("router manifest schema_version must be 2, 3, or 4")
     if manifest.get("routing_mode") != ROUTING_MODE:
         raise Top1DataError("router manifest has an incompatible routing mode")
     if manifest.get("target") != TARGET_CONTRACT:
@@ -141,24 +161,41 @@ def _load_router_contract(model_dir: Path) -> dict[str, Any]:
         raise Top1DataError("router manifest has an incompatible prompt contract")
     inference = manifest.get("inference")
     expected_inference = {
-        "scoring_rule": INFERENCE_SCORING_RULE,
-        "decision_rule": INFERENCE_DECISION_RULE,
-        "include_eos": True,
-        "decoding_modes": list(DECODING_MODES),
-        "num_return_sequences": 1,
-    }
+        2: {
+            "decision_rule": "candidate_path_sum_logprob",
+            "include_eos": True,
+        },
+        3: {
+            "scoring_rule": "candidate_path_sum_logprob",
+            "decision_rule": "backend_group_threshold_v1",
+            "include_eos": True,
+        },
+        4: {
+            "scoring_rule": INFERENCE_SCORING_RULE,
+            "decision_rule": INFERENCE_DECISION_RULE,
+            "include_eos": True,
+            "decoding_modes": list(DECODING_MODES),
+            "num_return_sequences": 1,
+        },
+    }[schema_version]
     if inference != expected_inference:
         raise Top1DataError("router manifest has an incompatible inference contract")
-    decision_policy = manifest.get("backend_decision_policy")
-    if (
-        not isinstance(decision_policy, Mapping)
-        or decision_policy.get("decision_rule") != INFERENCE_DECISION_RULE
-        or not isinstance(decision_policy.get("path"), str)
-        or not isinstance(decision_policy.get("sha256"), str)
-    ):
-        raise Top1DataError(
-            "router manifest has invalid backend decision policy metadata"
+    if schema_version >= 3:
+        decision_policy = manifest.get("backend_decision_policy")
+        expected_policy_rule = (
+            "backend_group_threshold_v1"
+            if schema_version == 3
+            else INFERENCE_DECISION_RULE
         )
+        if (
+            not isinstance(decision_policy, Mapping)
+            or decision_policy.get("decision_rule") != expected_policy_rule
+            or not isinstance(decision_policy.get("path"), str)
+            or not isinstance(decision_policy.get("sha256"), str)
+        ):
+            raise Top1DataError(
+                "router manifest has invalid backend decision policy metadata"
+            )
     max_length = manifest.get("max_length")
     if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
         raise Top1DataError("router manifest max_length must be a positive integer")
@@ -173,7 +210,9 @@ def _validate_bundled_decision_policy(
 ) -> None:
     """Verify the default policy when evaluation uses the bundled file."""
 
-    metadata = manifest["backend_decision_policy"]
+    metadata = manifest.get("backend_decision_policy")
+    if not isinstance(metadata, Mapping):
+        return
     bundled_path = (model_dir / str(metadata["path"])).resolve()
     if decision_policy_path == bundled_path and metadata["sha256"] != sha256_file(
         decision_policy_path
@@ -598,12 +637,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not system_prompt:
         raise Top1DataError("system prompt file is empty")
     candidate_names = load_candidate_names(registry_path)
-    decision_policy_path = _resolve_bundle_file(
-        args.decision_policy,
-        model_dir,
-        "decision_policy.json",
-        label="backend decision policy",
-    )
+    decision_policy_path = _resolve_decision_policy(args.decision_policy, model_dir)
     decision_policy = load_backend_decision_policy(
         decision_policy_path,
         candidate_names,
@@ -631,6 +665,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "candidate_registry_sha256": sha256_file(registry_path),
         "system_prompt_sha256": sha256_file(prompt_path),
         "routing_mode": ROUTING_MODE,
+        "source_router_schema_version": router_contract["schema_version"],
         "conversation_template": CONVERSATION_TEMPLATE,
         "max_length": args.max_length,
         "max_rows": args.max_rows,

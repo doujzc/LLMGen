@@ -258,6 +258,9 @@ runs/evaluations/top1/suites/<suite_id>/members.jsonl
 `summary.json` 的 `top1_accuracy` 使用后端业务口径，并另存 `raw_candidate_accuracy`。
 
 新训练 bundle 会自动携带 decision policy，并将受约束生成契约写入 schema 4 manifest。
+评测也兼容 prompt/tokenizer 契约一致的 schema 2/3 模型：schema 3 的旧 policy 会在内存中
+规范化；schema 2 没有 bundled policy 时使用显式 `--decision-policy`，或仓库默认 policy。
+旧模型目录保持只读，不需要修改 manifest、破坏 `model_artifact.json` 哈希或重新训练。
 `evaluation_index.jsonl` 是所有评测的追加式索引；用同一个 `--suite-id` 可把一组数据集或
 参数扫描聚合到同一 suite 的 `members.jsonl`，而每个成员仍保持独立、不可变。
 
