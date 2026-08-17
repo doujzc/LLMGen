@@ -15,6 +15,13 @@ ROUTING_MODE = "candidate_name_top1"
 CONVERSATION_TEMPLATE = "standalone_request_v2"
 TARGET_CONTRACT = "candidate_name_tokens_plus_eos"
 INFERENCE_DECISION_RULE = "candidate_path_sum_logprob"
+MEMORIZATION_SOURCE_TYPE = "label_description"
+MEMORIZATION_DESCRIPTION_TYPES = (
+    "label_term",
+    "related_term",
+    "concise_definition",
+    "extended_definition",
+)
 MAX_HISTORY_MESSAGES = 16
 MAX_HISTORY_CHARACTERS = 12_000
 MAX_ASSISTANT_HISTORY_CHARACTERS = 1_200
@@ -502,6 +509,84 @@ def validate_training_rows(
         "multi_turn_rows": multi_turn,
         "candidate_counts": {
             name: counts[name] for name in ordered_names if counts[name]
+        },
+    }
+
+
+def validate_memorization_rows(
+    rows: Sequence[Mapping[str, Any]],
+    candidate_names: Sequence[str],
+    *,
+    source: str | Path,
+) -> dict[str, Any]:
+    """Validate the structured description-to-candidate memorization dataset."""
+
+    report = validate_training_rows(rows, candidate_names, source=source)
+    seen_ids: set[str] = set()
+    description_counts: Counter[str] = Counter()
+    candidate_description_counts: dict[str, Counter[str]] = {
+        name: Counter() for name in candidate_names
+    }
+    for row_number, row in enumerate(rows, start=1):
+        try:
+            sample_id = _nonempty_string(row.get("id"), field="id")
+            if sample_id in seen_ids:
+                raise Top1DataError(f"duplicate id: {sample_id!r}")
+            seen_ids.add(sample_id)
+            source_type = _nonempty_string(
+                row.get("source_type"),
+                field="source_type",
+            )
+            if source_type != MEMORIZATION_SOURCE_TYPE:
+                raise Top1DataError(
+                    f"source_type must be {MEMORIZATION_SOURCE_TYPE!r}"
+                )
+            description_type = _nonempty_string(
+                row.get("description_type"),
+                field="description_type",
+            )
+            if description_type not in MEMORIZATION_DESCRIPTION_TYPES:
+                raise Top1DataError(
+                    f"unsupported description_type: {description_type!r}"
+                )
+            messages = row.get("messages")
+            if not isinstance(messages, list) or len(messages) != 1:
+                raise Top1DataError(
+                    "memorization rows must contain exactly one user message"
+                )
+            message = messages[0]
+            if not isinstance(message, Mapping) or message.get("role") != "user":
+                raise Top1DataError(
+                    "memorization rows must contain exactly one user message"
+                )
+            _nonempty_string(message.get("content"), field="messages[0].content")
+            target = target_candidate_name(row)
+        except Top1DataError as exc:
+            raise Top1DataError(f"{source}:{row_number}: {exc}") from exc
+        description_counts[description_type] += 1
+        candidate_description_counts[target][description_type] += 1
+
+    missing_candidates = [
+        name for name in candidate_names if not report["candidate_counts"].get(name)
+    ]
+    if missing_candidates:
+        raise Top1DataError(
+            "memorization data must cover every candidate: "
+            + ", ".join(missing_candidates)
+        )
+    return {
+        **report,
+        "source_type": MEMORIZATION_SOURCE_TYPE,
+        "description_type_counts": {
+            name: description_counts[name]
+            for name in MEMORIZATION_DESCRIPTION_TYPES
+        },
+        "candidate_description_type_counts": {
+            candidate: {
+                name: candidate_description_counts[candidate][name]
+                for name in MEMORIZATION_DESCRIPTION_TYPES
+            }
+            for candidate in candidate_names
         },
     }
 

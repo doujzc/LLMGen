@@ -7,8 +7,10 @@ import argparse
 import importlib.metadata
 import inspect
 import json
+import math
 import os
 from pathlib import Path
+import random
 import sys
 from typing import Any, Mapping, Sequence
 
@@ -43,6 +45,7 @@ from llmgen.top1 import (
     read_jsonl,
     sha256_file,
     tokenizer_prompt_contract,
+    validate_memorization_rows,
     validate_training_rows,
     write_json,
     write_jsonl,
@@ -58,6 +61,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--model-name-or-path", required=True)
     parser.add_argument("--train-data", required=True)
+    parser.add_argument("--memorization-data")
+    parser.add_argument(
+        "--memorization-steps",
+        type=int,
+        default=0,
+        help="Optimizer steps spent on description-to-label memorization before main training.",
+    )
     parser.add_argument("--validation-data")
     parser.add_argument("--candidate-registry", required=True)
     parser.add_argument("--system-prompt-file", required=True)
@@ -169,6 +179,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     }
     if args.validation_data:
         required_files["validation data"] = args.validation_data
+    if args.memorization_data:
+        required_files["memorization data"] = args.memorization_data
     for label, value in required_files.items():
         if not Path(value).expanduser().is_file():
             raise Top1DataError(f"{label} does not exist: {value}")
@@ -192,6 +204,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise Top1DataError("values must be positive: " + ", ".join(invalid))
     if args.dataloader_num_workers < 0:
         raise Top1DataError("dataloader_num_workers cannot be negative")
+    if args.memorization_data and args.memorization_steps <= 0:
+        raise Top1DataError(
+            "memorization_steps must be positive when memorization_data is set"
+        )
+    if not args.memorization_data and args.memorization_steps:
+        raise Top1DataError(
+            "memorization_data is required when memorization_steps is non-zero"
+        )
     if not 0.0 <= args.warmup_ratio <= 1.0:
         raise Top1DataError("warmup_ratio must be in [0, 1]")
     if args.weight_decay < 0:
@@ -222,12 +242,13 @@ def _build_training_arguments(
     *,
     has_validation: bool,
     resume_from_checkpoint: str | bool | None,
+    staged_training: bool = False,
 ) -> Any:
     checkpoint_dir = Path(args.output_dir) / "checkpoints"
     training_kwargs = {
         "output_dir": str(checkpoint_dir),
         "overwrite_output_dir": resume_from_checkpoint is None,
-        "num_train_epochs": args.epochs,
+        "num_train_epochs": 1.0 if staged_training else args.epochs,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "per_device_eval_batch_size": args.per_device_eval_batch_size,
         "eval_accumulation_steps": args.eval_accumulation_steps,
@@ -259,6 +280,13 @@ def _build_training_arguments(
         "data_seed": args.seed,
     }
     parameters = inspect.signature(transformers.TrainingArguments.__init__).parameters
+    if staged_training:
+        if "train_sampling_strategy" not in parameters:
+            raise Top1DataError(
+                "memorization curriculum requires Transformers with "
+                "TrainingArguments.train_sampling_strategy"
+            )
+        training_kwargs["train_sampling_strategy"] = "sequential"
     evaluation_key = (
         "eval_strategy" if "eval_strategy" in parameters else "evaluation_strategy"
     )
@@ -350,6 +378,113 @@ def _prepare_rows(
     return encoded, sft_rows, diagnostics
 
 
+def _shuffled_indices(length: int, *, seed: int) -> list[int]:
+    indices = list(range(length))
+    random.Random(seed).shuffle(indices)
+    return indices
+
+
+def _repeated_shuffled_indices(
+    length: int,
+    *,
+    count: int,
+    seed: int,
+) -> list[int]:
+    if length <= 0:
+        raise Top1DataError("cannot schedule an empty training stage")
+    result: list[int] = []
+    cycle = 0
+    while len(result) < count:
+        result.extend(_shuffled_indices(length, seed=seed + cycle))
+        cycle += 1
+    return result[:count]
+
+
+def _main_training_indices(
+    row_count: int,
+    *,
+    epochs: float,
+    seed: int,
+) -> list[int]:
+    if row_count <= 0:
+        raise Top1DataError("main training data cannot be empty")
+    full_epochs = int(math.floor(epochs))
+    fractional_epoch = epochs - full_epochs
+    result: list[int] = []
+    for epoch_index in range(full_epochs):
+        result.extend(
+            _shuffled_indices(row_count, seed=seed + 100_000 + epoch_index)
+        )
+    if fractional_epoch:
+        final_epoch = _shuffled_indices(
+            row_count,
+            seed=seed + 100_000 + full_epochs,
+        )
+        result.extend(final_epoch[: max(1, math.ceil(row_count * fractional_epoch))])
+    return result
+
+
+def _build_training_schedule(
+    memorization_examples: Sequence[Mapping[str, Sequence[int]]],
+    train_examples: Sequence[Mapping[str, Sequence[int]]],
+    *,
+    memorization_steps: int,
+    main_epochs: float,
+    effective_global_batch_size: int,
+    seed: int,
+) -> tuple[list[Mapping[str, Sequence[int]]], dict[str, Any]]:
+    """Build a deterministic, optimizer-step-aligned memorization prefix."""
+
+    if memorization_steps <= 0:
+        raise Top1DataError("memorization_steps must be positive")
+    if effective_global_batch_size <= 0:
+        raise Top1DataError("effective_global_batch_size must be positive")
+    memorization_sample_count = memorization_steps * effective_global_batch_size
+    memorization_indices = _repeated_shuffled_indices(
+        len(memorization_examples),
+        count=memorization_sample_count,
+        seed=seed,
+    )
+    main_indices = _main_training_indices(
+        len(train_examples),
+        epochs=main_epochs,
+        seed=seed,
+    )
+    examples = [memorization_examples[index] for index in memorization_indices]
+    examples.extend(train_examples[index] for index in main_indices)
+    main_steps = math.ceil(len(main_indices) / effective_global_batch_size)
+    metadata = {
+        "schema_version": 1,
+        "algorithm": "memorization_prefix_v1",
+        "sampling": "deterministic_epoch_shuffle_then_sequential",
+        "seed": seed,
+        "effective_global_batch_size": effective_global_batch_size,
+        "memorization": {
+            "input_rows": len(memorization_examples),
+            "scheduled_samples": len(memorization_indices),
+            "optimizer_steps": memorization_steps,
+            "ends_after_global_step": memorization_steps,
+        },
+        "main": {
+            "input_rows": len(train_examples),
+            "requested_epochs": main_epochs,
+            "scheduled_samples": len(main_indices),
+            "expected_optimizer_steps": main_steps,
+        },
+        "total": {
+            "scheduled_samples": len(examples),
+            "expected_optimizer_steps": memorization_steps + main_steps,
+        },
+        "order_sha256": canonical_sha256(
+            {
+                "memorization_indices": memorization_indices,
+                "main_indices": main_indices,
+            }
+        ),
+    }
+    return examples, metadata
+
+
 def _dataset_class(torch: Any):
     class Top1Dataset(torch.utils.data.Dataset):
         def __init__(self, examples: Sequence[Mapping[str, Sequence[int]]]) -> None:
@@ -394,11 +529,14 @@ def _write_bundle(
     candidate_tokens: Mapping[str, Sequence[int]],
     system_prompt: str,
     train_report: Mapping[str, Any],
+    memorization_report: Mapping[str, Any] | None,
     validation_report: Mapping[str, Any] | None,
     world_size: int,
     deepspeed_metadata: Mapping[str, Any] | None,
     training_run_id: str,
     prepared_train_path: Path,
+    prepared_memorization_path: Path | None,
+    training_schedule: Mapping[str, Any] | None,
     transformers_version: str,
 ) -> None:
     tokenizer.save_pretrained(str(output_dir))
@@ -424,6 +562,15 @@ def _write_bundle(
             "sha256": sha256_file(args.train_data),
             **train_report,
         },
+        "memorization_data": (
+            {
+                "path": str(Path(args.memorization_data).expanduser().resolve()),
+                "sha256": sha256_file(args.memorization_data),
+                **memorization_report,
+            }
+            if args.memorization_data and memorization_report is not None
+            else None
+        ),
         "validation_data": (
             {
                 "path": str(Path(args.validation_data).expanduser().resolve()),
@@ -477,6 +624,7 @@ def _write_bundle(
                 * args.per_device_train_batch_size
                 * args.gradient_accumulation_steps
             ),
+            "curriculum": training_schedule,
             "deepspeed": deepspeed_metadata,
         },
         "sft_input": {
@@ -484,6 +632,16 @@ def _write_bundle(
             "sha256": sha256_file(prepared_train_path),
             "rows": train_report["rows"],
         },
+        "memorization_sft_input": (
+            {
+                "path": "../../prepared/memorization.sft.jsonl",
+                "sha256": sha256_file(prepared_memorization_path),
+                "rows": memorization_report["rows"],
+            }
+            if prepared_memorization_path is not None
+            and memorization_report is not None
+            else None
+        ),
     }
     write_json(output_dir / "router_manifest.json", manifest)
 
@@ -533,6 +691,7 @@ def _build_run_manifest(
     candidate_names: Sequence[str],
     system_prompt: str,
     train_report: Mapping[str, Any],
+    memorization_report: Mapping[str, Any] | None,
     validation_report: Mapping[str, Any] | None,
     deepspeed_metadata: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
@@ -569,6 +728,11 @@ def _build_run_manifest(
         "finetune_mode": args.finetune_mode,
         "inputs": {
             "train_sha256": sha256_file(args.train_data),
+            "memorization_sha256": (
+                sha256_file(args.memorization_data)
+                if args.memorization_data
+                else None
+            ),
             "validation_sha256": (
                 sha256_file(args.validation_data) if args.validation_data else None
             ),
@@ -578,6 +742,7 @@ def _build_run_manifest(
         "configuration": {
             "max_length": args.max_length,
             "epochs": args.epochs,
+            "memorization_steps": args.memorization_steps,
             "learning_rate": args.learning_rate,
             "per_device_train_batch_size": args.per_device_train_batch_size,
             "per_device_eval_batch_size": args.per_device_eval_batch_size,
@@ -625,6 +790,14 @@ def _build_run_manifest(
                 "path": str(Path(args.train_data).expanduser().resolve()),
                 **train_report,
             },
+            "memorization": (
+                {
+                    "path": str(Path(args.memorization_data).expanduser().resolve()),
+                    **memorization_report,
+                }
+                if args.memorization_data and memorization_report is not None
+                else None
+            ),
             "validation": (
                 {
                     "path": str(Path(args.validation_data).expanduser().resolve()),
@@ -667,6 +840,26 @@ def _trainer(
     return transformers.Trainer(**kwargs)
 
 
+def _annotate_history_stages(
+    history: Sequence[Mapping[str, Any]],
+    *,
+    memorization_steps: int,
+) -> list[dict[str, Any]]:
+    annotated = []
+    for row in history:
+        item = dict(row)
+        step = item.get("step")
+        item["stage"] = (
+            "memorization"
+            if memorization_steps
+            and isinstance(step, (int, float))
+            and int(step) <= memorization_steps
+            else "main"
+        )
+        annotated.append(item)
+    return annotated
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     python_bin = str(Path(sys.executable).absolute().parent)
     path_entries = os.environ.get("PATH", "").split(os.pathsep)
@@ -685,6 +878,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     except ValueError as exc:
         raise Top1DataError("RANK must be an integer") from exc
     is_primary = rank == 0
+    try:
+        launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise Top1DataError("WORLD_SIZE must be an integer") from exc
+    if launcher_world_size <= 0:
+        raise Top1DataError("WORLD_SIZE must be positive")
     output_dir = Path(args.output_dir).expanduser().resolve()
     store = RunStore.training(output_dir)
     store_initialized = False
@@ -698,6 +897,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise Top1DataError("system prompt file is empty")
         candidate_names = load_candidate_names(args.candidate_registry)
         train_rows = read_jsonl(args.train_data)
+        memorization_rows = (
+            read_jsonl(args.memorization_data) if args.memorization_data else []
+        )
         validation_rows = (
             read_jsonl(args.validation_data) if args.validation_data else []
         )
@@ -705,6 +907,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             train_rows,
             candidate_names,
             source=args.train_data,
+        )
+        memorization_report = (
+            validate_memorization_rows(
+                memorization_rows,
+                candidate_names,
+                source=args.memorization_data,
+            )
+            if args.memorization_data
+            else None
         )
         validation_report = (
             validate_training_rows(
@@ -735,6 +946,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             candidate_names=candidate_names,
             system_prompt=system_prompt,
             train_report=train_report,
+            memorization_report=memorization_report,
             validation_report=validation_report,
             deepspeed_metadata=deepspeed_metadata,
         )
@@ -756,6 +968,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             transformers,
             has_validation=bool(validation_rows),
             resume_from_checkpoint=resume_from_checkpoint,
+            staged_training=bool(memorization_rows),
         )
         tokenizer, model = _load_model_and_tokenizer(args, torch, transformers)
         candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
@@ -766,6 +979,22 @@ def main(argv: Sequence[str] | None = None) -> None:
             candidate_tokens=candidate_tokens,
             max_length=args.max_length,
             system_prompt=system_prompt,
+        )
+        (
+            memorization_examples,
+            memorization_sft_rows,
+            memorization_diagnostics,
+        ) = (
+            _prepare_rows(
+                memorization_rows,
+                source=args.memorization_data,
+                tokenizer=tokenizer,
+                candidate_tokens=candidate_tokens,
+                max_length=args.max_length,
+                system_prompt=system_prompt,
+            )
+            if memorization_rows
+            else ([], [], [])
         )
         validation_examples, validation_sft_rows, validation_diagnostics = (
             _prepare_rows(
@@ -781,6 +1010,27 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         prepared_dir = output_dir / "prepared"
         prepared_train_path = prepared_dir / "train.sft.jsonl"
+        prepared_memorization_path = (
+            prepared_dir / "memorization.sft.jsonl"
+            if memorization_rows
+            else None
+        )
+        training_examples: Sequence[Mapping[str, Sequence[int]]] = train_examples
+        training_schedule = None
+        if memorization_examples:
+            effective_global_batch_size = (
+                launcher_world_size
+                * args.per_device_train_batch_size
+                * args.gradient_accumulation_steps
+            )
+            training_examples, training_schedule = _build_training_schedule(
+                memorization_examples,
+                train_examples,
+                memorization_steps=args.memorization_steps,
+                main_epochs=args.epochs,
+                effective_global_batch_size=effective_global_batch_size,
+                seed=args.seed,
+            )
         if is_primary:
             write_jsonl(prepared_train_path, train_sft_rows)
             write_json(
@@ -792,6 +1042,21 @@ def main(argv: Sequence[str] | None = None) -> None:
                     max_length=args.max_length,
                 ),
             )
+            if prepared_memorization_path is not None:
+                write_jsonl(prepared_memorization_path, memorization_sft_rows)
+                write_json(
+                    prepared_dir / "memorization_profile.json",
+                    build_data_profile(
+                        memorization_diagnostics,
+                        candidate_names=candidate_names,
+                        candidate_tokens=candidate_tokens,
+                        max_length=args.max_length,
+                    ),
+                )
+                write_json(
+                    prepared_dir / "training_schedule.json",
+                    training_schedule,
+                )
             if validation_rows:
                 write_jsonl(prepared_dir / "validation.sft.jsonl", validation_sft_rows)
                 write_json(
@@ -807,6 +1072,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             store.event(
                 "data_prepared",
                 train_rows=len(train_examples),
+                memorization_rows=len(memorization_examples),
+                scheduled_rows=len(training_examples),
+                memorization_steps=args.memorization_steps,
                 validation_rows=len(validation_examples),
             )
             print(
@@ -817,18 +1085,29 @@ def main(argv: Sequence[str] | None = None) -> None:
                 ),
                 flush=True,
             )
+            if training_schedule is not None:
+                print(
+                    "[top1] memorization curriculum: "
+                    f"{training_schedule['memorization']['input_rows']} rows -> "
+                    f"{training_schedule['memorization']['scheduled_samples']} "
+                    "samples, "
+                    f"{training_schedule['memorization']['optimizer_steps']} "
+                    "optimizer steps; main training follows",
+                    flush=True,
+                )
 
         Dataset = _dataset_class(torch)
         callback = make_training_log_callback(
             store,
             transformers.TrainerCallback,
             torch,
+            memorization_steps=args.memorization_steps,
         )
         trainer = _trainer(
             transformers=transformers,
             model=model,
             training_args=training_args,
-            train_dataset=Dataset(train_examples),
+            train_dataset=Dataset(training_examples),
             eval_dataset=(
                 Dataset(validation_examples) if validation_examples else None
             ),
@@ -843,10 +1122,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         if callable(wait_for_everyone):
             wait_for_everyone()
-        try:
-            launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
-        except ValueError as exc:
-            raise Top1DataError("WORLD_SIZE must be an integer") from exc
         world_size = int(trainer.args.world_size)
         if launcher_world_size > 1 and world_size != launcher_world_size:
             raise Top1DataError(
@@ -876,18 +1151,24 @@ def main(argv: Sequence[str] | None = None) -> None:
                 candidate_tokens=candidate_tokens,
                 system_prompt=system_prompt,
                 train_report=train_report,
+                memorization_report=memorization_report,
                 validation_report=validation_report,
                 world_size=world_size,
                 deepspeed_metadata=deepspeed_metadata,
                 training_run_id=run_id,
                 prepared_train_path=prepared_train_path,
+                prepared_memorization_path=prepared_memorization_path,
+                training_schedule=training_schedule,
                 transformers_version=str(transformers.__version__),
             )
             artifact = write_model_artifact_manifest(
                 final_model_dir,
                 training_run_id=run_id,
             )
-            history = list(trainer.state.log_history)
+            history = _annotate_history_stages(
+                trainer.state.log_history,
+                memorization_steps=args.memorization_steps,
+            )
             write_trainer_history(output_dir / "logs" / "trainer_history.jsonl", history)
             curves = build_curve_summary(history)
             write_json(output_dir / "final" / "curves.json", curves)
@@ -908,6 +1189,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "run_signature": run_manifest["run_signature"],
                 "model_id": artifact["model_id"],
                 "global_step": int(trainer.state.global_step),
+                "training_schedule": training_schedule,
                 "best_checkpoint": best_checkpoint,
                 "best_eval_loss": curves["best_eval_loss"],
                 "train_metrics": dict(getattr(train_result, "metrics", {})),

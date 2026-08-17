@@ -46,6 +46,8 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 - 不要求训练集覆盖全部候选，其他元数据字段会被忽略。
 
 仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。
+默认还会读取 `data_top1/top1_labeldesc_paper_v1.jsonl`，先执行 description → label
+memorization；该文件和主训练数据一样不进入 Git，需要单独同步到训练服务器。
 
 ## 训练
 
@@ -55,6 +57,17 @@ TOP1_TRAIN_DATA=/data/router/train.jsonl \
 TOP1_VALIDATION_DATA=/data/router/validation.jsonl \
 bash scripts/train_top1.sh
 ```
+
+memorization 默认执行 20 个 optimizer steps，可独立调节：
+
+```bash
+TOP1_MEMORIZATION_DATA=/data/router/top1_labeldesc_paper_v1.jsonl \
+TOP1_MEMORIZATION_STEPS=20 \
+TOP1_TRAIN_DATA=/data/router/train.jsonl \
+bash scripts/train_top1.sh
+```
+
+将 `TOP1_MEMORIZATION_DATA` 显式设为空字符串可以运行无 memorization 的消融基线。
 
 只有训练集时省略 `TOP1_VALIDATION_DATA`。LoRA 训练：
 
@@ -97,6 +110,15 @@ runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
 4. prompt 始终为“最长候选 token 路径 + EOS”预留空间，绝不根据当前 label 改变裁剪。
 5. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
 6. Top1 模式不新增 token，也不调整模型词表。
+7. 启用 memorization 时，42 条 description → candidate 样本按照固定 seed 重排并重复，
+   先执行配置数量的完整 optimizer steps；随后才进入主训练样本。
+
+两阶段共用同一个 Trainer、模型、优化器、候选 token、system prompt 和
+`prepare_router_prompt()`。memorization 样本数按有效全局 batch 对齐，阶段边界不会把
+description 样本与主训练样本混入同一次梯度更新。Transformers 5.14.1 的 sequential
+sampling 保证预构建课程顺序在 Trainer 内不被再次打乱；断点恢复也按同一顺序跳过数据。
+memorization 结束时会额外请求一次 checkpoint，避免必须等到常规 `save_steps` 才具备
+可恢复点；该 checkpoint 后续仍受 `save_total_limit` 管理。
 
 训练与评测只调用 `prepare_router_prompt()` 这一套实现。最终 bundle 还固化 prompt 实现
 哈希、system prompt/候选表哈希、Transformers 版本、tokenizer/chat-template 指纹、
@@ -111,11 +133,14 @@ EOS/PAD、候选 token 序列、`max_length` 和 `trust_remote_code`。评测逐
 run_manifest.json                 # 不可变：输入哈希、配置、代码版本
 status.json                       # 可变：CREATED/RUNNING/COMPLETED/FAILED
 prepared/
-  train.sft.jsonl                 # 模型实际看到的规范化消息
+  memorization.sft.jsonl          # 42 条 description → label 规范化消息
+  memorization_profile.json
+  train.sft.jsonl                 # 主训练数据的规范化消息（顺序见 schedule）
   validation.sft.jsonl
   train_profile.json              # 类别、token 长度、截断与长度偏置风险
   validation_profile.json
   tokenizer/
+  training_schedule.json          # 阶段边界、重复量、顺序哈希和预期 step
 logs/
   events.jsonl                    # append-only 生命周期与 Trainer 日志
   trainer_history.jsonl           # 完整 Trainer log_history
@@ -140,7 +165,7 @@ final/
 规范化过程，可用于检查模型实际看到的 system/user/assistant 消息。`runs/` 默认不进入
 Git。
 
-`events.jsonl` 保留 step、epoch、loss、eval loss、learning rate、grad norm、Trainer
+`events.jsonl` 保留训练阶段、step、epoch、loss、eval loss、learning rate、grad norm、Trainer
 吞吐指标、进程内存、GPU allocated/reserved/peak memory 和非有限数告警。数据 profile
 不复制原始文本，只记录候选分布、输入/目标 token 分位数、长度利用率、历史裁剪、当前
 请求裁剪、候选 token 路径长度和首 token 冲突。
@@ -157,6 +182,9 @@ uv run --no-sync python scripts/evaluate_top1.py \
   --suite-id baseline-v1 \
   --batch-size 32
 ```
+
+评分阶段会显示按数据行计数的进度条；每一行完成全部候选路径评分（以及可选的
+history ablation）后推进一次。
 
 分析多轮历史的净收益，并对比候选名长度偏置：
 

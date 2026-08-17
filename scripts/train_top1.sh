@@ -50,6 +50,13 @@ require_file() {
 require_file "$TOP1_TRAIN_DATA"
 require_file "$TOP1_CANDIDATE_REGISTRY"
 require_file "$TOP1_SYSTEM_PROMPT"
+if [[ -n "$TOP1_MEMORIZATION_DATA" ]]; then
+  require_file "$TOP1_MEMORIZATION_DATA"
+  if [[ ! "$TOP1_MEMORIZATION_STEPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TOP1_MEMORIZATION_STEPS must be a positive integer" >&2
+    exit 2
+  fi
+fi
 if [[ -n "$TOP1_VALIDATION_DATA" ]]; then
   require_file "$TOP1_VALIDATION_DATA"
 fi
@@ -70,6 +77,12 @@ if (( TOP1_NUM_GPUS > 1 )); then
 fi
 
 OPTIONAL_ARGS=()
+if [[ -n "$TOP1_MEMORIZATION_DATA" ]]; then
+  OPTIONAL_ARGS+=(
+    --memorization-data "$TOP1_MEMORIZATION_DATA"
+    --memorization-steps "$TOP1_MEMORIZATION_STEPS"
+  )
+fi
 if [[ -n "$TOP1_VALIDATION_DATA" ]]; then
   OPTIONAL_ARGS+=(--validation-data "$TOP1_VALIDATION_DATA")
 fi

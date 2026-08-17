@@ -28,6 +28,8 @@ def _training_args(root: Path) -> Namespace:
     return Namespace(
         model_name_or_path="Qwen/Qwen3-1.7B",
         train_data=str(train_data),
+        memorization_data=None,
+        memorization_steps=0,
         validation_data=None,
         candidate_registry="configs/top1_candidates.json",
         system_prompt_file=str(prompt),
@@ -77,6 +79,8 @@ class Top1TrainingTests(unittest.TestCase):
                     eval_accumulation_steps,
                     prediction_loss_only,
                     evaluation_strategy,
+                    num_train_epochs,
+                    train_sampling_strategy=None,
                 ):
                     captured.update(locals())
 
@@ -92,7 +96,54 @@ class Top1TrainingTests(unittest.TestCase):
             self.assertEqual(captured["eval_accumulation_steps"], 1)
             self.assertIs(captured["prediction_loss_only"], True)
             self.assertEqual(captured["evaluation_strategy"], "steps")
+            self.assertEqual(captured["num_train_epochs"], 3.0)
             self.assertTrue(captured["output_dir"].endswith("output/checkpoints"))
+
+            train_top1._build_training_arguments(
+                args,
+                SimpleNamespace(TrainingArguments=TrainingArguments),
+                has_validation=True,
+                resume_from_checkpoint=None,
+                staged_training=True,
+            )
+            self.assertEqual(captured["num_train_epochs"], 1.0)
+            self.assertEqual(captured["train_sampling_strategy"], "sequential")
+
+    def test_memorization_schedule_precedes_main_training(self) -> None:
+        memorization = [
+            {"input_ids": [100 + index], "attention_mask": [1], "labels": [1]}
+            for index in range(3)
+        ]
+        main = [
+            {"input_ids": [200 + index], "attention_mask": [1], "labels": [1]}
+            for index in range(2)
+        ]
+
+        scheduled, metadata = train_top1._build_training_schedule(
+            memorization,
+            main,
+            memorization_steps=3,
+            main_epochs=2.5,
+            effective_global_batch_size=4,
+            seed=42,
+        )
+        scheduled_again, metadata_again = train_top1._build_training_schedule(
+            memorization,
+            main,
+            memorization_steps=3,
+            main_epochs=2.5,
+            effective_global_batch_size=4,
+            seed=42,
+        )
+
+        self.assertEqual(len(scheduled), 17)
+        self.assertTrue(all(row in memorization for row in scheduled[:12]))
+        self.assertTrue(all(row in main for row in scheduled[12:]))
+        self.assertEqual(metadata["memorization"]["optimizer_steps"], 3)
+        self.assertEqual(metadata["main"]["scheduled_samples"], 5)
+        self.assertEqual(metadata["total"]["expected_optimizer_steps"], 5)
+        self.assertEqual(scheduled, scheduled_again)
+        self.assertEqual(metadata["order_sha256"], metadata_again["order_sha256"])
 
     def test_full_training_never_resizes_token_embeddings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -175,11 +226,14 @@ class Top1TrainingTests(unittest.TestCase):
                     "multi_turn_rows": 0,
                     "candidate_counts": {"StockQuery": 1},
                 },
+                memorization_report=None,
                 validation_report=None,
                 world_size=1,
                 deepspeed_metadata=None,
                 training_run_id="run-001",
                 prepared_train_path=prepared,
+                prepared_memorization_path=None,
+                training_schedule=None,
                 transformers_version="5.5.4",
             )
 

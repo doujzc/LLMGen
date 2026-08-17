@@ -40,7 +40,7 @@ class ExperimentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = RunStore.training(Path(temporary) / "run")
             callback = make_training_log_callback(store, FakeTrainerCallback)
-            control = object()
+            control = SimpleNamespace(should_save=False)
 
             self.assertIsInstance(callback, TrainingLogCallback)
             self.assertIsInstance(callback, FakeTrainerCallback)
@@ -111,6 +111,27 @@ class ExperimentTests(unittest.TestCase):
                 (store.root / "checkpoints" / "last_checkpoint.json").read_text()
             )
             self.assertEqual(pointer["step"], 5)
+
+    def test_training_callback_records_memorization_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = RunStore.training(Path(temporary) / "run")
+            store.initialize({"run_signature": "signature"})
+            callback = TrainingLogCallback(store, memorization_steps=2)
+            state = SimpleNamespace(
+                is_world_process_zero=True,
+                global_step=2,
+                epoch=0.25,
+            )
+            control = SimpleNamespace(should_save=False)
+
+            callback.on_log(object(), state, control, logs={"loss": 0.5})
+            callback.on_step_end(object(), state, control)
+
+            events = read_jsonl(store.events_path)
+            self.assertEqual(events[-3]["stage"], "memorization")
+            self.assertEqual(events[-2]["event"], "memorization_completed")
+            self.assertEqual(events[-1]["event"], "main_training_started")
+            self.assertTrue(control.should_save)
 
 
 if __name__ == "__main__":

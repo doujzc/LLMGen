@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping
 from .top1 import Top1DataError, sha256_file, write_json, write_jsonl
 
 
-TRAINING_RUN_SCHEMA_VERSION = 1
+TRAINING_RUN_SCHEMA_VERSION = 2
 EVALUATION_RUN_SCHEMA_VERSION = 1
 
 
@@ -377,15 +377,36 @@ class TrainingLogCallback:
     dependencies installed.
     """
 
-    def __init__(self, store: RunStore, torch_module: Any | None = None) -> None:
+    def __init__(
+        self,
+        store: RunStore,
+        torch_module: Any | None = None,
+        *,
+        memorization_steps: int = 0,
+    ) -> None:
+        if memorization_steps < 0:
+            raise ValueError("memorization_steps cannot be negative")
         self.store = store
         self.torch = torch_module
+        self.memorization_steps = memorization_steps
+
+    def _stage_for_next_step(self, step: int) -> str:
+        if step < self.memorization_steps:
+            return "memorization"
+        return "main"
+
+    def _stage_for_completed_step(self, step: int) -> str:
+        if self.memorization_steps and step <= self.memorization_steps:
+            return "memorization"
+        return "main"
 
     def on_train_begin(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
         del args, kwargs
         if getattr(state, "is_world_process_zero", True):
-            self.store.update_status("RUNNING", step=int(getattr(state, "global_step", 0)))
-            self.store.event("training_started", step=int(getattr(state, "global_step", 0)))
+            step = int(getattr(state, "global_step", 0))
+            stage = self._stage_for_next_step(step)
+            self.store.update_status("RUNNING", step=step, stage=stage)
+            self.store.event("training_started", step=step, stage=stage)
         return control
 
     def on_log(
@@ -405,14 +426,33 @@ class TrainingLogCallback:
             for key, value in (logs or {}).items()
             if isinstance(value, Real) and not math.isfinite(float(value))
         ]
+        step = int(getattr(state, "global_step", 0))
         self.store.event(
             "trainer_log",
-            step=int(getattr(state, "global_step", 0)),
+            step=step,
             epoch=getattr(state, "epoch", None),
+            stage=self._stage_for_completed_step(step),
             metrics=metrics,
             system=_runtime_memory(self.torch),
             numerical_issue=non_finite or None,
         )
+        return control
+
+    def on_step_end(
+        self,
+        args: Any,
+        state: Any,
+        control: Any,
+        **kwargs: Any,
+    ) -> Any:
+        del args, kwargs
+        step = int(getattr(state, "global_step", 0))
+        if self.memorization_steps and step == self.memorization_steps:
+            control.should_save = True
+            if getattr(state, "is_world_process_zero", True):
+                self.store.event("memorization_completed", step=step)
+                self.store.event("main_training_started", step=step)
+                self.store.update_status("RUNNING", step=step, stage="main")
         return control
 
     def on_save(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
@@ -423,18 +463,29 @@ class TrainingLogCallback:
             pointer = {
                 "schema_version": 1,
                 "step": step,
+                "stage": self._stage_for_completed_step(step),
                 "path": str(checkpoint.resolve()),
                 "updated_at": utc_now(),
             }
             write_json(self.store.root / "checkpoints" / "last_checkpoint.json", pointer)
-            self.store.update_status("RUNNING", step=step, last_checkpoint=pointer["path"])
+            self.store.update_status(
+                "RUNNING",
+                step=step,
+                stage=self._stage_for_completed_step(step),
+                last_checkpoint=pointer["path"],
+            )
             self.store.event("checkpoint_saved", **pointer)
         return control
 
     def on_train_end(self, args: Any, state: Any, control: Any, **kwargs: Any) -> Any:
         del args, kwargs
         if getattr(state, "is_world_process_zero", True):
-            self.store.event("training_finished", step=int(getattr(state, "global_step", 0)))
+            step = int(getattr(state, "global_step", 0))
+            self.store.event(
+                "training_finished",
+                step=step,
+                stage=self._stage_for_completed_step(step),
+            )
         return control
 
 
@@ -442,6 +493,8 @@ def make_training_log_callback(
     store: RunStore,
     trainer_callback_class: type[Any],
     torch_module: Any | None = None,
+    *,
+    memorization_steps: int = 0,
 ) -> TrainingLogCallback:
     """Bind the logging behavior to the installed Transformers callback API.
 
@@ -458,7 +511,11 @@ def make_training_log_callback(
         (TrainingLogCallback, trainer_callback_class),
         {"__module__": __name__},
     )
-    return callback_class(store, torch_module)
+    return callback_class(
+        store,
+        torch_module,
+        memorization_steps=memorization_steps,
+    )
 
 
 def _runtime_memory(torch_module: Any | None) -> dict[str, Any]:

@@ -97,7 +97,11 @@ def build_curve_summary(history: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     train_curve = []
     eval_curve = []
     for row in history:
-        common = {"step": row.get("step"), "epoch": row.get("epoch")}
+        common = {
+            "step": row.get("step"),
+            "epoch": row.get("epoch"),
+            "stage": row.get("stage"),
+        }
         if "loss" in row:
             train_curve.append(
                 {

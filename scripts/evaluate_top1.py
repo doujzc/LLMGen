@@ -193,15 +193,17 @@ def _validate_loaded_tokenizer(
         raise Top1DataError("candidate token sequences differ from training")
 
 
-def _import_dependencies() -> tuple[Any, Any]:
+def _import_dependencies() -> tuple[Any, Any, Any]:
     try:
         import torch
         import transformers
+        from tqdm import tqdm
     except ImportError as exc:  # pragma: no cover - GPU evaluation environment
         raise SystemExit(
-            "Top1 evaluation requires torch and transformers; install -e '.[train]'"
+            "Top1 evaluation requires torch, transformers, and tqdm; "
+            "install -e '.[train]'"
         ) from exc
-    return torch, transformers
+    return torch, transformers, tqdm
 
 
 def _load_model(
@@ -570,7 +572,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     store.initialize(manifest)
     try:
-        torch, transformers = _import_dependencies()
+        torch, transformers, tqdm = _import_dependencies()
         device, dtype, resolved_precision = _device_and_dtype(args, torch)
         write_json(run_dir / "logs" / "system.json", system_snapshot(torch))
         store.update_status("RUNNING", rows_completed=0)
@@ -616,23 +618,18 @@ def main(argv: Sequence[str] | None = None) -> None:
         predictions = []
         prediction_path = run_dir / "predictions.jsonl"
         rows_per_chunk = max(1, args.batch_size // len(candidate_names))
-        for start in range(0, len(prepared), rows_per_chunk):
-            chunk = prepared[start : start + rows_per_chunk]
-            scores = _score_prepared(
-                chunk,
-                prompt_key="prompt_ids",
-                model=model,
-                tokenizer=tokenizer,
-                candidate_names=candidate_names,
-                candidate_tokens=candidate_tokens,
-                torch=torch,
-                device=device,
-                batch_size=args.batch_size,
-            )
-            ablation_scores = (
-                _score_prepared(
+        progress = tqdm(
+            total=len(prepared),
+            desc="[top1-eval] scoring",
+            unit="row",
+            dynamic_ncols=True,
+        )
+        try:
+            for start in range(0, len(prepared), rows_per_chunk):
+                chunk = prepared[start : start + rows_per_chunk]
+                scores = _score_prepared(
                     chunk,
-                    prompt_key="history_ablation_prompt_ids",
+                    prompt_key="prompt_ids",
                     model=model,
                     tokenizer=tokenizer,
                     candidate_names=candidate_names,
@@ -641,29 +638,44 @@ def main(argv: Sequence[str] | None = None) -> None:
                     device=device,
                     batch_size=args.batch_size,
                 )
-                if args.history_ablation
-                else {}
-            )
-            for row in chunk:
-                row_index = int(row["row_index"])
-                record = prediction_from_scores(
-                    row_index=row_index,
-                    candidate_names=candidate_names,
-                    scores=scores[row_index],
-                    target_candidate_name=row["target_candidate_name"],
-                    diagnostics=row["diagnostics"],
-                    history_ablation_scores=ablation_scores.get(row_index),
+                ablation_scores = (
+                    _score_prepared(
+                        chunk,
+                        prompt_key="history_ablation_prompt_ids",
+                        model=model,
+                        tokenizer=tokenizer,
+                        candidate_names=candidate_names,
+                        candidate_tokens=candidate_tokens,
+                        torch=torch,
+                        device=device,
+                        batch_size=args.batch_size,
+                    )
+                    if args.history_ablation
+                    else {}
                 )
-                append_jsonl(prediction_path, record)
-                predictions.append(record)
-            completed = len(predictions)
-            if completed == len(prepared) or completed % 100 < len(chunk):
-                store.update_status("RUNNING", rows_completed=completed)
-                store.event(
-                    "evaluation_progress",
-                    rows_completed=completed,
-                    rows_total=len(prepared),
-                )
+                for row in chunk:
+                    row_index = int(row["row_index"])
+                    record = prediction_from_scores(
+                        row_index=row_index,
+                        candidate_names=candidate_names,
+                        scores=scores[row_index],
+                        target_candidate_name=row["target_candidate_name"],
+                        diagnostics=row["diagnostics"],
+                        history_ablation_scores=ablation_scores.get(row_index),
+                    )
+                    append_jsonl(prediction_path, record)
+                    predictions.append(record)
+                completed = len(predictions)
+                progress.update(len(chunk))
+                if completed == len(prepared) or completed % 100 < len(chunk):
+                    store.update_status("RUNNING", rows_completed=completed)
+                    store.event(
+                        "evaluation_progress",
+                        rows_completed=completed,
+                        rows_total=len(prepared),
+                    )
+        finally:
+            progress.close()
         metrics = aggregate_predictions(predictions, candidate_names)
         write_json(run_dir / "metrics.json", metrics)
         write_json(run_dir / "confusion_matrix.json", metrics["confusion_matrix"])

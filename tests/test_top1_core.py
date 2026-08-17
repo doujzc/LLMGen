@@ -14,6 +14,7 @@ from llmgen.top1 import (
     load_candidate_names,
     normalize_messages,
     prepare_example,
+    validate_memorization_rows,
     validate_training_rows,
 )
 
@@ -29,6 +30,27 @@ class CharacterTokenizer:
 
 
 class Top1CoreTests(unittest.TestCase):
+    def test_memorization_validation_requires_structured_complete_mapping(self) -> None:
+        rows = [
+            {
+                "id": f"description-{index}",
+                "source_type": "label_description",
+                "description_type": "label_term",
+                "messages": [{"role": "user", "content": f"description {index}"}],
+                "target_candidate_name": candidate,
+            }
+            for index, candidate in enumerate(("A", "B"), start=1)
+        ]
+
+        report = validate_memorization_rows(rows, ("A", "B"), source="memory.jsonl")
+        self.assertEqual(report["rows"], 2)
+        self.assertEqual(report["description_type_counts"]["label_term"], 2)
+
+        invalid = [dict(rows[0]), dict(rows[0])]
+        invalid[1]["target_candidate_name"] = "B"
+        with self.assertRaisesRegex(Top1DataError, "duplicate id"):
+            validate_memorization_rows(invalid, ("A", "B"), source="memory.jsonl")
+
     def test_registry_contains_only_ordered_candidate_names(self) -> None:
         self.assertEqual(
             load_candidate_names("configs/top1_candidates.json"),

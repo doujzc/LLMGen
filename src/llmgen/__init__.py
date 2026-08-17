@@ -3,6 +3,8 @@
 from .top1 import (
     CONVERSATION_TEMPLATE,
     INFERENCE_DECISION_RULE,
+    MEMORIZATION_DESCRIPTION_TYPES,
+    MEMORIZATION_SOURCE_TYPE,
     ROUTING_MODE,
     TARGET_CONTRACT,
     Top1DataError,
@@ -11,12 +13,15 @@ from .top1 import (
     prepare_router_prompt,
     prompt_implementation_sha256,
     tokenizer_prompt_contract,
+    validate_memorization_rows,
     validate_training_rows,
 )
 
 __all__ = [
     "CONVERSATION_TEMPLATE",
     "INFERENCE_DECISION_RULE",
+    "MEMORIZATION_DESCRIPTION_TYPES",
+    "MEMORIZATION_SOURCE_TYPE",
     "ROUTING_MODE",
     "TARGET_CONTRACT",
     "Top1DataError",
@@ -25,6 +30,7 @@ __all__ = [
     "prepare_router_prompt",
     "prompt_implementation_sha256",
     "tokenizer_prompt_contract",
+    "validate_memorization_rows",
     "validate_training_rows",
 ]
 
