@@ -222,8 +222,6 @@ class Top1TrainingTests(unittest.TestCase):
                 },
                 backend_labels=("StockQuery", "NoAvailable"),
                 fallback_backend_label="NoAvailable",
-                available_threshold=0.5,
-                temperature=1.0,
             )
             train_top1._write_bundle(
                 args=args,
@@ -251,12 +249,16 @@ class Top1TrainingTests(unittest.TestCase):
             )
 
             manifest = json.loads((model_output / "router_manifest.json").read_text())
-            self.assertEqual(manifest["schema_version"], 3)
+            self.assertEqual(manifest["schema_version"], 4)
             self.assertEqual(manifest["routing_mode"], "candidate_name_top1")
             self.assertEqual(manifest["target"], "candidate_name_tokens_plus_eos")
             self.assertEqual(
                 manifest["conversation"]["template"],
                 "routing_envelope_markdown_v1",
+            )
+            self.assertEqual(
+                manifest["inference"]["decision_rule"],
+                "selected_route_threshold_v1",
             )
             self.assertEqual(
                 manifest["training"]["effective_global_batch_size"],

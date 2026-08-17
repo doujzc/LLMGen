@@ -561,7 +561,7 @@ def _write_bundle(
         getattr(model.config, "_commit_hash", None),
     )
     manifest = {
-        "schema_version": 3,
+        "schema_version": 4,
         "routing_mode": ROUTING_MODE,
         "base_model": args.model_name_or_path,
         "base_model_revision": base_model_revision,
@@ -623,6 +623,8 @@ def _write_bundle(
             "scoring_rule": INFERENCE_SCORING_RULE,
             "decision_rule": INFERENCE_DECISION_RULE,
             "include_eos": True,
+            "decoding_modes": ["greedy", "beam_search"],
+            "num_return_sequences": 1,
         },
         "max_length": args.max_length,
         "training": {

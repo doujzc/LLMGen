@@ -121,8 +121,8 @@ runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
 6. Top1 模式不新增 token，也不调整模型词表。
 7. 启用 memorization 时，42 条 description → candidate 样本按照固定 seed 重排并重复，
    先执行配置数量的完整 optimizer steps；随后才进入主训练样本。
-8. 推理先计算七个候选路径分数，再按照结构化 decision policy 聚合为后端概率；禁止
-   对七分类先取 argmax、再进行后端映射。
+8. 推理使用候选 token Trie 约束 `generate`，只允许生成一个合法候选名称和 EOS；
+   decision policy 只负责把原始候选映射为可执行后端或 `NoAvailable`。
 
 两阶段共用同一个 Trainer、模型、优化器、候选 token、system prompt 和
 `prepare_router_prompt()`。memorization 样本数按有效全局 batch 对齐，阶段边界不会把
@@ -165,7 +165,7 @@ final/
   model/                           # 唯一可部署目录
     model_artifact.json            # 全部模型文件哈希与稳定 model_id
     candidate_registry.json
-    decision_policy.json           # 候选到后端的映射、默认阈值与 temperature
+    decision_policy.json           # 候选到可执行后端或 NoAvailable 的显式映射
     router_system_prompt.md
     router_manifest.json
   curves.json                      # train/eval loss、LR、grad norm 曲线数据
@@ -195,23 +195,35 @@ uv run --no-sync python scripts/evaluate_top1.py \
   --batch-size 32
 ```
 
-评分阶段会显示按数据行计数的进度条；每一行完成全部候选路径评分（以及可选的
+生成阶段会显示按数据行计数的进度条；每一行完成一次受约束候选生成（以及可选的
 history ablation）后推进一次。
 
-调整可用/OOS 倾向时，只覆盖阈值，不修改或重新训练模型：
+过滤低置信度真实路由时，传入 `[0,1]` 范围内的阈值：
 
 ```bash
 uv run --no-sync python scripts/evaluate_top1.py \
   --model-dir runs/top1/<experiment>/<run_id>/final/model \
   --data /data/router/test.jsonl \
-  --available-threshold 0.7
+  --route-threshold 0.7
 ```
 
-阈值越高，越倾向输出后端 `NoAvailable`。决策使用
-`P(available)=P(StockQuery)+P(Ecommerce)`；其余五个候选的概率共同组成 `P(OOS)`。
-达到阈值后才在可用后端内选择概率最大的一个。
+推理通过 `compute_transition_scores(normalize_logits=True)` 取得生成候选名称及 EOS 的
+逐 token log probability，并计算 `candidate_confidence=exp(sum(logprob))`。当原始候选
+映射到 `StockQuery` 或 `Ecommerce` 且置信度低于阈值时，输出改为 `NoAvailable`；模型
+原本生成的五个 OOS 候选不受阈值影响。不传 `--route-threshold` 时不执行额外拒绝。
 
-分析多轮历史的净收益，并对比候选名长度偏置：
+默认使用 greedy；也可以显式使用受约束 beam search：
+
+```bash
+uv run --no-sync python scripts/evaluate_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model \
+  --data /data/router/test.jsonl \
+  --decoding-mode beam_search \
+  --num-beams 4 \
+  --route-threshold 0.7
+```
+
+分析多轮历史的净收益：
 
 ```bash
 uv run --no-sync python scripts/evaluate_top1.py \
@@ -240,25 +252,24 @@ runs/evaluations/top1/suites/<suite_id>/members.jsonl
 `model_id` 来自最终模型目录内所有文件的 SHA256；每次评测前都会重新校验，确认模型没有
 被改动。`evaluation_id` 每次都不同，而相同模型、数据快照和语义推理参数会得到相同的
 `evaluation_signature`，可用于发现重复实验。`batch_size`、设备和精度作为执行参数记录，
-不会混入语义签名；数据哈希、decision policy、有效 available threshold 和 history
-ablation 会混入签名。`predictions.jsonl` 同时保留原始候选预测及 `backend_decision`；
+不会混入语义签名；数据哈希、decision policy、decoding mode、beam 数、route threshold
+和 history ablation 会混入签名。`predictions.jsonl` 同时保留原始候选、路径置信度、
+是否触发阈值及最终 `backend_decision`；
 `summary.json` 的 `top1_accuracy` 使用后端业务口径，并另存 `raw_candidate_accuracy`。
 
-新训练 bundle 会自动携带默认 decision policy。旧 schema 2 bundle 没有该文件时，可在
-评测命令中显式指定 `--decision-policy configs/top1_decision_policy.json`。
+新训练 bundle 会自动携带 decision policy，并将受约束生成契约写入 schema 4 manifest。
 `evaluation_index.jsonl` 是所有评测的追加式索引；用同一个 `--suite-id` 可把一组数据集或
 参数扫描聚合到同一 suite 的 `members.jsonl`，而每个成员仍保持独立、不可变。
 
-正式预测固定使用候选完整路径（含 EOS）的 `sum_logprob`，与 bundle 中的推理契约一致；
-`mean_logprob` 只作为长度偏置诊断自动计算，不能切换为正式决策。评测也不能覆盖训练时
-的 prompt、候选表、`max_length` 或 tokenizer 行为。LoRA bundle 会额外绑定 base model：
+正式预测使用候选 Trie 约束的 `generate`，且只返回一个候选。评测不能覆盖训练时的
+prompt、候选表、`max_length` 或 tokenizer 行为。LoRA bundle 会额外绑定 base model：
 Hub 模型固定到训练时 revision，本地模型复核完整目录内容哈希。
 
-指标包括 Top1 accuracy、候选级 precision/recall/NLL、混淆矩阵、margin、熵、ECE
-校准误差、单轮/多轮分层，以及 `sum_logprob` 与 `mean_logprob` 的准确率和预测分歧。
+指标包括原始候选与阈值后端 accuracy、候选级 precision/recall、两套混淆矩阵、路径
+置信度、ECE、路由覆盖率、阈值拒绝率、Available/OOS precision/recall 和单轮/多轮分层。
 开启 history ablation 后还会记录历史导致的预测变化、帮助数、伤害数和净收益。逐样本
-结果不保存对话正文，使用原数据行号回查；`metrics.json` 还给出最低 margin 和高置信
-错误的行号清单。
+结果不保存对话正文，使用原数据行号回查；`metrics.json` 还给出最低置信度真实路由、
+最接近阈值和高置信错误的行号清单。
 
 ## 检查
 
