@@ -14,8 +14,8 @@ from typing import Any, Iterable, Mapping, Sequence
 ROUTING_MODE = "candidate_name_top1"
 CONVERSATION_TEMPLATE = "routing_envelope_markdown_v1"
 TARGET_CONTRACT = "candidate_name_tokens_plus_eos"
-INFERENCE_SCORING_RULE = "candidate_path_sum_logprob"
-INFERENCE_DECISION_RULE = "backend_group_threshold_v1"
+INFERENCE_SCORING_RULE = "constrained_generate_path_probability_v1"
+INFERENCE_DECISION_RULE = "selected_route_threshold_v1"
 MEMORIZATION_SOURCE_TYPE = "label_description"
 MEMORIZATION_DESCRIPTION_TYPES = (
     "label_term",
@@ -389,6 +389,77 @@ def candidate_token_sequences(
     if not result:
         raise Top1DataError("candidate name set cannot be empty")
     return result
+
+
+class CandidateNameTokenTrie:
+    """Variable-length grammar for exactly one candidate name followed by EOS."""
+
+    _NAME = object()
+
+    def __init__(
+        self,
+        name_to_tokens: Mapping[str, Sequence[int]],
+        *,
+        eos_token_id: int,
+    ) -> None:
+        if not isinstance(eos_token_id, int) or eos_token_id < 0:
+            raise Top1DataError("eos_token_id must be a non-negative integer")
+        if not name_to_tokens:
+            raise Top1DataError("cannot build a candidate trie without names")
+        self.eos_token_id = eos_token_id
+        self._root: dict[Any, Any] = {}
+        self._tokens_to_name: dict[tuple[int, ...], str] = {}
+        for name, raw_tokens in name_to_tokens.items():
+            tokens = tuple(int(value) for value in raw_tokens)
+            if not tokens or any(value < 0 for value in tokens):
+                raise Top1DataError(f"candidate {name!r} has an invalid token path")
+            if eos_token_id in tokens:
+                raise Top1DataError(f"candidate {name!r} token path contains EOS")
+            previous = self._tokens_to_name.get(tokens)
+            if previous is not None:
+                raise Top1DataError(
+                    f"candidate names {previous!r} and {name!r} share one token path"
+                )
+            node = self._root
+            for token_id in tokens:
+                node = node.setdefault(token_id, {})
+            node[self._NAME] = name
+            self._tokens_to_name[tokens] = name
+
+    @property
+    def max_name_tokens(self) -> int:
+        """Return the longest legal candidate-name token count."""
+
+        return max(len(tokens) for tokens in self._tokens_to_name)
+
+    def allowed_next(self, generated: Sequence[int]) -> tuple[int, ...]:
+        """Return legal next tokens for one generated candidate prefix."""
+
+        node = self._root
+        for raw_token_id in generated:
+            token_id = int(raw_token_id)
+            if token_id == self.eos_token_id:
+                return ()
+            child = node.get(token_id)
+            if not isinstance(child, dict):
+                return ()
+            node = child
+        allowed = sorted(key for key in node if key is not self._NAME)
+        if self._NAME in node:
+            allowed.append(self.eos_token_id)
+        return tuple(allowed)
+
+    def resolve(self, generated: Sequence[int]) -> str:
+        """Resolve one complete generated token sequence to its candidate name."""
+
+        tokens = tuple(int(value) for value in generated)
+        try:
+            return self._tokens_to_name[tokens]
+        except KeyError as exc:
+            raise Top1DataError(
+                "generated token sequence is not a complete candidate name: "
+                f"{tokens!r}"
+            ) from exc
 
 
 def prepare_router_prompt(

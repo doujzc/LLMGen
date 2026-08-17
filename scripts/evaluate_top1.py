@@ -4,15 +4,15 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 import inspect
+import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from llmgen.evaluation import (
     aggregate_predictions,
     load_backend_decision_policy,
-    prediction_from_scores,
+    prediction_from_generation,
 )
 from llmgen.experiment import (
     EVALUATION_RUN_SCHEMA_VERSION,
@@ -29,6 +29,7 @@ from llmgen.experiment import (
 )
 from llmgen.top1 import (
     CONVERSATION_TEMPLATE,
+    CandidateNameTokenTrie,
     INFERENCE_DECISION_RULE,
     MAX_ASSISTANT_HISTORY_CHARACTERS,
     MAX_HISTORY_CHARACTERS,
@@ -50,9 +51,22 @@ from llmgen.top1 import (
 )
 
 
+DECODING_MODES = ("greedy", "beam_search")
+
+
+def _parse_route_threshold(value: str) -> float:
+    try:
+        threshold = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("route threshold must be a number") from exc
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise argparse.ArgumentTypeError("route threshold must be between 0 and 1")
+    return threshold
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Score closed-set candidate paths and record one Top1 evaluation run."
+        description="Constrained-generate one candidate and record one Top1 evaluation run."
     )
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--data", required=True)
@@ -61,10 +75,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--suite-id")
     parser.add_argument("--candidate-registry")
     parser.add_argument("--decision-policy")
-    parser.add_argument("--available-threshold", type=float)
+    parser.add_argument("--route-threshold", type=_parse_route_threshold)
     parser.add_argument("--system-prompt-file")
     parser.add_argument("--max-length", type=int)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--decoding-mode",
+        choices=DECODING_MODES,
+        default="greedy",
+    )
+    parser.add_argument("--num-beams", type=int, default=4)
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--precision", choices=("auto", "bf16", "fp16", "fp32"), default="auto")
     parser.add_argument("--device", default="auto")
@@ -103,8 +123,8 @@ def _load_router_contract(model_dir: Path) -> dict[str, Any]:
         raise Top1DataError(f"router manifest does not exist: {manifest_path}")
     manifest = read_json_object(manifest_path)
     schema_version = manifest.get("schema_version")
-    if schema_version not in {2, 3}:
-        raise Top1DataError("router manifest schema_version must be 2 or 3")
+    if schema_version != 4:
+        raise Top1DataError("router manifest schema_version must be 4")
     if manifest.get("routing_mode") != ROUTING_MODE:
         raise Top1DataError("router manifest has an incompatible routing mode")
     if manifest.get("target") != TARGET_CONTRACT:
@@ -120,31 +140,25 @@ def _load_router_contract(model_dir: Path) -> dict[str, Any]:
     if conversation != expected_conversation:
         raise Top1DataError("router manifest has an incompatible prompt contract")
     inference = manifest.get("inference")
-    expected_inference = (
-        {
-            "scoring_rule": INFERENCE_SCORING_RULE,
-            "decision_rule": INFERENCE_DECISION_RULE,
-            "include_eos": True,
-        }
-        if schema_version == 3
-        else {
-            "decision_rule": INFERENCE_SCORING_RULE,
-            "include_eos": True,
-        }
-    )
+    expected_inference = {
+        "scoring_rule": INFERENCE_SCORING_RULE,
+        "decision_rule": INFERENCE_DECISION_RULE,
+        "include_eos": True,
+        "decoding_modes": list(DECODING_MODES),
+        "num_return_sequences": 1,
+    }
     if inference != expected_inference:
         raise Top1DataError("router manifest has an incompatible inference contract")
-    if schema_version == 3:
-        decision_policy = manifest.get("backend_decision_policy")
-        if (
-            not isinstance(decision_policy, Mapping)
-            or decision_policy.get("decision_rule") != INFERENCE_DECISION_RULE
-            or not isinstance(decision_policy.get("path"), str)
-            or not isinstance(decision_policy.get("sha256"), str)
-        ):
-            raise Top1DataError(
-                "router manifest has invalid backend decision policy metadata"
-            )
+    decision_policy = manifest.get("backend_decision_policy")
+    if (
+        not isinstance(decision_policy, Mapping)
+        or decision_policy.get("decision_rule") != INFERENCE_DECISION_RULE
+        or not isinstance(decision_policy.get("path"), str)
+        or not isinstance(decision_policy.get("sha256"), str)
+    ):
+        raise Top1DataError(
+            "router manifest has invalid backend decision policy metadata"
+        )
     max_length = manifest.get("max_length")
     if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
         raise Top1DataError("router manifest max_length must be a positive integer")
@@ -159,8 +173,6 @@ def _validate_bundled_decision_policy(
 ) -> None:
     """Verify the default policy when evaluation uses the bundled file."""
 
-    if manifest.get("schema_version") != 3:
-        return
     metadata = manifest["backend_decision_policy"]
     bundled_path = (model_dir / str(metadata["path"])).resolve()
     if decision_policy_path == bundled_path and metadata["sha256"] != sha256_file(
@@ -423,92 +435,138 @@ def _prepare_prompts(
     return prepared
 
 
-def _score_prompt_batch(
-    prompt_items: Sequence[tuple[int, str, Sequence[int]]],
-    *,
-    model: Any,
-    tokenizer: Any,
-    candidate_tokens: Mapping[str, Sequence[int]],
-    torch: Any,
-    device: Any,
-) -> list[tuple[int, str, dict[str, float | int]]]:
-    sequences = []
-    path_ids = []
-    prompt_lengths = []
-    for _, candidate, prompt_ids in prompt_items:
-        path = [*map(int, candidate_tokens[candidate]), int(tokenizer.eos_token_id)]
-        sequences.append([*map(int, prompt_ids), *path])
-        path_ids.append(path)
-        prompt_lengths.append(len(prompt_ids))
-    max_length = max(map(len, sequences))
-    input_ids = [
-        [*sequence, *([int(tokenizer.pad_token_id)] * (max_length - len(sequence)))]
-        for sequence in sequences
-    ]
-    attention_mask = [
-        [1] * len(sequence) + [0] * (max_length - len(sequence))
-        for sequence in sequences
-    ]
-    with torch.inference_mode():
-        outputs = model(
-            input_ids=torch.tensor(input_ids, dtype=torch.long, device=device),
-            attention_mask=torch.tensor(attention_mask, dtype=torch.long, device=device),
-        )
-        logits = outputs.logits.float()
-        results = []
-        for index, (row_index, candidate, _) in enumerate(prompt_items):
-            start = prompt_lengths[index] - 1
-            path = path_ids[index]
-            token_logits = logits[index, start : start + len(path), :]
-            token_logprob = torch.log_softmax(token_logits, dim=-1).gather(
-                1,
-                torch.tensor(path, dtype=torch.long, device=device).unsqueeze(1),
-            )
-            total = float(token_logprob.sum().item())
-            results.append(
-                (
-                    row_index,
-                    candidate,
-                    {
-                        "sum_logprob": total,
-                        "mean_logprob": total / len(path),
-                        "path_tokens": len(path),
-                    },
+def _logits_processor_class(torch: Any, transformers: Any):
+    class CandidateNameLogitsProcessor(transformers.LogitsProcessor):
+        def __init__(self, trie: CandidateNameTokenTrie, prompt_width: int) -> None:
+            self.trie = trie
+            self.prompt_width = prompt_width
+
+        def __call__(self, input_ids: Any, scores: Any) -> Any:
+            generated = input_ids[:, self.prompt_width :]
+            masked = torch.full_like(scores, -float("inf"))
+            for row_index, suffix in enumerate(generated.tolist()):
+                allowed = (
+                    (self.trie.eos_token_id,)
+                    if self.trie.eos_token_id in suffix
+                    else self.trie.allowed_next(suffix)
                 )
-            )
-    return results
+                if not allowed:
+                    raise RuntimeError(
+                        "generation reached an invalid candidate prefix: "
+                        f"{suffix!r}"
+                    )
+                masked[row_index, list(allowed)] = scores[row_index, list(allowed)]
+            return masked
+
+    return CandidateNameLogitsProcessor
 
 
-def _score_prepared(
+def _generate_prepared(
     prepared: Sequence[Mapping[str, Any]],
     *,
     prompt_key: str,
     model: Any,
     tokenizer: Any,
-    candidate_names: Sequence[str],
-    candidate_tokens: Mapping[str, Sequence[int]],
+    trie: CandidateNameTokenTrie,
     torch: Any,
+    transformers: Any,
     device: Any,
-    batch_size: int,
-) -> dict[int, dict[str, dict[str, float | int]]]:
-    tasks = [
-        (int(row["row_index"]), candidate, row[prompt_key])
-        for row in prepared
-        if row[prompt_key] is not None
-        for candidate in candidate_names
+    decoding_mode: str,
+    num_beams: int,
+    route_threshold: float | None,
+) -> dict[int, dict[str, Any]]:
+    items = [row for row in prepared if row[prompt_key] is not None]
+    if not items:
+        return {}
+    prompts = [[*map(int, row[prompt_key])] for row in items]
+    prompt_width = max(map(len, prompts))
+    pad_token_id = int(tokenizer.pad_token_id)
+    input_ids = [
+        [*([pad_token_id] * (prompt_width - len(prompt))), *prompt]
+        for prompt in prompts
     ]
-    grouped: dict[int, dict[str, dict[str, float | int]]] = defaultdict(dict)
-    for start in range(0, len(tasks), batch_size):
-        for row_index, candidate, score in _score_prompt_batch(
-            tasks[start : start + batch_size],
-            model=model,
-            tokenizer=tokenizer,
-            candidate_tokens=candidate_tokens,
-            torch=torch,
+    attention_mask = [
+        [0] * (prompt_width - len(prompt)) + [1] * len(prompt)
+        for prompt in prompts
+    ]
+    effective_beams = 1 if decoding_mode == "greedy" else num_beams
+    if decoding_mode == "beam_search":
+        root_width = len(trie.allowed_next(()))
+        if effective_beams > root_width:
+            raise Top1DataError(
+                f"num_beams={effective_beams} exceeds the {root_width} legal "
+                "first-token branches"
+            )
+    CandidateNameLogitsProcessor = _logits_processor_class(torch, transformers)
+    generation_kwargs: dict[str, Any] = {
+        "input_ids": torch.tensor(input_ids, dtype=torch.long, device=device),
+        "attention_mask": torch.tensor(
+            attention_mask,
+            dtype=torch.long,
             device=device,
-        ):
-            grouped[row_index][candidate] = score
-    return dict(grouped)
+        ),
+        "do_sample": False,
+        "num_beams": effective_beams,
+        "num_return_sequences": 1,
+        "max_new_tokens": trie.max_name_tokens + 1,
+        "min_new_tokens": 1,
+        "eos_token_id": trie.eos_token_id,
+        "pad_token_id": pad_token_id,
+        "logits_processor": transformers.LogitsProcessorList(
+            [CandidateNameLogitsProcessor(trie, prompt_width)]
+        ),
+        "use_cache": True,
+        "renormalize_logits": True,
+        "return_dict_in_generate": True,
+        "output_scores": True,
+    }
+    if decoding_mode == "beam_search":
+        generation_kwargs.update(early_stopping=True, length_penalty=0.0)
+    with torch.inference_mode():
+        generated = model.generate(**generation_kwargs)
+
+    transition_scores = None
+    compute_scores = getattr(model, "compute_transition_scores", None)
+    if callable(compute_scores):
+        score_kwargs: dict[str, Any] = {"normalize_logits": True}
+        beam_indices = getattr(generated, "beam_indices", None)
+        if beam_indices is not None:
+            score_kwargs["beam_indices"] = beam_indices
+        transition_scores = compute_scores(
+            generated.sequences,
+            generated.scores,
+            **score_kwargs,
+        )
+    if route_threshold is not None and transition_scores is None:
+        raise Top1DataError(
+            "route threshold requires normalized generation transition scores"
+        )
+
+    results = {}
+    for index, row in enumerate(items):
+        suffix = [
+            int(value)
+            for value in generated.sequences[index, prompt_width:].tolist()
+        ]
+        try:
+            eos_position = suffix.index(trie.eos_token_id)
+        except ValueError as exc:
+            raise RuntimeError(
+                "constrained candidate generation did not emit EOS"
+            ) from exc
+        candidate_name = trie.resolve(suffix[:eos_position])
+        path_tokens = eos_position + 1
+        path_logprob = (
+            float(transition_scores[index, :path_tokens].sum().item())
+            if transition_scores is not None
+            else None
+        )
+        results[int(row["row_index"])] = {
+            "candidate_name": candidate_name,
+            "path_logprob": path_logprob,
+            "path_tokens": path_tokens,
+        }
+    return results
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -517,6 +575,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise Top1DataError("max_length and batch_size must be positive")
     if args.max_rows is not None and args.max_rows <= 0:
         raise Top1DataError("max_rows must be positive when specified")
+    if args.decoding_mode == "beam_search" and args.num_beams < 2:
+        raise Top1DataError("beam_search requires num_beams >= 2")
     model_dir = Path(args.model_dir).expanduser().resolve()
     data_path = Path(args.data).expanduser().resolve()
     if not data_path.is_file():
@@ -547,7 +607,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     decision_policy = load_backend_decision_policy(
         decision_policy_path,
         candidate_names,
-        available_threshold=args.available_threshold,
     )
     _validate_bundled_decision_policy(
         router_contract,
@@ -575,7 +634,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         "conversation_template": CONVERSATION_TEMPLATE,
         "max_length": args.max_length,
         "max_rows": args.max_rows,
-        "score_mode": "sum_logprob",
+        "score_mode": "constrained_generate_path_logprob",
+        "decoding_mode": args.decoding_mode,
+        "num_beams": 1 if args.decoding_mode == "greedy" else args.num_beams,
+        "route_threshold": args.route_threshold,
         "history_ablation": args.history_ablation,
         "backend_decision": decision_policy.payload(),
     }
@@ -654,6 +716,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
         candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
+        trie = CandidateNameTokenTrie(
+            candidate_tokens,
+            eos_token_id=int(tokenizer.eos_token_id),
+        )
         _validate_loaded_tokenizer(
             router_contract,
             tokenizer=tokenizer,
@@ -685,52 +751,70 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         predictions = []
         prediction_path = run_dir / "predictions.jsonl"
-        rows_per_chunk = max(1, args.batch_size // len(candidate_names))
+        rows_per_chunk = args.batch_size
         progress = tqdm(
             total=len(prepared),
-            desc="[top1-eval] scoring",
+            desc="[top1-eval] generating",
             unit="row",
             dynamic_ncols=True,
         )
         try:
             for start in range(0, len(prepared), rows_per_chunk):
                 chunk = prepared[start : start + rows_per_chunk]
-                scores = _score_prepared(
+                generated = _generate_prepared(
                     chunk,
                     prompt_key="prompt_ids",
                     model=model,
                     tokenizer=tokenizer,
-                    candidate_names=candidate_names,
-                    candidate_tokens=candidate_tokens,
+                    trie=trie,
                     torch=torch,
+                    transformers=transformers,
                     device=device,
-                    batch_size=args.batch_size,
+                    decoding_mode=args.decoding_mode,
+                    num_beams=args.num_beams,
+                    route_threshold=args.route_threshold,
                 )
-                ablation_scores = (
-                    _score_prepared(
+                ablation_generated = (
+                    _generate_prepared(
                         chunk,
                         prompt_key="history_ablation_prompt_ids",
                         model=model,
                         tokenizer=tokenizer,
-                        candidate_names=candidate_names,
-                        candidate_tokens=candidate_tokens,
+                        trie=trie,
                         torch=torch,
+                        transformers=transformers,
                         device=device,
-                        batch_size=args.batch_size,
+                        decoding_mode=args.decoding_mode,
+                        num_beams=args.num_beams,
+                        route_threshold=args.route_threshold,
                     )
                     if args.history_ablation
                     else {}
                 )
                 for row in chunk:
                     row_index = int(row["row_index"])
-                    record = prediction_from_scores(
+                    output = generated[row_index]
+                    record = prediction_from_generation(
                         row_index=row_index,
                         candidate_names=candidate_names,
-                        scores=scores[row_index],
+                        generated_candidate_name=output["candidate_name"],
+                        path_logprob=output["path_logprob"],
+                        path_tokens=output["path_tokens"],
                         target_candidate_name=row["target_candidate_name"],
                         diagnostics=row["diagnostics"],
                         decision_policy=decision_policy,
-                        history_ablation_scores=ablation_scores.get(row_index),
+                        route_threshold=args.route_threshold,
+                        decoding={
+                            "mode": args.decoding_mode,
+                            "num_beams": (
+                                1
+                                if args.decoding_mode == "greedy"
+                                else args.num_beams
+                            ),
+                            "num_return_sequences": 1,
+                            "scope": "candidate_name_top1",
+                        },
+                        history_ablation=ablation_generated.get(row_index),
                     )
                     append_jsonl(prediction_path, record)
                     predictions.append(record)
@@ -769,12 +853,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             "macro_recall_observed_candidates": metrics[
                 "macro_recall_observed_candidates"
             ],
-            "expected_calibration_error": backend_metrics["calibration"][
+            "expected_calibration_error": metrics["calibration"][
                 "expected_calibration_error"
             ],
-            "raw_candidate_expected_calibration_error": metrics["calibration"][
-                "expected_calibration_error"
-            ],
+            "routing_policy": metrics["routing_policy"],
             "available_oos": backend_metrics["available_oos"],
             "resolved_precision": resolved_precision,
             "completed_at": utc_now(),
@@ -789,12 +871,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             "evaluation_signature": evaluation_signature,
             "run_dir": str(run_dir),
             "dataset_sha256": semantic_config["dataset_sha256"],
-            "score_mode": "sum_logprob",
+            "score_mode": "constrained_generate_path_logprob",
+            "decoding_mode": args.decoding_mode,
             "rows": metrics["rows"],
             "top1_accuracy": backend_metrics["accuracy"],
             "backend_accuracy": backend_metrics["accuracy"],
             "raw_candidate_accuracy": metrics["top1_accuracy"],
-            "available_threshold": decision_policy.available_threshold,
+            "route_threshold": args.route_threshold,
         }
         append_jsonl(evaluation_root / "evaluation_index.jsonl", index_record)
         if suite_id:
@@ -818,7 +901,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "evaluation_signature": evaluation_signature,
                 "run_dir": str(run_dir),
                 "dataset_sha256": semantic_config["dataset_sha256"],
-                "score_mode": "sum_logprob",
+                "score_mode": "constrained_generate_path_logprob",
+                "decoding_mode": args.decoding_mode,
+                "route_threshold": args.route_threshold,
                 "error_type": type(exc).__name__,
             }
             append_jsonl(evaluation_root / "evaluation_index.jsonl", failure_record)

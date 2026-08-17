@@ -1230,6 +1230,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 step=int(trainer.state.global_step),
                 model_id=artifact["model_id"],
             )
+            print(f"[top1] output directory: {output_dir}", flush=True)
         if callable(wait_for_everyone):
             wait_for_everyone()
     except BaseException as exc:

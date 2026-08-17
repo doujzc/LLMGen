@@ -1,4 +1,4 @@
-"""Candidate-path scoring records and aggregate Top1 evaluation metrics."""
+"""Constrained-generation records and aggregate Top1 evaluation metrics."""
 
 from __future__ import annotations
 
@@ -21,12 +21,10 @@ class BackendDecisionPolicy:
     candidate_to_backend: Mapping[str, str]
     backend_labels: tuple[str, ...]
     fallback_backend_label: str
-    available_threshold: float
-    temperature: float
 
     @property
     def available_backend_labels(self) -> tuple[str, ...]:
-        """Return backend labels that represent supported operations."""
+        """Return backend labels that represent executable routes."""
 
         return tuple(
             label
@@ -35,27 +33,23 @@ class BackendDecisionPolicy:
         )
 
     def payload(self) -> dict[str, Any]:
-        """Return the normalized, portable decision-policy payload."""
+        """Return the normalized, portable routing-policy payload."""
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "routing_mode": ROUTING_MODE,
             "decision_rule": INFERENCE_DECISION_RULE,
             "backend_labels": list(self.backend_labels),
             "fallback_backend_label": self.fallback_backend_label,
             "candidate_to_backend": dict(self.candidate_to_backend),
-            "available_threshold": self.available_threshold,
-            "temperature": self.temperature,
         }
 
 
 def load_backend_decision_policy(
     path: str | Path,
     candidate_names: Sequence[str],
-    *,
-    available_threshold: float | None = None,
 ) -> BackendDecisionPolicy:
-    """Load and validate one backend decision policy against model candidates."""
+    """Load and validate one routing policy against model candidates."""
 
     source = Path(path)
     try:
@@ -64,8 +58,8 @@ def load_backend_decision_policy(
         raise Top1DataError(f"invalid backend decision policy: {source}") from exc
     if not isinstance(payload, dict):
         raise Top1DataError("backend decision policy must be a JSON object")
-    if payload.get("schema_version") != 1:
-        raise Top1DataError("backend decision policy schema_version must be 1")
+    if payload.get("schema_version") != 2:
+        raise Top1DataError("backend decision policy schema_version must be 2")
     if payload.get("routing_mode") != ROUTING_MODE:
         raise Top1DataError("backend decision policy has an incompatible routing mode")
     if payload.get("decision_rule") != INFERENCE_DECISION_RULE:
@@ -105,137 +99,104 @@ def load_backend_decision_policy(
                 f"candidate {candidate!r} maps to an unknown backend label"
             )
         candidate_to_backend[candidate] = backend
-    used_backend_labels = set(candidate_to_backend.values())
-    if used_backend_labels != set(backend_labels):
+    if set(candidate_to_backend.values()) != set(backend_labels):
         raise Top1DataError("every backend label must receive at least one candidate")
-
-    threshold = (
-        available_threshold
-        if available_threshold is not None
-        else payload.get("available_threshold")
-    )
-    if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, (int, float))
-        or not math.isfinite(float(threshold))
-        or not 0.0 <= float(threshold) <= 1.0
-    ):
-        raise Top1DataError("available_threshold must be between 0 and 1")
-    temperature = payload.get("temperature")
-    if (
-        isinstance(temperature, bool)
-        or not isinstance(temperature, (int, float))
-        or not math.isfinite(float(temperature))
-        or float(temperature) <= 0.0
-    ):
-        raise Top1DataError("temperature must be a finite positive number")
 
     return BackendDecisionPolicy(
         candidate_to_backend=candidate_to_backend,
         backend_labels=tuple(backend_labels),
         fallback_backend_label=fallback,
-        available_threshold=float(threshold),
-        temperature=float(temperature),
     )
 
 
-def prediction_from_scores(
+def candidate_confidence(path_logprob: float | None) -> float | None:
+    """Convert one normalized constrained-path log probability to probability."""
+
+    if path_logprob is None:
+        return None
+    value = float(path_logprob)
+    if math.isnan(value):
+        raise Top1DataError("candidate generation produced a NaN path score")
+    if value == -math.inf:
+        return 0.0
+    if value == math.inf:
+        raise Top1DataError("candidate generation produced an infinite path score")
+    return max(0.0, min(1.0, math.exp(min(0.0, value))))
+
+
+def prediction_from_generation(
     *,
     row_index: int,
     candidate_names: Sequence[str],
-    scores: Mapping[str, Mapping[str, float | int]],
+    generated_candidate_name: str,
+    path_logprob: float | None,
+    path_tokens: int,
     target_candidate_name: str | None,
     diagnostics: Mapping[str, Any],
     decision_policy: BackendDecisionPolicy,
-    history_ablation_scores: Mapping[str, Mapping[str, float | int]] | None = None,
+    route_threshold: float | None,
+    decoding: Mapping[str, Any],
+    history_ablation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Create one privacy-safe prediction record from candidate path scores."""
+    """Create one privacy-safe record from constrained generation output."""
 
-    if set(scores) != set(candidate_names):
-        raise Top1DataError("candidate scores do not match the candidate registry")
-    if tuple(decision_policy.candidate_to_backend) != tuple(candidate_names):
+    candidates = tuple(candidate_names)
+    if tuple(decision_policy.candidate_to_backend) != candidates:
         raise Top1DataError("decision policy candidate order differs from the registry")
-    if target_candidate_name is not None and target_candidate_name not in scores:
-        raise Top1DataError("target candidate does not exist in candidate scores")
-
-    sum_prediction = max(candidate_names, key=lambda name: float(scores[name]["sum_logprob"]))
-    mean_prediction = max(
-        candidate_names,
-        key=lambda name: float(scores[name]["mean_logprob"]),
-    )
-    prediction = sum_prediction
-    selected = [
-        float(scores[name]["sum_logprob"]) / decision_policy.temperature
-        for name in candidate_names
-    ]
-    probabilities = _softmax(selected)
-    candidate_probabilities = dict(zip(candidate_names, probabilities, strict=True))
-    backend_decision = _backend_decision(
-        candidate_probabilities,
-        decision_policy,
+    if generated_candidate_name not in decision_policy.candidate_to_backend:
+        raise Top1DataError("generated candidate does not exist in the registry")
+    if (
+        target_candidate_name is not None
+        and target_candidate_name not in decision_policy.candidate_to_backend
+    ):
+        raise Top1DataError("target candidate does not exist in the registry")
+    confidence = candidate_confidence(path_logprob)
+    backend_decision = _route_decision(
+        predicted_candidate_name=generated_candidate_name,
         target_candidate_name=target_candidate_name,
+        confidence=confidence,
+        route_threshold=route_threshold,
+        policy=decision_policy,
     )
-    entropy = -sum(
-        probability * math.log(max(probability, 1e-45))
-        for probability in probabilities
-    )
-    normalized_entropy = entropy / math.log(len(probabilities)) if len(probabilities) > 1 else 0.0
-    selected_scores = sorted(selected, reverse=True)
-    margin = selected_scores[0] - selected_scores[1] if len(selected_scores) > 1 else None
-
     record: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "row_index": row_index,
         "target_candidate_name": target_candidate_name,
-        "predicted_candidate_name": prediction,
-        "correct": prediction == target_candidate_name if target_candidate_name else None,
-        "sum_logprob_prediction": sum_prediction,
-        "mean_logprob_prediction": mean_prediction,
-        "score_mode": "sum_logprob",
-        "confidence": max(probabilities),
-        "normalized_entropy": normalized_entropy,
-        "margin": margin,
+        "predicted_candidate_name": generated_candidate_name,
+        "correct": (
+            generated_candidate_name == target_candidate_name
+            if target_candidate_name is not None
+            else None
+        ),
+        "score_mode": "constrained_generate_path_logprob",
+        "path_logprob": path_logprob,
+        "path_tokens": path_tokens,
+        "candidate_confidence": confidence,
         "diagnostics": dict(diagnostics),
-        "candidate_scores": {
-            name: {
-                "sum_logprob": float(scores[name]["sum_logprob"]),
-                "mean_logprob": float(scores[name]["mean_logprob"]),
-                "path_tokens": int(scores[name]["path_tokens"]),
-                "probability": candidate_probabilities[name],
-            }
-            for name in candidate_names
-        },
+        "decoding": dict(decoding),
         "backend_decision": backend_decision,
     }
-    if history_ablation_scores is not None:
-        if set(history_ablation_scores) != set(candidate_names):
-            raise Top1DataError(
-                "history-ablation scores do not match the candidate registry"
-            )
-        ablated_prediction = max(
-            candidate_names,
-            key=lambda name: float(history_ablation_scores[name]["sum_logprob"]),
-        )
-        ablated_probabilities = _softmax(
-            [
-                float(history_ablation_scores[name]["sum_logprob"])
-                / decision_policy.temperature
-                for name in candidate_names
-            ]
-        )
-        ablated_backend = _backend_decision(
-            dict(zip(candidate_names, ablated_probabilities, strict=True)),
-            decision_policy,
+    if history_ablation is not None:
+        ablated_candidate = str(history_ablation["candidate_name"])
+        ablated_confidence = candidate_confidence(history_ablation.get("path_logprob"))
+        ablated_backend = _route_decision(
+            predicted_candidate_name=ablated_candidate,
             target_candidate_name=target_candidate_name,
+            confidence=ablated_confidence,
+            route_threshold=route_threshold,
+            policy=decision_policy,
         )
         record["history_ablation"] = {
-            "predicted_candidate_name": ablated_prediction,
+            "predicted_candidate_name": ablated_candidate,
             "correct": (
-                ablated_prediction == target_candidate_name
-                if target_candidate_name
+                ablated_candidate == target_candidate_name
+                if target_candidate_name is not None
                 else None
             ),
-            "changed_prediction": ablated_prediction != prediction,
+            "changed_prediction": ablated_candidate != generated_candidate_name,
+            "path_logprob": history_ablation.get("path_logprob"),
+            "path_tokens": int(history_ablation["path_tokens"]),
+            "candidate_confidence": ablated_confidence,
             "backend_decision": {
                 **ablated_backend,
                 "changed_prediction": (
@@ -247,25 +208,36 @@ def prediction_from_scores(
     return record
 
 
-def _backend_decision(
-    candidate_probabilities: Mapping[str, float],
-    policy: BackendDecisionPolicy,
+def _route_decision(
     *,
+    predicted_candidate_name: str,
     target_candidate_name: str | None,
+    confidence: float | None,
+    route_threshold: float | None,
+    policy: BackendDecisionPolicy,
 ) -> dict[str, Any]:
-    backend_probabilities = {label: 0.0 for label in policy.backend_labels}
-    for candidate, probability in candidate_probabilities.items():
-        backend = policy.candidate_to_backend[candidate]
-        backend_probabilities[backend] += float(probability)
-    fallback_probability = backend_probabilities[policy.fallback_backend_label]
-    available_probability = max(0.0, min(1.0, 1.0 - fallback_probability))
-    if available_probability >= policy.available_threshold:
-        predicted_backend = max(
-            policy.available_backend_labels,
-            key=lambda label: backend_probabilities[label],
+    if route_threshold is not None and (
+        isinstance(route_threshold, bool)
+        or not isinstance(route_threshold, (int, float))
+        or not math.isfinite(float(route_threshold))
+        or not 0.0 <= float(route_threshold) <= 1.0
+    ):
+        raise Top1DataError("route_threshold must be between 0 and 1")
+    raw_backend = policy.candidate_to_backend[predicted_candidate_name]
+    raw_should_route = raw_backend != policy.fallback_backend_label
+    if raw_should_route and route_threshold is not None and confidence is None:
+        raise Top1DataError(
+            "route threshold requires normalized generation transition scores"
         )
-    else:
-        predicted_backend = policy.fallback_backend_label
+    threshold_triggered = bool(
+        raw_should_route
+        and route_threshold is not None
+        and confidence is not None
+        and confidence < route_threshold
+    )
+    predicted_backend = (
+        policy.fallback_backend_label if threshold_triggered else raw_backend
+    )
     target_backend = (
         policy.candidate_to_backend[target_candidate_name]
         if target_candidate_name is not None
@@ -273,16 +245,29 @@ def _backend_decision(
     )
     return {
         "target_backend_label": target_backend,
+        "raw_predicted_backend_label": raw_backend,
         "predicted_backend_label": predicted_backend,
-        "correct": (
-            predicted_backend == target_backend if target_backend is not None else None
+        "raw_correct": raw_backend == target_backend if target_backend else None,
+        "correct": predicted_backend == target_backend if target_backend else None,
+        "raw_should_route": raw_should_route,
+        "should_route": predicted_backend != policy.fallback_backend_label,
+        "candidate_confidence": confidence,
+        "route_threshold": route_threshold,
+        "threshold_triggered": threshold_triggered,
+        "threshold_margin": (
+            confidence - route_threshold
+            if raw_should_route
+            and confidence is not None
+            and route_threshold is not None
+            else None
         ),
-        "confidence": backend_probabilities[predicted_backend],
-        "available_probability": available_probability,
-        "oos_probability": fallback_probability,
-        "available_threshold": policy.available_threshold,
-        "threshold_margin": available_probability - policy.available_threshold,
-        "backend_probabilities": backend_probabilities,
+        "status": (
+            "abstained"
+            if threshold_triggered
+            else "routed"
+            if raw_should_route
+            else "no_route"
+        ),
     }
 
 
@@ -291,18 +276,16 @@ def aggregate_predictions(
     candidate_names: Sequence[str],
     decision_policy: BackendDecisionPolicy,
 ) -> dict[str, Any]:
-    """Aggregate accuracy, calibration, confusion, and limitation diagnostics."""
+    """Aggregate candidate, route-threshold, and backend diagnostics."""
 
     labeled = [row for row in predictions if row.get("target_candidate_name") is not None]
     confusion = {
         target: {predicted: 0 for predicted in candidate_names}
         for target in candidate_names
     }
-    predicted_counts: Counter[str] = Counter()
     target_counts: Counter[str] = Counter()
+    predicted_counts: Counter[str] = Counter()
     correct_counts: Counter[str] = Counter()
-    target_nll: dict[str, list[float]] = {name: [] for name in candidate_names}
-    correct_values = []
     for row in labeled:
         target = str(row["target_candidate_name"])
         predicted = str(row["predicted_candidate_name"])
@@ -311,14 +294,10 @@ def aggregate_predictions(
         confusion[target][predicted] += 1
         target_counts[target] += 1
         predicted_counts[predicted] += 1
-        is_correct = target == predicted
-        correct_values.append(is_correct)
-        correct_counts[target] += is_correct
-        target_score = row["candidate_scores"][target]
-        target_nll[target].append(-float(target_score["mean_logprob"]))
+        correct_counts[target] += target == predicted
 
     per_candidate = {}
-    observed_recalls = []
+    recalls = []
     for name in candidate_names:
         support = target_counts[name]
         predicted = predicted_counts[name]
@@ -326,52 +305,16 @@ def aggregate_predictions(
         recall = correct / support if support else None
         precision = correct / predicted if predicted else None
         if recall is not None:
-            observed_recalls.append(recall)
+            recalls.append(recall)
         per_candidate[name] = {
             "support": support,
             "predicted": predicted,
             "correct": correct,
             "recall": recall,
             "precision": precision,
-            "path_tokens": (
-                int(predictions[0]["candidate_scores"][name]["path_tokens"])
-                if predictions
-                else None
-            ),
-            "mean_target_token_nll": (
-                mean(target_nll[name]) if target_nll[name] else None
-            ),
         }
 
-    sum_correct = [
-        row["sum_logprob_prediction"] == row["target_candidate_name"] for row in labeled
-    ]
-    mean_correct = [
-        row["mean_logprob_prediction"] == row["target_candidate_name"] for row in labeled
-    ]
-    score_disagreements = sum(
-        row["sum_logprob_prediction"] != row["mean_logprob_prediction"]
-        for row in predictions
-    )
     history_rows = [row for row in labeled if row.get("history_ablation") is not None]
-    history_help = sum(
-        bool(row["correct"]) and not bool(row["history_ablation"]["correct"])
-        for row in history_rows
-    )
-    history_hurt = sum(
-        not bool(row["correct"]) and bool(row["history_ablation"]["correct"])
-        for row in history_rows
-    )
-    backend_history_help = sum(
-        bool(row["backend_decision"]["correct"])
-        and not bool(row["history_ablation"]["backend_decision"]["correct"])
-        for row in history_rows
-    )
-    backend_history_hurt = sum(
-        not bool(row["backend_decision"]["correct"])
-        and bool(row["history_ablation"]["backend_decision"]["correct"])
-        for row in history_rows
-    )
     single_turn = [
         row
         for row in labeled
@@ -396,45 +339,25 @@ def aggregate_predictions(
         row
         for row in labeled
         if int(row.get("diagnostics", {}).get("history_messages_dropped", 0)) == 0
-        and not bool(
-            row.get("diagnostics", {}).get("current_user_truncated", False)
-        )
+        and not bool(row.get("diagnostics", {}).get("current_user_truncated", False))
     ]
-
+    confidence_rows = [
+        row for row in labeled if row.get("candidate_confidence") is not None
+    ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "rows": len(predictions),
         "labeled_rows": len(labeled),
-        "top1_accuracy": _accuracy(correct_values),
-        "macro_recall_observed_candidates": (
-            mean(observed_recalls) if observed_recalls else None
-        ),
+        "top1_accuracy": _accuracy([bool(row["correct"]) for row in labeled]),
+        "macro_recall_observed_candidates": mean(recalls) if recalls else None,
         "per_candidate": per_candidate,
         "confusion_matrix": confusion,
-        "confidence": numeric_summary(float(row["confidence"]) for row in predictions),
-        "normalized_entropy": numeric_summary(
-            float(row["normalized_entropy"]) for row in predictions
-        ),
-        "margin": numeric_summary(
-            float(row["margin"])
+        "candidate_confidence": numeric_summary(
+            float(row["candidate_confidence"])
             for row in predictions
-            if row.get("margin") is not None
+            if row.get("candidate_confidence") is not None
         ),
-        "calibration": _calibration(labeled),
-        "score_mode_comparison": {
-            "sum_logprob_accuracy": _accuracy(sum_correct),
-            "mean_logprob_accuracy": _accuracy(mean_correct),
-            "sum_logprob_prediction_counts": dict(
-                Counter(str(row["sum_logprob_prediction"]) for row in predictions)
-            ),
-            "mean_logprob_prediction_counts": dict(
-                Counter(str(row["mean_logprob_prediction"]) for row in predictions)
-            ),
-            "prediction_disagreements": score_disagreements,
-            "prediction_disagreement_rate": (
-                score_disagreements / len(predictions) if predictions else None
-            ),
-        },
+        "calibration": _calibration(confidence_rows),
         "conversation_strata": {
             "single_turn": _stratum(single_turn),
             "multi_turn": _stratum(multi_turn),
@@ -444,47 +367,43 @@ def aggregate_predictions(
             "current_user_truncated": _stratum(current_truncated),
             "untouched": _stratum(untouched),
         },
-        "history_ablation": {
-            "rows": len(history_rows),
-            "full_history_accuracy": _accuracy(
-                [bool(row["correct"]) for row in history_rows]
-            ),
-            "latest_user_only_accuracy": _accuracy(
-                [bool(row["history_ablation"]["correct"]) for row in history_rows]
-            ),
-            "prediction_changes": sum(
-                bool(row["history_ablation"]["changed_prediction"])
-                for row in history_rows
-            ),
-            "history_helped": history_help,
-            "history_hurt": history_hurt,
-            "net_help": history_help - history_hurt,
-            "backend_full_history_accuracy": _accuracy(
-                [
-                    bool(row["backend_decision"]["correct"])
-                    for row in history_rows
-                ]
-            ),
-            "backend_latest_user_only_accuracy": _accuracy(
-                [
-                    bool(row["history_ablation"]["backend_decision"]["correct"])
-                    for row in history_rows
-                ]
-            ),
-            "backend_prediction_changes": sum(
-                bool(
-                    row["history_ablation"]["backend_decision"][
-                        "changed_prediction"
-                    ]
-                )
-                for row in history_rows
-            ),
-            "backend_history_helped": backend_history_help,
-            "backend_history_hurt": backend_history_hurt,
-            "backend_net_help": backend_history_help - backend_history_hurt,
-        },
+        "history_ablation": _history_ablation(history_rows),
+        "routing_policy": _routing_policy_metrics(predictions),
         "backend": _aggregate_backend_predictions(predictions, decision_policy),
         "hard_examples": _hard_examples(predictions),
+    }
+
+
+def _routing_policy_metrics(predictions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    labeled = [row for row in predictions if row.get("target_candidate_name") is not None]
+    threshold_values = {
+        row["backend_decision"].get("route_threshold") for row in predictions
+    }
+    triggered = sum(
+        bool(row["backend_decision"]["threshold_triggered"]) for row in predictions
+    )
+    raw_routed = sum(
+        bool(row["backend_decision"]["raw_should_route"]) for row in predictions
+    )
+    routed = sum(bool(row["backend_decision"]["should_route"]) for row in predictions)
+    accepted_labeled = [
+        row
+        for row in labeled
+        if not bool(row["backend_decision"]["threshold_triggered"])
+    ]
+    return {
+        "route_threshold": (
+            next(iter(threshold_values)) if len(threshold_values) == 1 else None
+        ),
+        "raw_route_coverage": raw_routed / len(predictions) if predictions else None,
+        "output_route_coverage": routed / len(predictions) if predictions else None,
+        "threshold_triggered_examples": triggered,
+        "threshold_abstention_rate": (
+            triggered / len(predictions) if predictions else None
+        ),
+        "selective_candidate_accuracy": _accuracy(
+            [bool(row["correct"]) for row in accepted_labeled]
+        ),
     }
 
 
@@ -505,8 +424,6 @@ def _aggregate_backend_predictions(
     predicted_counts: Counter[str] = Counter()
     correct_counts: Counter[str] = Counter()
     binary = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
-    calibration_rows = []
-    brier_values = []
     for row in labeled:
         decision = row["backend_decision"]
         target = str(decision["target_backend_label"])
@@ -516,14 +433,7 @@ def _aggregate_backend_predictions(
         confusion[target][predicted] += 1
         target_counts[target] += 1
         predicted_counts[predicted] += 1
-        is_correct = target == predicted
-        correct_counts[target] += is_correct
-        calibration_rows.append(
-            {
-                "confidence": float(decision["confidence"]),
-                "correct": is_correct,
-            }
-        )
+        correct_counts[target] += target == predicted
         target_available = target != policy.fallback_backend_label
         predicted_available = predicted != policy.fallback_backend_label
         key = (
@@ -536,13 +446,6 @@ def _aggregate_backend_predictions(
             else "tn"
         )
         binary[key] += 1
-        brier_values.append(
-            (
-                float(decision["available_probability"])
-                - float(target_available)
-            )
-            ** 2
-        )
 
     per_label = {}
     recalls = []
@@ -573,18 +476,7 @@ def _aggregate_backend_predictions(
         "macro_recall_observed_labels": mean(recalls) if recalls else None,
         "per_label": per_label,
         "confusion_matrix": confusion,
-        "confidence": numeric_summary(
-            float(row["backend_decision"]["confidence"])
-            for row in predictions
-        ),
-        "calibration": _calibration(calibration_rows),
         "available_oos": {
-            "available_threshold": policy.available_threshold,
-            "available_probability": numeric_summary(
-                float(row["backend_decision"]["available_probability"])
-                for row in predictions
-            ),
-            "brier_score": mean(brier_values) if brier_values else None,
             **binary,
             "accuracy": (tp + tn) / len(labeled) if labeled else None,
             "available_precision": tp / (tp + fp) if tp + fp else None,
@@ -597,13 +489,6 @@ def _aggregate_backend_predictions(
     }
 
 
-def _softmax(values: Sequence[float]) -> list[float]:
-    maximum = max(values)
-    exponentials = [math.exp(value - maximum) for value in values]
-    total = sum(exponentials)
-    return [value / total for value in exponentials]
-
-
 def _accuracy(values: Sequence[bool]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -612,6 +497,43 @@ def _stratum(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "rows": len(rows),
         "accuracy": _accuracy([bool(row["correct"]) for row in rows]),
+        "backend_accuracy": _accuracy(
+            [bool(row["backend_decision"]["correct"]) for row in rows]
+        ),
+    }
+
+
+def _history_ablation(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "rows": len(rows),
+        "full_history_accuracy": _accuracy([bool(row["correct"]) for row in rows]),
+        "latest_user_only_accuracy": _accuracy(
+            [bool(row["history_ablation"]["correct"]) for row in rows]
+        ),
+        "prediction_changes": sum(
+            bool(row["history_ablation"]["changed_prediction"]) for row in rows
+        ),
+        "history_helped": sum(
+            bool(row["correct"]) and not bool(row["history_ablation"]["correct"])
+            for row in rows
+        ),
+        "history_hurt": sum(
+            not bool(row["correct"]) and bool(row["history_ablation"]["correct"])
+            for row in rows
+        ),
+        "backend_full_history_accuracy": _accuracy(
+            [bool(row["backend_decision"]["correct"]) for row in rows]
+        ),
+        "backend_latest_user_only_accuracy": _accuracy(
+            [
+                bool(row["history_ablation"]["backend_decision"]["correct"])
+                for row in rows
+            ]
+        ),
+        "backend_prediction_changes": sum(
+            bool(row["history_ablation"]["backend_decision"]["changed_prediction"])
+            for row in rows
+        ),
     }
 
 
@@ -626,16 +548,22 @@ def _calibration(rows: Sequence[Mapping[str, Any]], bins: int = 10) -> dict[str,
         members = [
             row
             for row in rows
-            if lower <= float(row["confidence"]) <= upper
-            and (index == bins - 1 or float(row["confidence"]) < upper)
+            if lower <= float(row["candidate_confidence"]) <= upper
+            and (index == bins - 1 or float(row["candidate_confidence"]) < upper)
         ]
         if not members:
             buckets.append(
-                {"lower": lower, "upper": upper, "rows": 0, "accuracy": None, "confidence": None}
+                {
+                    "lower": lower,
+                    "upper": upper,
+                    "rows": 0,
+                    "accuracy": None,
+                    "confidence": None,
+                }
             )
             continue
         accuracy = mean(bool(row["correct"]) for row in members)
-        confidence = mean(float(row["confidence"]) for row in members)
+        confidence = mean(float(row["candidate_confidence"]) for row in members)
         error += (len(members) / len(rows)) * abs(accuracy - confidence)
         buckets.append(
             {
@@ -660,37 +588,38 @@ def _hard_examples(
             "target_candidate_name": row.get("target_candidate_name"),
             "predicted_candidate_name": row["predicted_candidate_name"],
             "correct": row.get("correct"),
-            "margin": row.get("margin"),
-            "confidence": row["confidence"],
-            "normalized_entropy": row["normalized_entropy"],
+            "candidate_confidence": row.get("candidate_confidence"),
             "target_backend_label": backend["target_backend_label"],
             "predicted_backend_label": backend["predicted_backend_label"],
             "backend_correct": backend["correct"],
-            "available_probability": backend["available_probability"],
-            "available_threshold": backend["available_threshold"],
+            "route_threshold": backend["route_threshold"],
+            "threshold_triggered": backend["threshold_triggered"],
         }
 
-    low_margin = sorted(
-        (row for row in rows if row.get("margin") is not None),
-        key=lambda row: float(row["margin"]),
+    confidence_rows = [row for row in rows if row.get("candidate_confidence") is not None]
+    low_confidence_routes = sorted(
+        (
+            row
+            for row in confidence_rows
+            if bool(row["backend_decision"]["raw_should_route"])
+        ),
+        key=lambda row: float(row["candidate_confidence"]),
     )[:limit]
     high_confidence_errors = sorted(
-        (row for row in rows if row.get("correct") is False),
-        key=lambda row: float(row["confidence"]),
+        (row for row in confidence_rows if row.get("correct") is False),
+        key=lambda row: float(row["candidate_confidence"]),
         reverse=True,
     )[:limit]
     closest_to_threshold = sorted(
-        rows,
-        key=lambda row: abs(
-            float(row["backend_decision"]["threshold_margin"])
+        (
+            row
+            for row in confidence_rows
+            if row["backend_decision"].get("threshold_margin") is not None
         ),
+        key=lambda row: abs(float(row["backend_decision"]["threshold_margin"])),
     )[:limit]
     return {
-        "lowest_margin": [compact(row) for row in low_margin],
-        "highest_confidence_errors": [
-            compact(row) for row in high_confidence_errors
-        ],
-        "closest_to_available_threshold": [
-            compact(row) for row in closest_to_threshold
-        ],
+        "lowest_confidence_routes": [compact(row) for row in low_confidence_routes],
+        "highest_confidence_errors": [compact(row) for row in high_confidence_errors],
+        "closest_to_route_threshold": [compact(row) for row in closest_to_threshold],
     }
