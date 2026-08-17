@@ -146,6 +146,46 @@ class Top1CoreTests(unittest.TestCase):
             len(prepared.encoded["input_ids"]),
         )
 
+    def test_prompt_is_label_independent_at_length_boundary(self) -> None:
+        tokenizer = CharacterTokenizer()
+        candidate_tokens = candidate_token_sequences(
+            tokenizer,
+            ("A", "MuchLongerCandidateName"),
+        )
+        messages = [
+            {"role": "user", "content": "很早的历史" * 40},
+            {"role": "assistant", "content": "历史回复" * 40},
+            {"role": "user", "content": "当前请求" * 100},
+        ]
+        prepared = []
+        for target in candidate_tokens:
+            prepared.append(
+                prepare_example(
+                    tokenizer,
+                    {
+                        "messages": messages,
+                        "target_candidate_name": target,
+                    },
+                    candidate_tokens=candidate_tokens,
+                    max_length=420,
+                    system_prompt="route",
+                )
+            )
+
+        first_target_length = len(candidate_tokens["A"]) + 1
+        second_target_length = len(candidate_tokens["MuchLongerCandidateName"]) + 1
+        first_prompt = prepared[0].encoded["input_ids"][:-first_target_length]
+        second_prompt = prepared[1].encoded["input_ids"][:-second_target_length]
+        self.assertEqual(first_prompt, second_prompt)
+        self.assertEqual(
+            prepared[0].sft_row["messages"][:-1],
+            prepared[1].sft_row["messages"][:-1],
+        )
+        self.assertEqual(
+            prepared[0].diagnostics["reserved_target_tokens"],
+            second_target_length,
+        )
+
     def test_validation_requires_canonical_fields_and_allows_partial_coverage(
         self,
     ) -> None:

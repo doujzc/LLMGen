@@ -9,30 +9,38 @@ import inspect
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from llmgen.evaluation import SCORE_MODES, aggregate_predictions, prediction_from_scores
+from llmgen.evaluation import aggregate_predictions, prediction_from_scores
 from llmgen.experiment import (
     EVALUATION_RUN_SCHEMA_VERSION,
     RunStore,
     append_jsonl,
     canonical_sha256,
     compact_utc_now,
+    directory_file_manifest,
     git_snapshot,
     load_and_verify_model_artifact,
+    read_json_object,
     system_snapshot,
     utc_now,
 )
 from llmgen.top1 import (
     CONVERSATION_TEMPLATE,
+    INFERENCE_DECISION_RULE,
+    MAX_ASSISTANT_HISTORY_CHARACTERS,
+    MAX_HISTORY_CHARACTERS,
+    MAX_HISTORY_MESSAGES,
     ROUTING_MODE,
+    TARGET_CONTRACT,
     Top1DataError,
     candidate_token_sequences,
-    encode_text,
-    fit_prompt,
     load_candidate_names,
     messages_from_row,
+    prepare_router_prompt,
+    prompt_implementation_sha256,
     read_jsonl,
     sha256_file,
     target_candidate_name,
+    tokenizer_prompt_contract,
     write_json,
 )
 
@@ -48,15 +56,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--suite-id")
     parser.add_argument("--candidate-registry")
     parser.add_argument("--system-prompt-file")
-    parser.add_argument("--max-length", type=int, default=1024)
-    parser.add_argument("--score-mode", choices=SCORE_MODES, default="sum_logprob")
+    parser.add_argument("--max-length", type=int)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--precision", choices=("auto", "bf16", "fp16", "fp32"), default="auto")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--history-ablation", action="store_true")
-    parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--skip-model-verification", action="store_true")
+    parser.add_argument(
+        "--trust-remote-code",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     return parser.parse_args(argv)
 
 
@@ -80,6 +90,109 @@ def _resolve_bundle_file(
     return path.resolve()
 
 
+def _load_router_contract(model_dir: Path) -> dict[str, Any]:
+    manifest_path = model_dir / "router_manifest.json"
+    if not manifest_path.is_file():
+        raise Top1DataError(f"router manifest does not exist: {manifest_path}")
+    manifest = read_json_object(manifest_path)
+    if manifest.get("schema_version") != 2:
+        raise Top1DataError("router manifest schema_version must be 2")
+    if manifest.get("routing_mode") != ROUTING_MODE:
+        raise Top1DataError("router manifest has an incompatible routing mode")
+    if manifest.get("target") != TARGET_CONTRACT:
+        raise Top1DataError("router manifest has an incompatible target contract")
+    conversation = manifest.get("conversation")
+    expected_conversation = {
+        "template": CONVERSATION_TEMPLATE,
+        "max_history_messages": MAX_HISTORY_MESSAGES,
+        "max_history_characters": MAX_HISTORY_CHARACTERS,
+        "max_assistant_history_characters": MAX_ASSISTANT_HISTORY_CHARACTERS,
+        "implementation_sha256": prompt_implementation_sha256(),
+    }
+    if conversation != expected_conversation:
+        raise Top1DataError("router manifest has an incompatible prompt contract")
+    inference = manifest.get("inference")
+    if inference != {
+        "decision_rule": INFERENCE_DECISION_RULE,
+        "include_eos": True,
+    }:
+        raise Top1DataError("router manifest has an incompatible inference contract")
+    max_length = manifest.get("max_length")
+    if isinstance(max_length, bool) or not isinstance(max_length, int) or max_length <= 0:
+        raise Top1DataError("router manifest max_length must be a positive integer")
+    return manifest
+
+
+def _apply_router_contract(
+    args: argparse.Namespace,
+    manifest: Mapping[str, Any],
+    *,
+    registry_path: Path,
+    prompt_path: Path,
+    candidate_names: Sequence[str],
+) -> None:
+    registry = manifest.get("candidate_registry")
+    prompt = manifest.get("system_prompt")
+    training = manifest.get("training")
+    if not isinstance(registry, Mapping) or not isinstance(prompt, Mapping):
+        raise Top1DataError("router manifest is missing prompt bundle metadata")
+    if not isinstance(training, Mapping):
+        raise Top1DataError("router manifest is missing training metadata")
+    if registry.get("sha256") != sha256_file(registry_path):
+        raise Top1DataError("candidate registry differs from the training bundle")
+    if registry.get("candidate_names") != list(candidate_names):
+        raise Top1DataError("candidate order differs from the training bundle")
+    if prompt.get("sha256") != sha256_file(prompt_path):
+        raise Top1DataError("system prompt differs from the training bundle")
+
+    trained_max_length = int(manifest["max_length"])
+    if args.max_length is not None and args.max_length != trained_max_length:
+        raise Top1DataError(
+            "evaluation max_length must equal the training prompt contract: "
+            f"{trained_max_length}"
+        )
+    args.max_length = trained_max_length
+
+    trained_trust_remote_code = training.get("trust_remote_code")
+    if not isinstance(trained_trust_remote_code, bool):
+        raise Top1DataError("router manifest trust_remote_code must be boolean")
+    if (
+        args.trust_remote_code is not None
+        and args.trust_remote_code != trained_trust_remote_code
+    ):
+        raise Top1DataError(
+            "evaluation trust_remote_code must equal the training prompt contract"
+        )
+    args.trust_remote_code = trained_trust_remote_code
+
+
+def _validate_loaded_tokenizer(
+    manifest: Mapping[str, Any],
+    *,
+    tokenizer: Any,
+    candidate_names: Sequence[str],
+    candidate_tokens: Mapping[str, Sequence[int]],
+    transformers_version: str,
+) -> None:
+    expected_tokenizer = manifest.get("tokenizer")
+    actual_tokenizer = tokenizer_prompt_contract(
+        tokenizer,
+        transformers_version=transformers_version,
+    )
+    if expected_tokenizer != actual_tokenizer:
+        raise Top1DataError(
+            "loaded tokenizer or Transformers version differs from training"
+        )
+    registry = manifest.get("candidate_registry")
+    if not isinstance(registry, Mapping):
+        raise Top1DataError("router manifest is missing candidate token sequences")
+    actual_sequences = {
+        name: list(candidate_tokens[name]) for name in candidate_names
+    }
+    if registry.get("token_sequences") != actual_sequences:
+        raise Top1DataError("candidate token sequences differ from training")
+
+
 def _import_dependencies() -> tuple[Any, Any]:
     try:
         import torch
@@ -97,6 +210,7 @@ def _load_model(
     transformers: Any,
     dtype: Any,
     trust_remote_code: bool,
+    router_contract: Mapping[str, Any],
 ) -> Any:
     model_kwargs = {
         "trust_remote_code": trust_remote_code,
@@ -104,12 +218,21 @@ def _load_model(
     }
     if (model_dir / "adapter_config.json").is_file():
         try:
-            from peft import AutoPeftModelForCausalLM
+            from peft import PeftModel
         except ImportError as exc:  # pragma: no cover - LoRA evaluation environment
             raise SystemExit("LoRA evaluation requires peft") from exc
-        return AutoPeftModelForCausalLM.from_pretrained(
+        dependency = router_contract["base_model_dependency"]
+        base_kwargs = dict(model_kwargs)
+        if dependency["kind"] == "hub_revision":
+            base_kwargs["revision"] = dependency["revision"]
+        base_model = transformers.AutoModelForCausalLM.from_pretrained(
+            dependency["reference"],
+            **base_kwargs,
+        )
+        return PeftModel.from_pretrained(
+            base_model,
             str(model_dir),
-            **model_kwargs,
+            is_trainable=False,
         )
     parameters = inspect.signature(
         transformers.AutoModelForCausalLM.from_pretrained
@@ -123,6 +246,39 @@ def _load_model(
         str(model_dir),
         **model_kwargs,
     )
+
+
+def _verify_base_model_dependency(
+    manifest: Mapping[str, Any],
+    *,
+    model_dir: Path,
+) -> None:
+    finetune_mode = manifest.get("finetune_mode")
+    dependency = manifest.get("base_model_dependency")
+    has_adapter = (model_dir / "adapter_config.json").is_file()
+    if finetune_mode == "full":
+        if dependency != {"kind": "self_contained"} or has_adapter:
+            raise Top1DataError("full-model bundle has an invalid base dependency")
+        return
+    if finetune_mode != "lora" or not has_adapter or not isinstance(dependency, Mapping):
+        raise Top1DataError("LoRA bundle has an invalid base dependency")
+    kind = dependency.get("kind")
+    reference = dependency.get("reference")
+    if not isinstance(reference, str) or not reference:
+        raise Top1DataError("LoRA base model reference is invalid")
+    if kind == "hub_revision":
+        revision = dependency.get("revision")
+        if not isinstance(revision, str) or not revision:
+            raise Top1DataError("LoRA base model revision is missing")
+        return
+    if kind == "local_directory":
+        base_path = Path(reference).expanduser()
+        files = directory_file_manifest(base_path)
+        identity = {"schema_version": 1, "files": files}
+        if dependency.get("content_id") != canonical_sha256(identity):
+            raise Top1DataError("local LoRA base model changed after training")
+        return
+    raise Top1DataError("LoRA base model dependency kind is unsupported")
 
 
 def _device_and_dtype(args: argparse.Namespace, torch: Any) -> tuple[Any, Any, str]:
@@ -159,9 +315,6 @@ def _prepare_prompts(
     history_ablation: bool,
 ) -> list[dict[str, Any]]:
     legal_names = set(candidate_names)
-    max_target_tokens = max(len(tokens) + 1 for tokens in candidate_tokens.values())
-    if max_length <= max_target_tokens:
-        raise Top1DataError("max_length leaves no room for an evaluation prompt")
     prepared = []
     for row_index, row in enumerate(rows):
         try:
@@ -171,13 +324,15 @@ def _prepare_prompts(
                 target = target_candidate_name(row)
                 if target not in legal_names:
                     raise Top1DataError(f"unknown target candidate name: {target!r}")
-            prompt, fitted = fit_prompt(
+            prepared_prompt = prepare_router_prompt(
                 tokenizer,
                 messages,
-                system_prompt,
-                max_prompt_tokens=max_length - max_target_tokens,
+                candidate_tokens=candidate_tokens,
+                max_length=max_length,
+                system_prompt=system_prompt,
             )
-            prompt_ids = encode_text(tokenizer, prompt)
+            fitted = prepared_prompt.fitted_messages
+            prompt_ids = list(prepared_prompt.input_ids)
             source_non_system = [
                 message
                 for message in row["messages"]
@@ -194,16 +349,18 @@ def _prepare_prompts(
                 ),
                 "current_user_truncated": fitted[-1]["content"] != current_source,
                 "prompt_tokens": len(prompt_ids),
+                "reserved_target_tokens": prepared_prompt.reserved_target_tokens,
             }
             ablated_ids = None
             if history_ablation and len(messages) > 1:
-                ablated_prompt, _ = fit_prompt(
+                ablated_prompt = prepare_router_prompt(
                     tokenizer,
                     (messages[-1],),
-                    system_prompt,
-                    max_prompt_tokens=max_length - max_target_tokens,
+                    candidate_tokens=candidate_tokens,
+                    max_length=max_length,
+                    system_prompt=system_prompt,
                 )
-                ablated_ids = encode_text(tokenizer, ablated_prompt)
+                ablated_ids = list(ablated_prompt.input_ids)
         except Top1DataError as exc:
             raise Top1DataError(f"evaluation row {row_index + 1}: {exc}") from exc
         prepared.append(
@@ -308,7 +465,7 @@ def _score_prepared(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    if args.max_length <= 0 or args.batch_size <= 0:
+    if (args.max_length is not None and args.max_length <= 0) or args.batch_size <= 0:
         raise Top1DataError("max_length and batch_size must be positive")
     if args.max_rows is not None and args.max_rows <= 0:
         raise Top1DataError("max_rows must be positive when specified")
@@ -316,6 +473,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     data_path = Path(args.data).expanduser().resolve()
     if not data_path.is_file():
         raise Top1DataError(f"evaluation data does not exist: {data_path}")
+    router_contract = _load_router_contract(model_dir)
     registry_path = _resolve_bundle_file(
         args.candidate_registry,
         model_dir,
@@ -332,9 +490,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     if not system_prompt:
         raise Top1DataError("system prompt file is empty")
     candidate_names = load_candidate_names(registry_path)
+    _apply_router_contract(
+        args,
+        router_contract,
+        registry_path=registry_path,
+        prompt_path=prompt_path,
+        candidate_names=candidate_names,
+    )
+    _verify_base_model_dependency(router_contract, model_dir=model_dir)
     model_artifact = load_and_verify_model_artifact(
         model_dir,
-        verify_files=not args.skip_model_verification,
+        verify_files=True,
     )
     semantic_config = {
         "model_id": model_artifact["model_id"],
@@ -345,7 +511,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "conversation_template": CONVERSATION_TEMPLATE,
         "max_length": args.max_length,
         "max_rows": args.max_rows,
-        "score_mode": args.score_mode,
+        "score_mode": "sum_logprob",
         "history_ablation": args.history_ablation,
     }
     evaluation_signature = canonical_sha256(semantic_config)
@@ -380,7 +546,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "model": {
             "model_id": model_artifact["model_id"],
             "path": str(model_dir),
-            "verified": not args.skip_model_verification,
+            "verified": True,
             "training_run_id": model_artifact.get("training_run_id"),
         },
         "dataset": {
@@ -417,11 +583,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise Top1DataError("model tokenizer must define an EOS token")
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
+        candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
+        _validate_loaded_tokenizer(
+            router_contract,
+            tokenizer=tokenizer,
+            candidate_names=candidate_names,
+            candidate_tokens=candidate_tokens,
+            transformers_version=str(transformers.__version__),
+        )
         model = _load_model(
             model_dir=model_dir,
             transformers=transformers,
             dtype=dtype,
             trust_remote_code=args.trust_remote_code,
+            router_contract=router_contract,
         ).to(device)
         model.eval()
         rows = read_jsonl(data_path)
@@ -429,7 +604,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             rows = rows[: args.max_rows]
         if not rows:
             raise Top1DataError("evaluation dataset is empty")
-        candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
         prepared = _prepare_prompts(
             rows,
             tokenizer=tokenizer,
@@ -476,7 +650,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                     row_index=row_index,
                     candidate_names=candidate_names,
                     scores=scores[row_index],
-                    score_mode=args.score_mode,
                     target_candidate_name=row["target_candidate_name"],
                     diagnostics=row["diagnostics"],
                     history_ablation_scores=ablation_scores.get(row_index),
@@ -520,7 +693,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "evaluation_signature": evaluation_signature,
             "run_dir": str(run_dir),
             "dataset_sha256": semantic_config["dataset_sha256"],
-            "score_mode": args.score_mode,
+            "score_mode": "sum_logprob",
             "rows": metrics["rows"],
             "top1_accuracy": metrics["top1_accuracy"],
         }
@@ -546,7 +719,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "evaluation_signature": evaluation_signature,
                 "run_dir": str(run_dir),
                 "dataset_sha256": semantic_config["dataset_sha256"],
-                "score_mode": args.score_mode,
+                "score_mode": "sum_logprob",
                 "error_type": type(exc).__name__,
             }
             append_jsonl(evaluation_root / "evaluation_index.jsonl", failure_record)

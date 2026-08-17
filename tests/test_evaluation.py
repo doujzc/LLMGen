@@ -26,7 +26,6 @@ class EvaluationTests(unittest.TestCase):
             row_index=0,
             candidate_names=("A", "B"),
             scores=_scores(-2.0, -3.0),
-            score_mode="sum_logprob",
             target_candidate_name="B",
             diagnostics={"original_message_count": 1},
         )
@@ -41,7 +40,6 @@ class EvaluationTests(unittest.TestCase):
             row_index=0,
             candidate_names=("A", "B"),
             scores=_scores(-1.0, -4.0),
-            score_mode="sum_logprob",
             target_candidate_name="A",
             diagnostics={"original_message_count": 1},
         )
@@ -49,7 +47,6 @@ class EvaluationTests(unittest.TestCase):
             row_index=1,
             candidate_names=("A", "B"),
             scores=_scores(-2.0, -1.0),
-            score_mode="sum_logprob",
             target_candidate_name="B",
             diagnostics={"original_message_count": 3},
             history_ablation_scores=_scores(-1.0, -2.0),

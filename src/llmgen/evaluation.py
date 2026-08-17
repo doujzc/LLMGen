@@ -11,23 +11,17 @@ from .diagnostics import numeric_summary
 from .top1 import Top1DataError
 
 
-SCORE_MODES = ("sum_logprob", "mean_logprob")
-
-
 def prediction_from_scores(
     *,
     row_index: int,
     candidate_names: Sequence[str],
     scores: Mapping[str, Mapping[str, float | int]],
-    score_mode: str,
     target_candidate_name: str | None,
     diagnostics: Mapping[str, Any],
     history_ablation_scores: Mapping[str, Mapping[str, float | int]] | None = None,
 ) -> dict[str, Any]:
     """Create one privacy-safe prediction record from candidate path scores."""
 
-    if score_mode not in SCORE_MODES:
-        raise Top1DataError(f"unsupported score mode: {score_mode}")
     if set(scores) != set(candidate_names):
         raise Top1DataError("candidate scores do not match the candidate registry")
 
@@ -36,8 +30,8 @@ def prediction_from_scores(
         candidate_names,
         key=lambda name: float(scores[name]["mean_logprob"]),
     )
-    prediction = sum_prediction if score_mode == "sum_logprob" else mean_prediction
-    selected = [float(scores[name][score_mode]) for name in candidate_names]
+    prediction = sum_prediction
+    selected = [float(scores[name]["sum_logprob"]) for name in candidate_names]
     probabilities = _softmax(selected)
     entropy = -sum(
         probability * math.log(max(probability, 1e-45))
@@ -55,7 +49,7 @@ def prediction_from_scores(
         "correct": prediction == target_candidate_name if target_candidate_name else None,
         "sum_logprob_prediction": sum_prediction,
         "mean_logprob_prediction": mean_prediction,
-        "score_mode": score_mode,
+        "score_mode": "sum_logprob",
         "confidence": max(probabilities),
         "normalized_entropy": normalized_entropy,
         "margin": margin,
@@ -72,7 +66,7 @@ def prediction_from_scores(
     if history_ablation_scores is not None:
         ablated_prediction = max(
             candidate_names,
-            key=lambda name: float(history_ablation_scores[name][score_mode]),
+            key=lambda name: float(history_ablation_scores[name]["sum_logprob"]),
         )
         record["history_ablation"] = {
             "predicted_candidate_name": ablated_prediction,

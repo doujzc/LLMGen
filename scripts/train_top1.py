@@ -16,10 +16,11 @@ from llmgen.diagnostics import build_curve_summary, build_data_profile
 from llmgen.experiment import (
     TRAINING_RUN_SCHEMA_VERSION,
     RunStore,
-    TrainingLogCallback,
     canonical_sha256,
+    directory_file_manifest,
     git_snapshot,
     json_safe,
+    make_training_log_callback,
     system_snapshot,
     utc_now,
     write_model_artifact_manifest,
@@ -30,14 +31,18 @@ from llmgen.top1 import (
     MAX_ASSISTANT_HISTORY_CHARACTERS,
     MAX_HISTORY_CHARACTERS,
     MAX_HISTORY_MESSAGES,
+    INFERENCE_DECISION_RULE,
     ROUTING_MODE,
+    TARGET_CONTRACT,
     Top1DataError,
     candidate_registry_payload,
     candidate_token_sequences,
     load_candidate_names,
     prepare_example,
+    prompt_implementation_sha256,
     read_jsonl,
     sha256_file,
+    tokenizer_prompt_contract,
     validate_training_rows,
     write_json,
     write_jsonl,
@@ -290,6 +295,7 @@ def _load_model_and_tokenizer(
         args.model_name_or_path,
         **model_kwargs,
     )
+    args.base_model_revision = getattr(model.config, "_commit_hash", None)
     if args.gradient_checkpointing:
         model.config.use_cache = False
 
@@ -385,6 +391,7 @@ def _write_bundle(
     tokenizer: Any,
     model: Any,
     candidate_names: tuple[str, ...],
+    candidate_tokens: Mapping[str, Sequence[int]],
     system_prompt: str,
     train_report: Mapping[str, Any],
     validation_report: Mapping[str, Any] | None,
@@ -392,17 +399,25 @@ def _write_bundle(
     deepspeed_metadata: Mapping[str, Any] | None,
     training_run_id: str,
     prepared_train_path: Path,
+    transformers_version: str,
 ) -> None:
     tokenizer.save_pretrained(str(output_dir))
     bundled_registry = output_dir / "candidate_registry.json"
     write_json(bundled_registry, candidate_registry_payload(candidate_names))
     bundled_prompt = output_dir / "router_system_prompt.md"
     bundled_prompt.write_text(system_prompt.rstrip() + "\n", encoding="utf-8")
+    base_model_dependency = _base_model_dependency(args, model)
+    base_model_revision = getattr(
+        args,
+        "base_model_revision",
+        getattr(model.config, "_commit_hash", None),
+    )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "routing_mode": ROUTING_MODE,
         "base_model": args.model_name_or_path,
-        "base_model_revision": getattr(model.config, "_commit_hash", None),
+        "base_model_revision": base_model_revision,
+        "base_model_dependency": base_model_dependency,
         "finetune_mode": args.finetune_mode,
         "train_data": {
             "path": str(Path(args.train_data).expanduser().resolve()),
@@ -422,6 +437,9 @@ def _write_bundle(
             "path": bundled_registry.name,
             "sha256": sha256_file(bundled_registry),
             "candidate_names": list(candidate_names),
+            "token_sequences": {
+                name: list(candidate_tokens[name]) for name in candidate_names
+            },
         },
         "system_prompt": {
             "path": bundled_prompt.name,
@@ -432,14 +450,24 @@ def _write_bundle(
             "max_history_messages": MAX_HISTORY_MESSAGES,
             "max_history_characters": MAX_HISTORY_CHARACTERS,
             "max_assistant_history_characters": MAX_ASSISTANT_HISTORY_CHARACTERS,
+            "implementation_sha256": prompt_implementation_sha256(),
         },
-        "target": "candidate_name_tokens_plus_eos",
+        "tokenizer": tokenizer_prompt_contract(
+            tokenizer,
+            transformers_version=transformers_version,
+        ),
+        "target": TARGET_CONTRACT,
+        "inference": {
+            "decision_rule": INFERENCE_DECISION_RULE,
+            "include_eos": True,
+        },
         "max_length": args.max_length,
         "training": {
             "training_run_id": training_run_id,
             "epochs": args.epochs,
             "learning_rate": args.learning_rate,
             "precision": args.precision,
+            "trust_remote_code": args.trust_remote_code,
             "seed": args.seed,
             "world_size": world_size,
             "per_device_train_batch_size": args.per_device_train_batch_size,
@@ -458,6 +486,37 @@ def _write_bundle(
         },
     }
     write_json(output_dir / "router_manifest.json", manifest)
+
+
+def _base_model_dependency(
+    args: argparse.Namespace,
+    model: Any,
+) -> dict[str, Any]:
+    revision = getattr(
+        args,
+        "base_model_revision",
+        getattr(model.config, "_commit_hash", None),
+    )
+    if args.finetune_mode == "full":
+        return {"kind": "self_contained"}
+    base_path = Path(args.model_name_or_path).expanduser()
+    if base_path.is_dir():
+        files = directory_file_manifest(base_path)
+        identity = {"schema_version": 1, "files": files}
+        return {
+            "kind": "local_directory",
+            "reference": str(base_path.resolve()),
+            "content_id": canonical_sha256(identity),
+        }
+    if not isinstance(revision, str) or not revision:
+        raise Top1DataError(
+            "LoRA training requires a resolved base model revision or a local directory"
+        )
+    return {
+        "kind": "hub_revision",
+        "reference": args.model_name_or_path,
+        "revision": revision,
+    }
 
 
 def _safe_component(value: str, *, label: str) -> str:
@@ -760,7 +819,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
 
         Dataset = _dataset_class(torch)
-        callback = TrainingLogCallback(store, torch)
+        callback = make_training_log_callback(
+            store,
+            transformers.TrainerCallback,
+            torch,
+        )
         trainer = _trainer(
             transformers=transformers,
             model=model,
@@ -796,6 +859,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             trainer.evaluate(metric_key_prefix="final") if validation_examples else {}
         )
         trainer.save_state()
+        if hasattr(model.config, "use_cache"):
+            model.config.use_cache = True
         final_model_dir = output_dir / "final" / "model"
         trainer.save_model(str(final_model_dir))
         if callable(wait_for_everyone):
@@ -808,6 +873,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 tokenizer=tokenizer,
                 model=model,
                 candidate_names=candidate_names,
+                candidate_tokens=candidate_tokens,
                 system_prompt=system_prompt,
                 train_report=train_report,
                 validation_report=validation_report,
@@ -815,6 +881,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 deepspeed_metadata=deepspeed_metadata,
                 training_run_id=run_id,
                 prepared_train_path=prepared_train_path,
+                transformers_version=str(transformers.__version__),
             )
             artifact = write_model_artifact_manifest(
                 final_model_dir,

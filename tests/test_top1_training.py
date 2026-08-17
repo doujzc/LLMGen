@@ -8,7 +8,8 @@ from types import SimpleNamespace
 import unittest
 
 from llmgen.top1 import Top1DataError, read_jsonl, write_jsonl
-from scripts import train_top1
+from scripts import evaluate_top1, train_top1
+from test_top1_core import CharacterTokenizer
 
 
 def _training_args(root: Path) -> Namespace:
@@ -159,13 +160,15 @@ class Top1TrainingTests(unittest.TestCase):
                         encoding="utf-8",
                     )
 
+            tokenizer = Tokenizer()
             model = SimpleNamespace(config=SimpleNamespace(_commit_hash="revision"))
             train_top1._write_bundle(
                 args=args,
                 output_dir=model_output,
-                tokenizer=Tokenizer(),
+                tokenizer=tokenizer,
                 model=model,
                 candidate_names=("StockQuery", "Ecommerce"),
+                candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
                 system_prompt="route",
                 train_report={
                     "rows": 1,
@@ -177,9 +180,11 @@ class Top1TrainingTests(unittest.TestCase):
                 deepspeed_metadata=None,
                 training_run_id="run-001",
                 prepared_train_path=prepared,
+                transformers_version="5.5.4",
             )
 
             manifest = json.loads((model_output / "router_manifest.json").read_text())
+            self.assertEqual(manifest["schema_version"], 2)
             self.assertEqual(manifest["routing_mode"], "candidate_name_top1")
             self.assertEqual(manifest["target"], "candidate_name_tokens_plus_eos")
             self.assertEqual(
@@ -199,6 +204,131 @@ class Top1TrainingTests(unittest.TestCase):
                 read_jsonl(prepared),
                 [{"messages": []}],
             )
+            contract = evaluate_top1._load_router_contract(model_output)
+            evaluate_top1._verify_base_model_dependency(
+                contract,
+                model_dir=model_output,
+            )
+            contract_args = Namespace(
+                max_length=None,
+                trust_remote_code=None,
+            )
+            evaluate_top1._apply_router_contract(
+                contract_args,
+                contract,
+                registry_path=model_output / "candidate_registry.json",
+                prompt_path=model_output / "router_system_prompt.md",
+                candidate_names=("StockQuery", "Ecommerce"),
+            )
+            self.assertEqual(contract_args.max_length, 1024)
+            self.assertFalse(contract_args.trust_remote_code)
+            evaluate_top1._validate_loaded_tokenizer(
+                contract,
+                tokenizer=tokenizer,
+                candidate_names=("StockQuery", "Ecommerce"),
+                candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                transformers_version="5.5.4",
+            )
+            tokenizer.chat_template = "changed"
+            with self.assertRaisesRegex(Top1DataError, "differs from training"):
+                evaluate_top1._validate_loaded_tokenizer(
+                    contract,
+                    tokenizer=tokenizer,
+                    candidate_names=("StockQuery", "Ecommerce"),
+                    candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                    transformers_version="5.5.4",
+                )
+            del tokenizer.chat_template
+
+            contract_args.max_length = 512
+            with self.assertRaisesRegex(Top1DataError, "must equal"):
+                evaluate_top1._apply_router_contract(
+                    contract_args,
+                    contract,
+                    registry_path=model_output / "candidate_registry.json",
+                    prompt_path=model_output / "router_system_prompt.md",
+                    candidate_names=("StockQuery", "Ecommerce"),
+                )
+
+            (model_output / "router_system_prompt.md").write_text(
+                "different prompt\n",
+                encoding="utf-8",
+            )
+            contract_args.max_length = None
+            with self.assertRaisesRegex(Top1DataError, "system prompt differs"):
+                evaluate_top1._apply_router_contract(
+                    contract_args,
+                    contract,
+                    registry_path=model_output / "candidate_registry.json",
+                    prompt_path=model_output / "router_system_prompt.md",
+                    candidate_names=("StockQuery", "Ecommerce"),
+                )
+
+    def test_lora_local_base_model_is_content_addressed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            base_model = root / "base"
+            base_model.mkdir()
+            weights = base_model / "model.safetensors"
+            weights.write_bytes(b"base weights")
+            args = SimpleNamespace(
+                finetune_mode="lora",
+                model_name_or_path=str(base_model),
+            )
+            model = SimpleNamespace(config=SimpleNamespace(_commit_hash=None))
+            dependency = train_top1._base_model_dependency(args, model)
+            adapter = root / "adapter"
+            adapter.mkdir()
+            (adapter / "adapter_config.json").write_text("{}", encoding="utf-8")
+            manifest = {
+                "finetune_mode": "lora",
+                "base_model_dependency": dependency,
+            }
+
+            evaluate_top1._verify_base_model_dependency(
+                manifest,
+                model_dir=adapter,
+            )
+            weights.write_bytes(b"changed")
+            with self.assertRaisesRegex(Top1DataError, "changed"):
+                evaluate_top1._verify_base_model_dependency(
+                    manifest,
+                    model_dir=adapter,
+                )
+
+    def test_training_and_evaluation_prepare_identical_prompt_tokens(self) -> None:
+        tokenizer = CharacterTokenizer()
+        candidate_tokens = train_top1.candidate_token_sequences(
+            tokenizer,
+            ("A", "MuchLongerCandidateName"),
+        )
+        row = {
+            "messages": [
+                {"role": "user", "content": "历史" * 100},
+                {"role": "assistant", "content": "回复" * 100},
+                {"role": "user", "content": "当前" * 100},
+            ],
+            "target_candidate_name": "A",
+        }
+        trained = train_top1.prepare_example(
+            tokenizer,
+            row,
+            candidate_tokens=candidate_tokens,
+            max_length=420,
+            system_prompt="route",
+        )
+        evaluated = evaluate_top1._prepare_prompts(
+            [row],
+            tokenizer=tokenizer,
+            candidate_names=("A", "MuchLongerCandidateName"),
+            candidate_tokens=candidate_tokens,
+            system_prompt="route",
+            max_length=420,
+            history_ablation=False,
+        )[0]
+
+        training_prompt = trained.encoded["input_ids"][: -len(candidate_tokens["A"]) - 1]
+        self.assertEqual(training_prompt, evaluated["prompt_ids"])
 
 
 if __name__ == "__main__":

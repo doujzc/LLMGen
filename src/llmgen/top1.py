@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -12,6 +13,8 @@ from typing import Any, Iterable, Mapping, Sequence
 
 ROUTING_MODE = "candidate_name_top1"
 CONVERSATION_TEMPLATE = "standalone_request_v2"
+TARGET_CONTRACT = "candidate_name_tokens_plus_eos"
+INFERENCE_DECISION_RULE = "candidate_path_sum_logprob"
 MAX_HISTORY_MESSAGES = 16
 MAX_HISTORY_CHARACTERS = 12_000
 MAX_ASSISTANT_HISTORY_CHARACTERS = 1_200
@@ -36,6 +39,16 @@ class PreparedExample:
     encoded: dict[str, list[int]]
     sft_row: dict[str, list[dict[str, str]]]
     diagnostics: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PreparedPrompt:
+    """The canonical label-independent prompt used by training and inference."""
+
+    text: str
+    input_ids: tuple[int, ...]
+    fitted_messages: tuple[dict[str, str], ...]
+    reserved_target_tokens: int
 
 
 def sha256_file(path: str | Path) -> str:
@@ -362,6 +375,104 @@ def candidate_token_sequences(
     return result
 
 
+def prepare_router_prompt(
+    tokenizer: Any,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    candidate_tokens: Mapping[str, Sequence[int]],
+    max_length: int,
+    system_prompt: str,
+) -> PreparedPrompt:
+    """Build the sole prompt contract shared by training and inference.
+
+    The prompt always reserves space for the longest legal candidate path plus EOS.
+    Its fitted content therefore cannot depend on the target label.
+    """
+
+    if not candidate_tokens:
+        raise Top1DataError("candidate token set cannot be empty")
+    reserved_target_tokens = max(len(tokens) + 1 for tokens in candidate_tokens.values())
+    if max_length <= reserved_target_tokens:
+        raise Top1DataError("max_length leaves no room for a router prompt")
+    prompt, fitted_messages = fit_prompt(
+        tokenizer,
+        messages,
+        system_prompt,
+        max_prompt_tokens=max_length - reserved_target_tokens,
+    )
+    prompt_ids = tuple(encode_text(tokenizer, prompt))
+    if len(prompt_ids) + reserved_target_tokens > max_length:
+        raise Top1DataError("fitted router prompt exceeds max_length")
+    return PreparedPrompt(
+        text=prompt,
+        input_ids=prompt_ids,
+        fitted_messages=fitted_messages,
+        reserved_target_tokens=reserved_target_tokens,
+    )
+
+
+def prompt_implementation_sha256() -> str:
+    """Fingerprint every function and constant that can change prompt tokens."""
+
+    functions = (
+        _nonempty_string,
+        _truncate_middle,
+        normalize_messages,
+        messages_from_row,
+        build_user_prompt,
+        render_prompt,
+        encode_text,
+        fit_prompt,
+        prepare_router_prompt,
+    )
+    payload = {
+        "constants": {
+            "conversation_template": CONVERSATION_TEMPLATE,
+            "max_history_messages": MAX_HISTORY_MESSAGES,
+            "max_history_characters": MAX_HISTORY_CHARACTERS,
+            "max_assistant_history_characters": MAX_ASSISTANT_HISTORY_CHARACTERS,
+            "latest_truncation_marker": LATEST_TRUNCATION_MARKER,
+            "history_truncation_marker": HISTORY_TRUNCATION_MARKER,
+            "standalone_request_instruction": STANDALONE_REQUEST_INSTRUCTION,
+            "allowed_message_roles": sorted(ALLOWED_MESSAGE_ROLES),
+        },
+        "functions": {
+            function.__name__: inspect.getsource(function) for function in functions
+        },
+    }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def tokenizer_prompt_contract(
+    tokenizer: Any,
+    *,
+    transformers_version: str,
+) -> dict[str, Any]:
+    """Describe tokenizer state that can alter prompt or candidate tokens."""
+
+    chat_template = getattr(tokenizer, "chat_template", None)
+    serialized_template = json.dumps(
+        chat_template,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "transformers_version": transformers_version,
+        "tokenizer_class": type(tokenizer).__name__,
+        "chat_template_sha256": hashlib.sha256(serialized_template).hexdigest(),
+        "eos_token_id": getattr(tokenizer, "eos_token_id", None),
+        "pad_token_id": getattr(tokenizer, "pad_token_id", None),
+        "padding_side": getattr(tokenizer, "padding_side", None),
+    }
+
+
 def validate_training_rows(
     rows: Sequence[Mapping[str, Any]],
     candidate_names: Iterable[str],
@@ -409,16 +520,16 @@ def prepare_example(
     if name not in candidate_tokens:
         raise Top1DataError(f"unknown target candidate name: {name!r}")
     target_ids = [*map(int, candidate_tokens[name]), int(tokenizer.eos_token_id)]
-    if max_length <= len(target_ids):
-        raise Top1DataError("max_length leaves no room for a router prompt")
     normalized_messages = messages_from_row(row)
-    prompt, fitted_messages = fit_prompt(
+    prepared_prompt = prepare_router_prompt(
         tokenizer,
         normalized_messages,
-        system_prompt,
-        max_prompt_tokens=max_length - len(target_ids),
+        candidate_tokens=candidate_tokens,
+        max_length=max_length,
+        system_prompt=system_prompt,
     )
-    prompt_ids = encode_text(tokenizer, prompt)
+    fitted_messages = prepared_prompt.fitted_messages
+    prompt_ids = list(prepared_prompt.input_ids)
     input_ids = [*prompt_ids, *target_ids]
     source_messages = row["messages"]
     source_non_system = [
@@ -452,6 +563,7 @@ def prepare_example(
             "current_user_truncated": fitted_messages[-1]["content"] != source_current,
             "prompt_tokens": len(prompt_ids),
             "target_tokens": len(target_ids),
+            "reserved_target_tokens": prepared_prompt.reserved_target_tokens,
             "input_tokens": len(input_ids),
         },
     )

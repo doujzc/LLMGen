@@ -94,8 +94,14 @@ runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
 1. 较早消息序列化为 `history`，最后一轮 user 消息为 `current_user_request`。
 2. `standalone_request_v2` 指示模型在内部补全当前请求所需的最少上下文。
 3. 超长输入先删除最早历史，再从中间截断当前请求。
-4. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
-5. Top1 模式不新增 token，也不调整模型词表。
+4. prompt 始终为“最长候选 token 路径 + EOS”预留空间，绝不根据当前 label 改变裁剪。
+5. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
+6. Top1 模式不新增 token，也不调整模型词表。
+
+训练与评测只调用 `prepare_router_prompt()` 这一套实现。最终 bundle 还固化 prompt 实现
+哈希、system prompt/候选表哈希、Transformers 版本、tokenizer/chat-template 指纹、
+EOS/PAD、候选 token 序列、`max_length` 和 `trust_remote_code`。评测逐项验证后才加载
+模型，任意一项不一致都会直接终止。
 
 ## 训练运行与产物
 
@@ -149,7 +155,6 @@ uv run --no-sync python scripts/evaluate_top1.py \
   --model-dir runs/top1/<experiment>/<run_id>/final/model \
   --data /data/router/test.jsonl \
   --suite-id baseline-v1 \
-  --score-mode sum_logprob \
   --batch-size 32
 ```
 
@@ -159,8 +164,7 @@ uv run --no-sync python scripts/evaluate_top1.py \
 uv run --no-sync python scripts/evaluate_top1.py \
   --model-dir runs/top1/<experiment>/<run_id>/final/model \
   --data /data/router/test.jsonl \
-  --history-ablation \
-  --score-mode mean_logprob
+  --history-ablation
 ```
 
 评测目录为：
@@ -179,12 +183,17 @@ runs/evaluations/top1/evaluation_index.jsonl
 runs/evaluations/top1/suites/<suite_id>/members.jsonl
 ```
 
-`model_id` 来自最终模型目录内所有文件的 SHA256；默认每次评测前重新校验，确认模型没有
+`model_id` 来自最终模型目录内所有文件的 SHA256；每次评测前都会重新校验，确认模型没有
 被改动。`evaluation_id` 每次都不同，而相同模型、数据快照和语义推理参数会得到相同的
 `evaluation_signature`，可用于发现重复实验。`batch_size`、设备和精度作为执行参数记录，
-不会混入语义签名；数据哈希、最大长度、打分方式和 history ablation 会混入签名。
+不会混入语义签名；数据哈希和 history ablation 会混入签名。
 `evaluation_index.jsonl` 是所有评测的追加式索引；用同一个 `--suite-id` 可把一组数据集或
 参数扫描聚合到同一 suite 的 `members.jsonl`，而每个成员仍保持独立、不可变。
+
+正式预测固定使用候选完整路径（含 EOS）的 `sum_logprob`，与 bundle 中的推理契约一致；
+`mean_logprob` 只作为长度偏置诊断自动计算，不能切换为正式决策。评测也不能覆盖训练时
+的 prompt、候选表、`max_length` 或 tokenizer 行为。LoRA bundle 会额外绑定 base model：
+Hub 模型固定到训练时 revision，本地模型复核完整目录内容哈希。
 
 指标包括 Top1 accuracy、候选级 precision/recall/NLL、混淆矩阵、margin、熵、ECE
 校准误差、单轮/多轮分层，以及 `sum_logprob` 与 `mean_logprob` 的准确率和预测分歧。

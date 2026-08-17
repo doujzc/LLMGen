@@ -369,7 +369,13 @@ def load_and_verify_model_artifact(
 
 
 class TrainingLogCallback:
-    """Transformers-compatible callback that persists every rank-zero log event."""
+    """Callback behavior that persists every rank-zero training event.
+
+    Use :func:`make_training_log_callback` when passing this callback to
+    Transformers.  Keeping this implementation independent of Transformers lets
+    metadata utilities and the training CLI load without the optional training
+    dependencies installed.
+    """
 
     def __init__(self, store: RunStore, torch_module: Any | None = None) -> None:
         self.store = store
@@ -430,6 +436,29 @@ class TrainingLogCallback:
         if getattr(state, "is_world_process_zero", True):
             self.store.event("training_finished", step=int(getattr(state, "global_step", 0)))
         return control
+
+
+def make_training_log_callback(
+    store: RunStore,
+    trainer_callback_class: type[Any],
+    torch_module: Any | None = None,
+) -> TrainingLogCallback:
+    """Bind the logging behavior to the installed Transformers callback API.
+
+    ``Trainer`` dispatches every lifecycle event (including ``on_init_end``)
+    directly on each callback.  Inheriting from its own ``TrainerCallback``
+    supplies the version-appropriate no-op implementations for events that this
+    logger does not handle.
+    """
+
+    if not isinstance(trainer_callback_class, type):
+        raise TypeError("trainer_callback_class must be a class")
+    callback_class = type(
+        "BoundTrainingLogCallback",
+        (TrainingLogCallback, trainer_callback_class),
+        {"__module__": __name__},
+    )
+    return callback_class(store, torch_module)
 
 
 def _runtime_memory(torch_module: Any | None) -> dict[str, Any]:
