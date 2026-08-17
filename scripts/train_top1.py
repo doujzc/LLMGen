@@ -12,6 +12,19 @@ from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 
+from llmgen.diagnostics import build_curve_summary, build_data_profile
+from llmgen.experiment import (
+    TRAINING_RUN_SCHEMA_VERSION,
+    RunStore,
+    TrainingLogCallback,
+    canonical_sha256,
+    git_snapshot,
+    json_safe,
+    system_snapshot,
+    utc_now,
+    write_model_artifact_manifest,
+    write_trainer_history,
+)
 from llmgen.top1 import (
     CONVERSATION_TEMPLATE,
     MAX_ASSISTANT_HISTORY_CHARACTERS,
@@ -44,6 +57,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--candidate-registry", required=True)
     parser.add_argument("--system-prompt-file", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--experiment-name", default="top1")
+    parser.add_argument("--run-id")
 
     parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--epochs", type=float, default=3.0)
@@ -162,6 +177,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         "eval_accumulation_steps": args.eval_accumulation_steps,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "logging_steps": args.logging_steps,
+        "logging_first_step": True,
         "save_steps": args.save_steps,
         "eval_steps": args.eval_steps,
         "save_total_limit": args.save_total_limit,
@@ -202,8 +218,9 @@ def _build_training_arguments(
     has_validation: bool,
     resume_from_checkpoint: str | bool | None,
 ) -> Any:
+    checkpoint_dir = Path(args.output_dir) / "checkpoints"
     training_kwargs = {
-        "output_dir": str(Path(args.output_dir)),
+        "output_dir": str(checkpoint_dir),
         "overwrite_output_dir": resume_from_checkpoint is None,
         "num_train_epochs": args.epochs,
         "per_device_train_batch_size": args.per_device_train_batch_size,
@@ -231,6 +248,8 @@ def _build_training_arguments(
         "remove_unused_columns": False,
         "prediction_loss_only": True,
         "report_to": [],
+        "logging_nan_inf_filter": False,
+        "include_num_input_tokens_seen": "non_padding",
         "seed": args.seed,
         "data_seed": args.seed,
     }
@@ -300,9 +319,14 @@ def _prepare_rows(
     candidate_tokens: Mapping[str, Sequence[int]],
     max_length: int,
     system_prompt: str,
-) -> tuple[list[dict[str, list[int]]], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, list[int]]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     encoded: list[dict[str, list[int]]] = []
     sft_rows: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
     for row_number, row in enumerate(rows, start=1):
         try:
             prepared = prepare_example(
@@ -316,7 +340,8 @@ def _prepare_rows(
             raise Top1DataError(f"{source}:{row_number}: {exc}") from exc
         encoded.append(prepared.encoded)
         sft_rows.append(prepared.sft_row)
-    return encoded, sft_rows
+        diagnostics.append(prepared.diagnostics)
+    return encoded, sft_rows, diagnostics
 
 
 def _dataset_class(torch: Any):
@@ -365,6 +390,8 @@ def _write_bundle(
     validation_report: Mapping[str, Any] | None,
     world_size: int,
     deepspeed_metadata: Mapping[str, Any] | None,
+    training_run_id: str,
+    prepared_train_path: Path,
 ) -> None:
     tokenizer.save_pretrained(str(output_dir))
     bundled_registry = output_dir / "candidate_registry.json"
@@ -409,6 +436,7 @@ def _write_bundle(
         "target": "candidate_name_tokens_plus_eos",
         "max_length": args.max_length,
         "training": {
+            "training_run_id": training_run_id,
             "epochs": args.epochs,
             "learning_rate": args.learning_rate,
             "precision": args.precision,
@@ -424,12 +452,160 @@ def _write_bundle(
             "deepspeed": deepspeed_metadata,
         },
         "sft_input": {
-            "path": "sft_input.jsonl",
-            "sha256": sha256_file(output_dir / "sft_input.jsonl"),
+            "path": "../../prepared/train.sft.jsonl",
+            "sha256": sha256_file(prepared_train_path),
             "rows": train_report["rows"],
         },
     }
     write_json(output_dir / "router_manifest.json", manifest)
+
+
+def _safe_component(value: str, *, label: str) -> str:
+    cleaned = value.strip()
+    if not cleaned or cleaned in {".", ".."} or "/" in cleaned or "\\" in cleaned:
+        raise Top1DataError(f"{label} must be one non-empty path component")
+    return cleaned
+
+
+def _build_run_manifest(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    candidate_names: Sequence[str],
+    system_prompt: str,
+    train_report: Mapping[str, Any],
+    validation_report: Mapping[str, Any] | None,
+    deepspeed_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    except ValueError as exc:
+        raise Top1DataError("WORLD_SIZE must be an integer") from exc
+    repository = Path(__file__).resolve().parents[1]
+    code_files = (
+        Path(__file__).resolve(),
+        repository / "src" / "llmgen" / "top1.py",
+        repository / "src" / "llmgen" / "experiment.py",
+        repository / "src" / "llmgen" / "diagnostics.py",
+    )
+    code = {
+        "git": git_snapshot(repository),
+        "files": {
+            path.relative_to(repository).as_posix(): sha256_file(path)
+            for path in code_files
+        },
+    }
+    semantic_deepspeed = (
+        {
+            key: value
+            for key, value in deepspeed_metadata.items()
+            if key != "path"
+        }
+        if deepspeed_metadata is not None
+        else None
+    )
+    identity = {
+        "task": ROUTING_MODE,
+        "base_model": args.model_name_or_path,
+        "finetune_mode": args.finetune_mode,
+        "inputs": {
+            "train_sha256": sha256_file(args.train_data),
+            "validation_sha256": (
+                sha256_file(args.validation_data) if args.validation_data else None
+            ),
+            "candidate_registry_sha256": sha256_file(args.candidate_registry),
+            "system_prompt_sha256": sha256_file(args.system_prompt_file),
+        },
+        "configuration": {
+            "max_length": args.max_length,
+            "epochs": args.epochs,
+            "learning_rate": args.learning_rate,
+            "per_device_train_batch_size": args.per_device_train_batch_size,
+            "per_device_eval_batch_size": args.per_device_eval_batch_size,
+            "eval_accumulation_steps": args.eval_accumulation_steps,
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "world_size": launcher_world_size,
+            "weight_decay": args.weight_decay,
+            "warmup_ratio": args.warmup_ratio,
+            "logging_steps": args.logging_steps,
+            "save_steps": args.save_steps,
+            "eval_steps": args.eval_steps,
+            "save_total_limit": args.save_total_limit,
+            "dataloader_num_workers": args.dataloader_num_workers,
+            "seed": args.seed,
+            "precision": args.precision,
+            "gradient_checkpointing": args.gradient_checkpointing,
+            "gradient_checkpointing_mode": args.gradient_checkpointing_mode,
+            "trust_remote_code": args.trust_remote_code,
+            "lora": (
+                {
+                    "r": args.lora_r,
+                    "alpha": args.lora_alpha,
+                    "dropout": args.lora_dropout,
+                    "target_modules": _csv(args.lora_target_modules),
+                }
+                if args.finetune_mode == "lora"
+                else None
+            ),
+            "deepspeed": semantic_deepspeed,
+        },
+        "code_sha256": canonical_sha256(code),
+    }
+    return {
+        "schema_version": TRAINING_RUN_SCHEMA_VERSION,
+        "run_signature": canonical_sha256(identity),
+        "run_id": run_id,
+        "experiment_name": _safe_component(
+            args.experiment_name,
+            label="experiment_name",
+        ),
+        "created_at": utc_now(),
+        **identity,
+        "data": {
+            "train": {
+                "path": str(Path(args.train_data).expanduser().resolve()),
+                **train_report,
+            },
+            "validation": (
+                {
+                    "path": str(Path(args.validation_data).expanduser().resolve()),
+                    **validation_report,
+                }
+                if args.validation_data and validation_report is not None
+                else None
+            ),
+            "candidate_names": list(candidate_names),
+            "system_prompt_characters": len(system_prompt),
+        },
+        "code": code,
+    }
+
+
+def _trainer(
+    *,
+    transformers: Any,
+    model: Any,
+    training_args: Any,
+    train_dataset: Any,
+    eval_dataset: Any | None,
+    data_collator: Any,
+    tokenizer: Any,
+    callback: Any,
+) -> Any:
+    kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": eval_dataset,
+        "data_collator": data_collator,
+        "callbacks": [callback],
+    }
+    parameters = inspect.signature(transformers.Trainer.__init__).parameters
+    if "processing_class" in parameters:
+        kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in parameters:
+        kwargs["tokenizer"] = tokenizer
+    return transformers.Trainer(**kwargs)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -445,127 +621,254 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.local_rank = int(environment_local_rank)
         except ValueError as exc:
             raise Top1DataError("LOCAL_RANK must be an integer") from exc
-    _validate_args(args)
+    try:
+        rank = int(os.environ.get("RANK", "0"))
+    except ValueError as exc:
+        raise Top1DataError("RANK must be an integer") from exc
+    is_primary = rank == 0
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    store = RunStore.training(output_dir)
+    store_initialized = False
 
-    prompt_path = Path(args.system_prompt_file).expanduser()
-    system_prompt = prompt_path.read_text(encoding="utf-8").strip()
-    if not system_prompt:
-        raise Top1DataError("system prompt file is empty")
-    candidate_names = load_candidate_names(args.candidate_registry)
-    train_rows = read_jsonl(args.train_data)
-    validation_rows = read_jsonl(args.validation_data) if args.validation_data else []
-    train_report = validate_training_rows(
-        train_rows,
-        candidate_names,
-        source=args.train_data,
-    )
-    validation_report = (
-        validate_training_rows(
-            validation_rows,
-            candidate_names,
-            source=args.validation_data,
+    try:
+        _validate_args(args)
+        run_id = _safe_component(args.run_id or output_dir.name, label="run_id")
+        prompt_path = Path(args.system_prompt_file).expanduser()
+        system_prompt = prompt_path.read_text(encoding="utf-8").strip()
+        if not system_prompt:
+            raise Top1DataError("system prompt file is empty")
+        candidate_names = load_candidate_names(args.candidate_registry)
+        train_rows = read_jsonl(args.train_data)
+        validation_rows = (
+            read_jsonl(args.validation_data) if args.validation_data else []
         )
-        if args.validation_data
-        else None
-    )
+        train_report = validate_training_rows(
+            train_rows,
+            candidate_names,
+            source=args.train_data,
+        )
+        validation_report = (
+            validate_training_rows(
+                validation_rows,
+                candidate_names,
+                source=args.validation_data,
+            )
+            if args.validation_data
+            else None
+        )
 
-    deepspeed_metadata = None
-    if args.deepspeed:
-        deepspeed_path, _, stage = _read_deepspeed_config(args.deepspeed)
-        version = _require_supported_deepspeed_version()
-        args.deepspeed = str(deepspeed_path)
-        deepspeed_metadata = {
-            "path": str(deepspeed_path),
-            "sha256": sha256_file(deepspeed_path),
-            "zero_stage": stage,
-            "version": version,
-        }
+        deepspeed_metadata = None
+        if args.deepspeed:
+            deepspeed_path, _, stage = _read_deepspeed_config(args.deepspeed)
+            version = _require_supported_deepspeed_version()
+            args.deepspeed = str(deepspeed_path)
+            deepspeed_metadata = {
+                "path": str(deepspeed_path),
+                "sha256": sha256_file(deepspeed_path),
+                "zero_stage": stage,
+                "version": version,
+            }
 
-    torch, transformers = _import_training_dependencies()
-    resume_from_checkpoint = _resume_value(args.resume_from_checkpoint)
-    training_args = _build_training_arguments(
-        args,
-        transformers,
-        has_validation=bool(validation_rows),
-        resume_from_checkpoint=resume_from_checkpoint,
-    )
-    tokenizer, model = _load_model_and_tokenizer(args, torch, transformers)
-    candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
-    train_examples, sft_rows = _prepare_rows(
-        train_rows,
-        source=args.train_data,
-        tokenizer=tokenizer,
-        candidate_tokens=candidate_tokens,
-        max_length=args.max_length,
-        system_prompt=system_prompt,
-    )
-    validation_examples, _ = (
-        _prepare_rows(
-            validation_rows,
-            source=args.validation_data,
+        resume_from_checkpoint = _resume_value(args.resume_from_checkpoint)
+        run_manifest = _build_run_manifest(
+            args=args,
+            run_id=run_id,
+            candidate_names=candidate_names,
+            system_prompt=system_prompt,
+            train_report=train_report,
+            validation_report=validation_report,
+            deepspeed_metadata=deepspeed_metadata,
+        )
+        if is_primary:
+            store.initialize(
+                run_manifest,
+                resume=resume_from_checkpoint is not None,
+            )
+            store_initialized = True
+        else:
+            store.ensure_layout()
+
+        torch, transformers = _import_training_dependencies()
+        if is_primary:
+            write_json(output_dir / "logs" / "system.json", system_snapshot(torch))
+            store.update_status("PREPARING")
+        training_args = _build_training_arguments(
+            args,
+            transformers,
+            has_validation=bool(validation_rows),
+            resume_from_checkpoint=resume_from_checkpoint,
+        )
+        tokenizer, model = _load_model_and_tokenizer(args, torch, transformers)
+        candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
+        train_examples, train_sft_rows, train_diagnostics = _prepare_rows(
+            train_rows,
+            source=args.train_data,
             tokenizer=tokenizer,
             candidate_tokens=candidate_tokens,
             max_length=args.max_length,
             system_prompt=system_prompt,
         )
-        if validation_rows
-        else ([], [])
-    )
-
-    Dataset = _dataset_class(torch)
-    trainer = transformers.Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=Dataset(train_examples),
-        eval_dataset=Dataset(validation_examples) if validation_examples else None,
-        data_collator=_collator(torch, int(tokenizer.pad_token_id)),
-    )
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if trainer.is_world_process_zero():
-        write_jsonl(output_dir / "sft_input.jsonl", sft_rows)
-        print(
-            "[top1] candidate supervision: "
-            + ", ".join(
-                f"{name}={train_report['candidate_counts'].get(name, 0)}"
-                for name in candidate_names
-            ),
-            flush=True,
+        validation_examples, validation_sft_rows, validation_diagnostics = (
+            _prepare_rows(
+                validation_rows,
+                source=args.validation_data,
+                tokenizer=tokenizer,
+                candidate_tokens=candidate_tokens,
+                max_length=args.max_length,
+                system_prompt=system_prompt,
+            )
+            if validation_rows
+            else ([], [], [])
         )
+        prepared_dir = output_dir / "prepared"
+        prepared_train_path = prepared_dir / "train.sft.jsonl"
+        if is_primary:
+            write_jsonl(prepared_train_path, train_sft_rows)
+            write_json(
+                prepared_dir / "train_profile.json",
+                build_data_profile(
+                    train_diagnostics,
+                    candidate_names=candidate_names,
+                    candidate_tokens=candidate_tokens,
+                    max_length=args.max_length,
+                ),
+            )
+            if validation_rows:
+                write_jsonl(prepared_dir / "validation.sft.jsonl", validation_sft_rows)
+                write_json(
+                    prepared_dir / "validation_profile.json",
+                    build_data_profile(
+                        validation_diagnostics,
+                        candidate_names=candidate_names,
+                        candidate_tokens=candidate_tokens,
+                        max_length=args.max_length,
+                    ),
+                )
+            tokenizer.save_pretrained(str(prepared_dir / "tokenizer"))
+            store.event(
+                "data_prepared",
+                train_rows=len(train_examples),
+                validation_rows=len(validation_examples),
+            )
+            print(
+                "[top1] candidate supervision: "
+                + ", ".join(
+                    f"{name}={train_report['candidate_counts'].get(name, 0)}"
+                    for name in candidate_names
+                ),
+                flush=True,
+            )
 
-    wait_for_everyone = getattr(
-        getattr(trainer, "accelerator", None), "wait_for_everyone", None
-    )
-    if callable(wait_for_everyone):
-        wait_for_everyone()
-    try:
-        launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
-    except ValueError as exc:
-        raise Top1DataError("WORLD_SIZE must be an integer") from exc
-    world_size = int(trainer.args.world_size)
-    if launcher_world_size > 1 and world_size != launcher_world_size:
-        raise Top1DataError(
-            f"launcher requested {launcher_world_size} processes, but Trainer "
-            f"initialized world_size={world_size}"
-        )
-
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-    trainer.save_model(str(output_dir))
-    if trainer.is_world_process_zero():
-        _write_bundle(
-            args=args,
-            output_dir=output_dir,
-            tokenizer=tokenizer,
+        Dataset = _dataset_class(torch)
+        callback = TrainingLogCallback(store, torch)
+        trainer = _trainer(
+            transformers=transformers,
             model=model,
-            candidate_names=candidate_names,
-            system_prompt=system_prompt,
-            train_report=train_report,
-            validation_report=validation_report,
-            world_size=world_size,
-            deepspeed_metadata=deepspeed_metadata,
+            training_args=training_args,
+            train_dataset=Dataset(train_examples),
+            eval_dataset=(
+                Dataset(validation_examples) if validation_examples else None
+            ),
+            data_collator=_collator(torch, int(tokenizer.pad_token_id)),
+            tokenizer=tokenizer,
+            callback=callback,
         )
-    if callable(wait_for_everyone):
-        wait_for_everyone()
+        wait_for_everyone = getattr(
+            getattr(trainer, "accelerator", None),
+            "wait_for_everyone",
+            None,
+        )
+        if callable(wait_for_everyone):
+            wait_for_everyone()
+        try:
+            launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        except ValueError as exc:
+            raise Top1DataError("WORLD_SIZE must be an integer") from exc
+        world_size = int(trainer.args.world_size)
+        if launcher_world_size > 1 and world_size != launcher_world_size:
+            raise Top1DataError(
+                f"launcher requested {launcher_world_size} processes, but Trainer "
+                f"initialized world_size={world_size}"
+            )
+
+        train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+        final_eval_metrics = (
+            trainer.evaluate(metric_key_prefix="final") if validation_examples else {}
+        )
+        trainer.save_state()
+        final_model_dir = output_dir / "final" / "model"
+        trainer.save_model(str(final_model_dir))
+        if callable(wait_for_everyone):
+            wait_for_everyone()
+        if trainer.is_world_process_zero():
+            store.update_status("FINALIZING", step=int(trainer.state.global_step))
+            _write_bundle(
+                args=args,
+                output_dir=final_model_dir,
+                tokenizer=tokenizer,
+                model=model,
+                candidate_names=candidate_names,
+                system_prompt=system_prompt,
+                train_report=train_report,
+                validation_report=validation_report,
+                world_size=world_size,
+                deepspeed_metadata=deepspeed_metadata,
+                training_run_id=run_id,
+                prepared_train_path=prepared_train_path,
+            )
+            artifact = write_model_artifact_manifest(
+                final_model_dir,
+                training_run_id=run_id,
+            )
+            history = list(trainer.state.log_history)
+            write_trainer_history(output_dir / "logs" / "trainer_history.jsonl", history)
+            curves = build_curve_summary(history)
+            write_json(output_dir / "final" / "curves.json", curves)
+            best_checkpoint = trainer.state.best_model_checkpoint
+            if best_checkpoint:
+                write_json(
+                    output_dir / "checkpoints" / "best_checkpoint.json",
+                    {
+                        "schema_version": 1,
+                        "path": str(Path(best_checkpoint).resolve()),
+                        "metric": trainer.state.best_metric,
+                        "updated_at": utc_now(),
+                    },
+                )
+            summary = {
+                "schema_version": 1,
+                "run_id": run_id,
+                "run_signature": run_manifest["run_signature"],
+                "model_id": artifact["model_id"],
+                "global_step": int(trainer.state.global_step),
+                "best_checkpoint": best_checkpoint,
+                "best_eval_loss": curves["best_eval_loss"],
+                "train_metrics": dict(getattr(train_result, "metrics", {})),
+                "final_validation_metrics": dict(final_eval_metrics),
+                "completed_at": utc_now(),
+            }
+            write_json(output_dir / "final" / "summary.json", json_safe(summary))
+            store.event(
+                "run_completed",
+                step=int(trainer.state.global_step),
+                model_id=artifact["model_id"],
+            )
+            store.update_status(
+                "COMPLETED",
+                step=int(trainer.state.global_step),
+                model_id=artifact["model_id"],
+            )
+        if callable(wait_for_everyone):
+            wait_for_everyone()
+    except BaseException as exc:
+        if is_primary and store_initialized:
+            store.event("run_failed", error_type=type(exc).__name__, error=str(exc))
+            store.update_status(
+                "FAILED",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        raise
 
 
 if __name__ == "__main__":

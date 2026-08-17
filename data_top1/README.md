@@ -10,4 +10,5 @@
 ```
 
 候选名必须存在于 `configs/top1_candidates.json`。训练启动后会在输出目录生成经过
-实际 tokenizer 长度裁剪的 `sft_input.jsonl`。
+实际 tokenizer 长度裁剪的 `prepared/train.sft.jsonl`，验证集对应
+`prepared/validation.sft.jsonl`；相邻的 `*_profile.json` 只保存统计诊断，不复制正文。

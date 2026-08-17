@@ -15,6 +15,25 @@ fi
 source "$TOP1_CONFIG"
 cd "$ROOT_DIR"
 
+if [[ -n "$TOP1_RESUME" && -z "$TOP1_OUTPUT_DIR" && -z "$TOP1_RUN_ID" ]]; then
+  echo "Resume requires TOP1_OUTPUT_DIR or TOP1_RUN_ID for the existing run." >&2
+  exit 2
+fi
+if [[ -z "$TOP1_OUTPUT_DIR" ]]; then
+  if [[ -z "$TOP1_RUN_ID" ]]; then
+    RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    GIT_REVISION="$(git rev-parse --short=8 HEAD 2>/dev/null || true)"
+    TOP1_RUN_ID="$RUN_TIMESTAMP"
+    if [[ -n "$GIT_REVISION" ]]; then
+      TOP1_RUN_ID="$TOP1_RUN_ID-$GIT_REVISION"
+    fi
+  fi
+  TOP1_OUTPUT_DIR="$TOP1_RUNS_ROOT/$TOP1_EXPERIMENT_NAME/$TOP1_RUN_ID"
+elif [[ -z "$TOP1_RUN_ID" ]]; then
+  TOP1_RUN_ID="${TOP1_OUTPUT_DIR%/}"
+  TOP1_RUN_ID="${TOP1_RUN_ID##*/}"
+fi
+
 if [[ "$PYTHON" == */* && ! -x "$PYTHON" ]]; then
   echo "Python executable does not exist: $PYTHON" >&2
   echo "Create it with: uv venv --python 3.12" >&2
@@ -41,9 +60,12 @@ fi
 
 LAUNCH=("$PYTHON")
 if (( TOP1_NUM_GPUS > 1 )); then
+  mkdir -p "$TOP1_OUTPUT_DIR/logs/torchrun"
   LAUNCH=(
     "$PYTHON" -m torch.distributed.run --standalone
     --nproc-per-node "$TOP1_NUM_GPUS"
+    --log-dir "$TOP1_OUTPUT_DIR/logs/torchrun"
+    --redirects 3 --tee 3
   )
 fi
 
@@ -82,13 +104,15 @@ elif [[ "$TOP1_FINETUNE_MODE" != "full" ]]; then
   exit 2
 fi
 
-echo "[top1] train direct candidate-name router"
+echo "[top1] train direct candidate-name router: $TOP1_OUTPUT_DIR"
 exec "${LAUNCH[@]}" scripts/train_top1.py \
   --model-name-or-path "$TOP1_MODEL" \
   --train-data "$TOP1_TRAIN_DATA" \
   --candidate-registry "$TOP1_CANDIDATE_REGISTRY" \
   --system-prompt-file "$TOP1_SYSTEM_PROMPT" \
   --output-dir "$TOP1_OUTPUT_DIR" \
+  --experiment-name "$TOP1_EXPERIMENT_NAME" \
+  --run-id "$TOP1_RUN_ID" \
   --finetune-mode "$TOP1_FINETUNE_MODE" \
   --precision "$TOP1_PRECISION" \
   --epochs "$TOP1_EPOCHS" \

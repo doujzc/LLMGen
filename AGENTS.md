@@ -3,10 +3,13 @@
 ## Scope and structure
 
 This repository only trains direct candidate-name Top1 routers. Pure data and prompt
-logic lives in `src/llmgen/top1.py`; the Python training entry point is
-`scripts/train_top1.py`, and `scripts/train_top1.sh` provides the configured launcher.
-Runtime settings live in `configs/`, user datasets in `data_top1/`, and tests in
-`tests/`. Treat `data_top1/` and `runs/` as datasets or generated artifacts.
+logic lives in `src/llmgen/top1.py`; experiment lifecycle and diagnostics live in
+`src/llmgen/experiment.py`, `src/llmgen/diagnostics.py`, and
+`src/llmgen/evaluation.py`. The Python training entry point is
+`scripts/train_top1.py`, `scripts/train_top1.sh` provides the configured launcher,
+and `scripts/evaluate_top1.py` records independent Top1 evaluation runs. Runtime
+settings live in `configs/`, user datasets in `data_top1/`, and tests in `tests/`.
+Treat `data_top1/` and `runs/` as datasets or generated artifacts.
 
 ## Development
 

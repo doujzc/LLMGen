@@ -31,6 +31,8 @@ def _training_args(root: Path) -> Namespace:
         candidate_registry="configs/top1_candidates.json",
         system_prompt_file=str(prompt),
         output_dir=str(root / "output"),
+        experiment_name="test-top1",
+        run_id="run-001",
         max_length=1024,
         epochs=3.0,
         learning_rate=1e-5,
@@ -89,6 +91,7 @@ class Top1TrainingTests(unittest.TestCase):
             self.assertEqual(captured["eval_accumulation_steps"], 1)
             self.assertIs(captured["prediction_loss_only"], True)
             self.assertEqual(captured["evaluation_strategy"], "steps")
+            self.assertTrue(captured["output_dir"].endswith("output/checkpoints"))
 
     def test_full_training_never_resizes_token_embeddings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -144,8 +147,10 @@ class Top1TrainingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             args = _training_args(Path(temporary))
             output = Path(args.output_dir)
-            output.mkdir()
-            write_jsonl(output / "sft_input.jsonl", [{"messages": []}])
+            model_output = output / "final" / "model"
+            model_output.mkdir(parents=True)
+            prepared = output / "prepared" / "train.sft.jsonl"
+            write_jsonl(prepared, [{"messages": []}])
 
             class Tokenizer:
                 def save_pretrained(self, destination):
@@ -157,7 +162,7 @@ class Top1TrainingTests(unittest.TestCase):
             model = SimpleNamespace(config=SimpleNamespace(_commit_hash="revision"))
             train_top1._write_bundle(
                 args=args,
-                output_dir=output,
+                output_dir=model_output,
                 tokenizer=Tokenizer(),
                 model=model,
                 candidate_names=("StockQuery", "Ecommerce"),
@@ -170,9 +175,11 @@ class Top1TrainingTests(unittest.TestCase):
                 validation_report=None,
                 world_size=1,
                 deepspeed_metadata=None,
+                training_run_id="run-001",
+                prepared_train_path=prepared,
             )
 
-            manifest = json.loads((output / "router_manifest.json").read_text())
+            manifest = json.loads((model_output / "router_manifest.json").read_text())
             self.assertEqual(manifest["routing_mode"], "candidate_name_top1")
             self.assertEqual(manifest["target"], "candidate_name_tokens_plus_eos")
             self.assertEqual(
@@ -183,13 +190,13 @@ class Top1TrainingTests(unittest.TestCase):
                 manifest["training"]["effective_global_batch_size"],
                 16,
             )
-            registry = json.loads((output / "candidate_registry.json").read_text())
+            registry = json.loads((model_output / "candidate_registry.json").read_text())
             self.assertEqual(
                 registry["candidates"],
                 ["StockQuery", "Ecommerce"],
             )
             self.assertEqual(
-                read_jsonl(output / "sft_input.jsonl"),
+                read_jsonl(prepared),
                 [{"messages": []}],
             )
 

@@ -140,6 +140,11 @@ class Top1CoreTests(unittest.TestCase):
             prepared.sft_row["messages"][-1]["content"],
             "StockQuery",
         )
+        self.assertEqual(prepared.diagnostics["target_candidate_name"], "StockQuery")
+        self.assertEqual(
+            prepared.diagnostics["input_tokens"],
+            len(prepared.encoded["input_ids"]),
+        )
 
     def test_validation_requires_canonical_fields_and_allows_partial_coverage(
         self,

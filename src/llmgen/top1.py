@@ -35,6 +35,7 @@ class PreparedExample:
 
     encoded: dict[str, list[int]]
     sft_row: dict[str, list[dict[str, str]]]
+    diagnostics: dict[str, Any]
 
 
 def sha256_file(path: str | Path) -> str:
@@ -77,7 +78,7 @@ def write_json(path: str | Path, payload: Mapping[str, Any]) -> None:
     temporary = destination.with_name(destination.name + ".tmp")
     try:
         temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
         )
         temporary.replace(destination)
@@ -94,7 +95,9 @@ def write_jsonl(path: str | Path, rows: Iterable[Mapping[str, Any]]) -> None:
     try:
         with temporary.open("w", encoding="utf-8") as handle:
             for row in rows:
-                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+                handle.write(
+                    json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+                )
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -408,14 +411,22 @@ def prepare_example(
     target_ids = [*map(int, candidate_tokens[name]), int(tokenizer.eos_token_id)]
     if max_length <= len(target_ids):
         raise Top1DataError("max_length leaves no room for a router prompt")
+    normalized_messages = messages_from_row(row)
     prompt, fitted_messages = fit_prompt(
         tokenizer,
-        messages_from_row(row),
+        normalized_messages,
         system_prompt,
         max_prompt_tokens=max_length - len(target_ids),
     )
     prompt_ids = encode_text(tokenizer, prompt)
     input_ids = [*prompt_ids, *target_ids]
+    source_messages = row["messages"]
+    source_non_system = [
+        message
+        for message in source_messages
+        if isinstance(message, Mapping) and message.get("role", "").strip() != "system"
+    ]
+    source_current = str(source_non_system[-1]["content"]).strip()
     return PreparedExample(
         encoded={
             "input_ids": input_ids,
@@ -428,5 +439,19 @@ def prepare_example(
                 {"role": "user", "content": build_user_prompt(fitted_messages)},
                 {"role": "assistant", "content": name},
             ]
+        },
+        diagnostics={
+            "target_candidate_name": name,
+            "original_message_count": len(source_non_system),
+            "normalized_message_count": len(normalized_messages),
+            "fitted_message_count": len(fitted_messages),
+            "history_messages_dropped": max(
+                0,
+                (len(source_non_system) - 1) - (len(fitted_messages) - 1),
+            ),
+            "current_user_truncated": fitted_messages[-1]["content"] != source_current,
+            "prompt_tokens": len(prompt_ids),
+            "target_tokens": len(target_ids),
+            "input_tokens": len(input_ids),
         },
     )

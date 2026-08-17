@@ -74,8 +74,18 @@ bash scripts/train_top1.sh
 ```
 
 断点恢复可将 `TOP1_RESUME` 设为 checkpoint 路径，或设为 `latest` 自动选择输出目录
-中的最新 checkpoint。完整默认配置见 `configs/top1.env`；临时参数也可以直接追加到
-训练命令末尾。
+中的最新 checkpoint。恢复时必须用 `TOP1_OUTPUT_DIR` 或 `TOP1_RUN_ID` 指向原 run，
+已完成的 run 不允许原地恢复或覆盖。完整默认配置见 `configs/top1.env`；临时参数也可以
+直接追加到训练命令末尾。
+
+默认输出目录不是固定名称，而是：
+
+```text
+runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
+```
+
+`TOP1_EXPERIMENT_NAME` 用于归组同一实验，`TOP1_RUN_ID` 标识一次训练；也可以通过
+`TOP1_OUTPUT_DIR` 显式给出完整 run 目录。
 
 ## 训练语义
 
@@ -87,22 +97,100 @@ bash scripts/train_top1.sh
 4. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
 5. Top1 模式不新增 token，也不调整模型词表。
 
-## 产物
+## 训练运行与产物
 
-默认输出到 `runs/qwen3-1.7b-top1/`：
+每次训练使用一套固定目录：
 
 ```text
-model/tokenizer files
-checkpoint-*/
-candidate_registry.json
-router_system_prompt.md
-router_manifest.json
-sft_input.jsonl
+run_manifest.json                 # 不可变：输入哈希、配置、代码版本
+status.json                       # 可变：CREATED/RUNNING/COMPLETED/FAILED
+prepared/
+  train.sft.jsonl                 # 模型实际看到的规范化消息
+  validation.sft.jsonl
+  train_profile.json              # 类别、token 长度、截断与长度偏置风险
+  validation_profile.json
+  tokenizer/
+logs/
+  events.jsonl                    # append-only 生命周期与 Trainer 日志
+  trainer_history.jsonl           # 完整 Trainer log_history
+  system.json                     # Python/依赖/CUDA/GPU 信息
+  torchrun/                       # 多卡各 rank 的 stdout/stderr
+checkpoints/
+  checkpoint-*/                   # 可恢复，默认只保留最近/最佳所需的两个
+  last_checkpoint.json
+  best_checkpoint.json
+final/
+  model/                           # 唯一可部署目录
+    model_artifact.json            # 全部模型文件哈希与稳定 model_id
+    candidate_registry.json
+    router_system_prompt.md
+    router_manifest.json
+  curves.json                      # train/eval loss、LR、grad norm 曲线数据
+  summary.json                     # 最终指标、best checkpoint、model_id
 ```
 
-`sft_input.jsonl` 与训练编码来自同一次规范化过程，可用于检查模型实际看到的
-system/user/assistant 消息。`router_manifest.json` 记录数据哈希、候选集合、对话裁剪
-策略和有效全局 batch。
+共享文件只由 global rank 0 写入，JSON 状态和汇总采用原子替换，事件采用追加写；训练
+失败时保留已写日志并把状态置为 `FAILED`。`prepared/*.sft.jsonl` 与训练编码来自同一次
+规范化过程，可用于检查模型实际看到的 system/user/assistant 消息。`runs/` 默认不进入
+Git。
+
+`events.jsonl` 保留 step、epoch、loss、eval loss、learning rate、grad norm、Trainer
+吞吐指标、进程内存、GPU allocated/reserved/peak memory 和非有限数告警。数据 profile
+不复制原始文本，只记录候选分布、输入/目标 token 分位数、长度利用率、历史裁剪、当前
+请求裁剪、候选 token 路径长度和首 token 冲突。
+
+## 独立评测
+
+同一个最终模型可以针对不同数据或推理参数执行任意多次评测。每次调用都会创建一个
+独立、不可变的 Evaluation Run，不修改训练 run：
+
+```bash
+uv run --no-sync python scripts/evaluate_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model \
+  --data /data/router/test.jsonl \
+  --suite-id baseline-v1 \
+  --score-mode sum_logprob \
+  --batch-size 32
+```
+
+分析多轮历史的净收益，并对比候选名长度偏置：
+
+```bash
+uv run --no-sync python scripts/evaluate_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model \
+  --data /data/router/test.jsonl \
+  --history-ablation \
+  --score-mode mean_logprob
+```
+
+评测目录为：
+
+```text
+runs/evaluations/top1/<model_id前缀>/<evaluation_id>/
+  eval_manifest.json              # 模型/数据/参数/代码及 evaluation_signature
+  status.json
+  logs/events.jsonl
+  logs/system.json
+  predictions.jsonl               # 无原始文本的逐样本候选分数与诊断
+  metrics.json
+  confusion_matrix.json
+  summary.json
+runs/evaluations/top1/evaluation_index.jsonl
+runs/evaluations/top1/suites/<suite_id>/members.jsonl
+```
+
+`model_id` 来自最终模型目录内所有文件的 SHA256；默认每次评测前重新校验，确认模型没有
+被改动。`evaluation_id` 每次都不同，而相同模型、数据快照和语义推理参数会得到相同的
+`evaluation_signature`，可用于发现重复实验。`batch_size`、设备和精度作为执行参数记录，
+不会混入语义签名；数据哈希、最大长度、打分方式和 history ablation 会混入签名。
+`evaluation_index.jsonl` 是所有评测的追加式索引；用同一个 `--suite-id` 可把一组数据集或
+参数扫描聚合到同一 suite 的 `members.jsonl`，而每个成员仍保持独立、不可变。
+
+指标包括 Top1 accuracy、候选级 precision/recall/NLL、混淆矩阵、margin、熵、ECE
+校准误差、单轮/多轮分层，以及 `sum_logprob` 与 `mean_logprob` 的准确率和预测分歧。
+开启 history ablation 后还会记录历史导致的预测变化、帮助数、伤害数和净收益。逐样本
+结果不保存对话正文，使用原数据行号回查；`metrics.json` 还给出最低 margin 和高置信
+错误的行号清单。
 
 ## 检查
 
@@ -110,4 +198,5 @@ system/user/assistant 消息。`router_manifest.json` 记录数据哈希、候�
 uv run --no-sync python -m unittest discover -s tests -v
 bash -n scripts/train_top1.sh
 uv run --no-sync python -m compileall -q src scripts tests
+uv run --no-sync python scripts/evaluate_top1.py --help
 ```
