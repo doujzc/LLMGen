@@ -1,4 +1,0 @@
-{"skill_id":"skill-a","name":"Calendar read","description":"Read calendar events","text":"Calendar read | Read calendar events | Retrieve scheduled events."}
-{"skill_id":"skill-b","name":"Calendar create","description":"Create calendar events","text":"Calendar create | Create calendar events | Schedule a new event."}
-{"skill_id":"skill-c","name":"Calendar edit","description":"Edit calendar events","text":"Calendar edit | Edit calendar events | Change an existing event."}
-{"skill_id":"skill-d","name":"Weather","description":"Get weather","text":"Weather | Get weather | Return a city forecast."}

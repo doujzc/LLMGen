@@ -1,2 +1,0 @@
-{"skill_id":"ai-zhangle-skills","updates":{"name":"华泰证券 AI涨乐 Skills","capability_zh":"通过华泰证券涨乐财富通查询行情指标、筛选股票并管理模拟交易和自选股","description":"华泰证券涨乐财富通的 AI 涨乐 Skills 技能包。支持个股、大盘和板块分析，金融资讯、投资日历、基金诊断，实时与历史行情、财务和估值指标查询，自然语言条件选股，A 股模拟交易，以及自选股分组管理。模拟交易不涉及真实资金。"}}
-{"skill_id":"speech-to-text","updates":{"name":"ElevenLabs语音转写","capability_zh":"使用 ElevenLabs 将音频或视频转录为文本并生成字幕"}}

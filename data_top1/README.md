@@ -1,38 +1,13 @@
-# Multi-turn Top1 Data
+# Top1 training data
 
-Place user-provided JSONL files in this directory, or point `TOP1_TRAIN_DATA`,
-`TOP1_VALIDATION_DATA`, and `TOP1_TEST_DATA` at files elsewhere. No source-data
-conversion step is required.
+实际数据不提交到仓库。默认文件名为 `train.jsonl`；验证集是可选的，可通过
+`TOP1_VALIDATION_DATA` 指定。
 
-Each line must contain structured messages and one direct candidate-name target:
+每行格式：
 
 ```json
-{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500元以内"}],"target_candidate_name":"Ecommerce"}
+{"messages":[{"role":"user","content":"查询贵州茅台"}],"target_candidate_name":"StockQuery"}
 ```
 
-`messages` supports `user`, `assistant`, and `tool`; the final non-system message
-must be `user`. Training requires `target_candidate_name`; inference does not.
-The target must exist in `configs/top1_candidates.json`. Optional metadata fields,
-including `id`, `query_id`, and `scenario_family`, are ignored by validation and
-training. Splits may contain repeated conversations or shared scenario families.
-The training split does not need to contain supervision for every registered
-candidate. Batch evaluation also treats IDs as opaque metadata: they may be absent,
-repeated, or use any JSON value; missing IDs are generated from the input line number.
-
-Validate the files before loading a model:
-
-```bash
-TOP1_TRAIN_DATA=/data/router/train.jsonl \
-TOP1_VALIDATION_DATA=/data/router/validation.jsonl \
-  bash scripts/top1/00_validate.sh
-```
-
-Training automatically exports standard messages-only SFT JSONL to:
-
-```bash
-$TOP1_RUN_DIR/router/retrieval/sft_input.jsonl
-```
-
-Each output row contains exactly a system message, the router's serialized user
-conversation, and an assistant message whose content is the candidate name. Run
-`bash scripts/top1/export_sft.sh` to create the same artifact without training.
+候选名必须存在于 `configs/top1_candidates.json`。训练启动后会在输出目录生成经过
+实际 tokenizer 长度裁剪的 `sft_input.jsonl`。
