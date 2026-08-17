@@ -243,7 +243,7 @@ class Top1TrainingTests(unittest.TestCase):
             self.assertEqual(manifest["target"], "candidate_name_tokens_plus_eos")
             self.assertEqual(
                 manifest["conversation"]["template"],
-                "standalone_request_v2",
+                "routing_envelope_xml_v1",
             )
             self.assertEqual(
                 manifest["training"]["effective_global_batch_size"],

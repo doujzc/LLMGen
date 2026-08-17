@@ -105,9 +105,11 @@ runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
 
 训练和产物只有一套固定契约：
 
-1. 较早消息序列化为 `history`，最后一轮 user 消息为 `current_user_request`。
-2. `standalone_request_v2` 指示模型在内部补全当前请求所需的最少上下文。
-3. 超长输入先删除最早历史，再从中间截断当前请求。
+1. `routing_envelope_xml_v1` 始终生成 `<history>` 和 `<current_user_request>`；较早消息
+   按时间顺序写入带 `role` 的 `<message>`，最后一轮 user 消息单独放在 Envelope 末尾。
+2. 对话正文会进行 XML 转义；固定判别和输出规则只存在于 system prompt，Envelope
+   内部只包含对话数据。
+3. 超长输入先删除最早的完整历史消息，再从中间截断当前请求。
 4. prompt 始终为“最长候选 token 路径 + EOS”预留空间，绝不根据当前 label 改变裁剪。
 5. label 仅覆盖 `候选名原生 tokenizer tokens + EOS`，prompt 部分全部为 `-100`。
 6. Top1 模式不新增 token，也不调整模型词表。

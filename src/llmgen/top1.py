@@ -9,10 +9,11 @@ import inspect
 import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+from xml.sax.saxutils import escape as escape_xml_text
 
 
 ROUTING_MODE = "candidate_name_top1"
-CONVERSATION_TEMPLATE = "standalone_request_v2"
+CONVERSATION_TEMPLATE = "routing_envelope_xml_v1"
 TARGET_CONTRACT = "candidate_name_tokens_plus_eos"
 INFERENCE_DECISION_RULE = "candidate_path_sum_logprob"
 MEMORIZATION_SOURCE_TYPE = "label_description"
@@ -28,11 +29,6 @@ MAX_ASSISTANT_HISTORY_CHARACTERS = 1_200
 LATEST_TRUNCATION_MARKER = "\n...[当前用户消息中间内容已截断]...\n"
 HISTORY_TRUNCATION_MARKER = "\n...[历史消息中间内容已截断]...\n"
 ALLOWED_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
-STANDALONE_REQUEST_INSTRUCTION = (
-    "在内部将 current_user_request 还原为可独立理解的请求。只从 history 补充"
-    "必要信息；若当前请求完整或已切换目标，忽略 history。保持当前目标，不猜测、"
-    "不回答、不输出改写。"
-)
 
 
 class Top1DataError(ValueError):
@@ -127,6 +123,12 @@ def _nonempty_string(value: Any, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise Top1DataError(f"{field} must be a non-empty string")
     return value.strip()
+
+
+def _escape_xml_content(content: str) -> str:
+    """Escape untrusted conversation text without changing its natural layout."""
+
+    return escape_xml_text(content)
 
 
 def load_candidate_names(path: str | Path) -> tuple[str, ...]:
@@ -254,19 +256,25 @@ def target_candidate_name(row: Mapping[str, Any]) -> str:
 
 
 def build_user_prompt(messages: Sequence[Mapping[str, Any]]) -> str:
-    """Serialize normalized history and the latest request for the router."""
+    """Serialize conversation data using the fixed XML routing envelope."""
 
     normalized = normalize_messages(messages)
-    payload: dict[str, Any] = {}
-    if len(normalized) > 1:
-        payload["history"] = list(normalized[:-1])
-    payload["current_user_request"] = normalized[-1]["content"]
-    conversation = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return (
-        f"<conversation_json>{conversation}</conversation_json>\n"
-        f"<contextualize>{STANDALONE_REQUEST_INSTRUCTION}</contextualize>\n"
-        "仅输出候选名称："
+    lines = ["<routing_input>", "<history>"]
+    lines.extend(
+        f'<message role="{message["role"]}">'
+        f'{_escape_xml_content(message["content"])}</message>'
+        for message in normalized[:-1]
     )
+    lines.extend(
+        (
+            "</history>",
+            "<current_user_request>"
+            f'{_escape_xml_content(normalized[-1]["content"])}'
+            "</current_user_request>",
+            "</routing_input>",
+        )
+    )
+    return "\n".join(lines)
 
 
 def render_prompt(
@@ -423,6 +431,7 @@ def prompt_implementation_sha256() -> str:
 
     functions = (
         _nonempty_string,
+        _escape_xml_content,
         _truncate_middle,
         normalize_messages,
         messages_from_row,
@@ -440,7 +449,6 @@ def prompt_implementation_sha256() -> str:
             "max_assistant_history_characters": MAX_ASSISTANT_HISTORY_CHARACTERS,
             "latest_truncation_marker": LATEST_TRUNCATION_MARKER,
             "history_truncation_marker": HISTORY_TRUNCATION_MARKER,
-            "standalone_request_instruction": STANDALONE_REQUEST_INSTRUCTION,
             "allowed_message_roles": sorted(ALLOWED_MESSAGE_ROLES),
         },
         "functions": {
