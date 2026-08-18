@@ -11,6 +11,7 @@ from llmgen.experiment import (
     TrainingLogCallback,
     load_and_verify_model_artifact,
     make_training_log_callback,
+    training_progress_fields,
     write_model_artifact_manifest,
 )
 from llmgen.top1 import Top1DataError, read_jsonl
@@ -116,22 +117,53 @@ class ExperimentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             store = RunStore.training(Path(temporary) / "run")
             store.initialize({"run_signature": "signature"})
-            callback = TrainingLogCallback(store, memorization_steps=2)
+            callback = TrainingLogCallback(
+                store,
+                memorization_steps=2,
+                main_epochs=3.0,
+            )
             state = SimpleNamespace(
                 is_world_process_zero=True,
                 global_step=2,
                 epoch=0.25,
+                max_steps=8,
             )
             control = SimpleNamespace(should_save=False)
+            logs = {"loss": 0.5}
 
-            callback.on_log(object(), state, control, logs={"loss": 0.5})
+            callback.on_log(object(), state, control, logs=logs)
             callback.on_step_end(object(), state, control)
 
             events = read_jsonl(store.events_path)
             self.assertEqual(events[-3]["stage"], "memorization")
+            self.assertEqual(events[-3]["epoch"], 0.0)
+            self.assertEqual(events[-3]["trainer_epoch"], 0.25)
+            self.assertEqual(logs["epoch"], 0.0)
             self.assertEqual(events[-2]["event"], "memorization_completed")
             self.assertEqual(events[-1]["event"], "main_training_started")
             self.assertTrue(control.should_save)
+
+    def test_training_progress_reports_configured_main_epoch(self) -> None:
+        halfway = training_progress_fields(
+            step=5,
+            trainer_epoch=0.625,
+            max_steps=8,
+            memorization_steps=2,
+            main_epochs=3.0,
+        )
+        completed = training_progress_fields(
+            step=8,
+            trainer_epoch=1.0,
+            max_steps=8,
+            memorization_steps=2,
+            main_epochs=3.0,
+        )
+
+        self.assertEqual(halfway["stage"], "main")
+        self.assertEqual(halfway["stage_step"], 3)
+        self.assertEqual(halfway["stage_progress"], 0.5)
+        self.assertEqual(halfway["main_epoch"], 1.5)
+        self.assertEqual(completed["main_epoch"], 3.0)
 
 
 if __name__ == "__main__":

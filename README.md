@@ -35,7 +35,7 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 训练和验证文件使用 JSONL。每行只要求两个字段：
 
 ```json
-{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500 元以内"}],"target_candidate_name":"Ecommerce"}
+{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500 元以内"}],"target_candidate_name":"EcommerceProduct"}
 ```
 
 - `messages` 支持 `user`、`assistant`、`tool` 和 `system`；最后一条非 system
@@ -46,8 +46,8 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 - 不要求训练集覆盖全部候选，其他元数据字段会被忽略。
 
 训练保留七个细粒度候选，但部署决策按照
-`configs/top1_decision_policy.json` 显式映射：`StockQuery` 和 `Ecommerce` 是可用后端，
-`StockAdvice`、`StockOther`、`ProductOther`、`ChitChat` 和 `NoAvailable` 都映射为
+`configs/top1_decision_policy.json` 显式映射：`StockQuery` 和 `EcommerceProduct` 是可用候选，
+`StockAdvice`、`StockOther`、`GeneralProduct`、`ChitChat` 和 `NoAvailable` 都映射为
 后端 `NoAvailable`。代码不会根据候选名称或文本内容推断该映射。
 
 仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。
@@ -177,8 +177,11 @@ final/
 规范化过程，可用于检查模型实际看到的 system/user/assistant 消息。`runs/` 默认不进入
 Git。
 
-`events.jsonl` 保留训练阶段、step、epoch、loss、eval loss、learning rate、grad norm、Trainer
-吞吐指标、进程内存、GPU allocated/reserved/peak memory 和非有限数告警。数据 profile
+`events.jsonl` 保留训练阶段、step、主训练 `epoch`、组合课程 `trainer_epoch`、阶段进度、
+loss、eval loss、learning rate、grad norm、Trainer 吞吐指标、进程内存、GPU
+allocated/reserved/peak memory 和非有限数告警。启用 memorization 时，主训练开始前
+`epoch=0`，随后按配置的 `TOP1_EPOCHS` 增长；`trainer_epoch` 仅表示整个组合课程的完成
+比例。数据 profile
 不复制原始文本，只记录候选分布、输入/目标 token 分位数、长度利用率、历史裁剪、当前
 请求裁剪、候选 token 路径长度和首 token 冲突。
 
@@ -209,7 +212,7 @@ uv run --no-sync python scripts/evaluate_top1.py \
 
 推理通过 `compute_transition_scores(normalize_logits=True)` 取得生成候选名称及 EOS 的
 逐 token log probability，并计算 `candidate_confidence=exp(sum(logprob))`。当原始候选
-映射到 `StockQuery` 或 `Ecommerce` 且置信度低于阈值时，输出改为 `NoAvailable`；模型
+映射到 `StockQuery` 或 `Ecommerce` 后端且置信度低于阈值时，输出改为 `NoAvailable`；模型
 原本生成的五个 OOS 候选不受阈值影响。不传 `--route-threshold` 时不执行额外拒绝。
 
 默认使用 greedy；也可以显式使用受约束 beam search：

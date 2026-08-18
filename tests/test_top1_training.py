@@ -147,6 +147,25 @@ class Top1TrainingTests(unittest.TestCase):
         self.assertEqual(scheduled, scheduled_again)
         self.assertEqual(metadata["order_sha256"], metadata_again["order_sha256"])
 
+    def test_history_uses_main_epoch_and_preserves_trainer_epoch(self) -> None:
+        history = train_top1._annotate_history_stages(
+            [
+                {"step": 2, "epoch": 0.25, "loss": 1.0},
+                {"step": 5, "epoch": 0.625, "loss": 0.5},
+                {"step": 8, "epoch": 1.0, "loss": 0.25},
+            ],
+            memorization_steps=2,
+            main_epochs=3.0,
+            total_steps=8,
+        )
+
+        self.assertEqual(history[0]["stage"], "memorization")
+        self.assertEqual(history[0]["epoch"], 0.0)
+        self.assertEqual(history[0]["trainer_epoch"], 0.25)
+        self.assertEqual(history[1]["stage"], "main")
+        self.assertEqual(history[1]["epoch"], 1.5)
+        self.assertEqual(history[2]["epoch"], 3.0)
+
     def test_full_training_never_resizes_token_embeddings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             args = _training_args(Path(temporary))
@@ -218,7 +237,7 @@ class Top1TrainingTests(unittest.TestCase):
             decision_policy = BackendDecisionPolicy(
                 candidate_to_backend={
                     "StockQuery": "StockQuery",
-                    "Ecommerce": "NoAvailable",
+                    "EcommerceProduct": "NoAvailable",
                 },
                 backend_labels=("StockQuery", "NoAvailable"),
                 fallback_backend_label="NoAvailable",
@@ -228,8 +247,11 @@ class Top1TrainingTests(unittest.TestCase):
                 output_dir=model_output,
                 tokenizer=tokenizer,
                 model=model,
-                candidate_names=("StockQuery", "Ecommerce"),
-                candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                candidate_names=("StockQuery", "EcommerceProduct"),
+                candidate_tokens={
+                    "StockQuery": (1, 2),
+                    "EcommerceProduct": (3, 4),
+                },
                 decision_policy=decision_policy,
                 system_prompt="route",
                 train_report={
@@ -267,14 +289,14 @@ class Top1TrainingTests(unittest.TestCase):
             registry = json.loads((model_output / "candidate_registry.json").read_text())
             self.assertEqual(
                 registry["candidates"],
-                ["StockQuery", "Ecommerce"],
+                ["StockQuery", "EcommerceProduct"],
             )
             bundled_policy = load_backend_decision_policy(
                 model_output / "decision_policy.json",
-                ("StockQuery", "Ecommerce"),
+                ("StockQuery", "EcommerceProduct"),
             )
             self.assertEqual(
-                bundled_policy.candidate_to_backend["Ecommerce"],
+                bundled_policy.candidate_to_backend["EcommerceProduct"],
                 "NoAvailable",
             )
             self.assertEqual(
@@ -295,15 +317,18 @@ class Top1TrainingTests(unittest.TestCase):
                 contract,
                 registry_path=model_output / "candidate_registry.json",
                 prompt_path=model_output / "router_system_prompt.md",
-                candidate_names=("StockQuery", "Ecommerce"),
+                candidate_names=("StockQuery", "EcommerceProduct"),
             )
             self.assertEqual(contract_args.max_length, 1024)
             self.assertFalse(contract_args.trust_remote_code)
             evaluate_top1._validate_loaded_tokenizer(
                 contract,
                 tokenizer=tokenizer,
-                candidate_names=("StockQuery", "Ecommerce"),
-                candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                candidate_names=("StockQuery", "EcommerceProduct"),
+                candidate_tokens={
+                    "StockQuery": (1, 2),
+                    "EcommerceProduct": (3, 4),
+                },
                 transformers_version="5.5.4",
             )
             legacy_manifest = {
@@ -356,8 +381,11 @@ class Top1TrainingTests(unittest.TestCase):
                 evaluate_top1._validate_loaded_tokenizer(
                     contract,
                     tokenizer=tokenizer,
-                    candidate_names=("StockQuery", "Ecommerce"),
-                    candidate_tokens={"StockQuery": (1, 2), "Ecommerce": (3, 4)},
+                    candidate_names=("StockQuery", "EcommerceProduct"),
+                    candidate_tokens={
+                        "StockQuery": (1, 2),
+                        "EcommerceProduct": (3, 4),
+                    },
                     transformers_version="5.5.4",
                 )
             del tokenizer.chat_template
@@ -369,7 +397,7 @@ class Top1TrainingTests(unittest.TestCase):
                     contract,
                     registry_path=model_output / "candidate_registry.json",
                     prompt_path=model_output / "router_system_prompt.md",
-                    candidate_names=("StockQuery", "Ecommerce"),
+                    candidate_names=("StockQuery", "EcommerceProduct"),
                 )
 
             (model_output / "router_system_prompt.md").write_text(
@@ -383,7 +411,7 @@ class Top1TrainingTests(unittest.TestCase):
                     contract,
                     registry_path=model_output / "candidate_registry.json",
                     prompt_path=model_output / "router_system_prompt.md",
-                    candidate_names=("StockQuery", "Ecommerce"),
+                    candidate_names=("StockQuery", "EcommerceProduct"),
                 )
 
     def test_lora_local_base_model_is_content_addressed(self) -> None:

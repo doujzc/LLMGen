@@ -12,8 +12,8 @@
     "StockAdvice": "NoAvailable",
     "StockOther": "NoAvailable",
     "StockQuery": "StockQuery",
-    "ProductOther": "NoAvailable",
-    "Ecommerce": "Ecommerce",
+    "GeneralProduct": "NoAvailable",
+    "EcommerceProduct": "Ecommerce",
     "ChitChat": "NoAvailable",
     "NoAvailable": "NoAvailable"
   }

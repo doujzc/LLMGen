@@ -5,8 +5,8 @@
     "StockAdvice",
     "StockOther",
     "StockQuery",
-    "ProductOther",
-    "Ecommerce",
+    "GeneralProduct",
+    "EcommerceProduct",
     "ChitChat",
     "NoAvailable"
   ]

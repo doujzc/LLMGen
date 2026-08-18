@@ -28,6 +28,7 @@ from llmgen.experiment import (
     json_safe,
     make_training_log_callback,
     system_snapshot,
+    training_progress_fields,
     utc_now,
     write_model_artifact_manifest,
     write_trainer_history,
@@ -864,18 +865,33 @@ def _annotate_history_stages(
     history: Sequence[Mapping[str, Any]],
     *,
     memorization_steps: int,
+    main_epochs: float,
+    total_steps: int,
 ) -> list[dict[str, Any]]:
     annotated = []
     for row in history:
         item = dict(row)
-        step = item.get("step")
-        item["stage"] = (
-            "memorization"
-            if memorization_steps
-            and isinstance(step, (int, float))
-            and int(step) <= memorization_steps
-            else "main"
+        raw_step = item.get("step")
+        step = int(raw_step) if isinstance(raw_step, (int, float)) else 0
+        progress = training_progress_fields(
+            step=step,
+            trainer_epoch=(
+                float(item["epoch"])
+                if isinstance(item.get("epoch"), (int, float))
+                else None
+            ),
+            max_steps=total_steps,
+            memorization_steps=memorization_steps,
+            main_epochs=main_epochs,
         )
+        item["trainer_epoch"] = progress["trainer_epoch"]
+        item["epoch"] = progress["main_epoch"]
+        item["main_epoch"] = progress["main_epoch"]
+        item["main_epochs"] = progress["main_epochs"]
+        item["stage"] = progress["stage"]
+        item["stage_step"] = progress["stage_step"]
+        item["stage_total_steps"] = progress["stage_total_steps"]
+        item["stage_progress"] = progress["stage_progress"]
         annotated.append(item)
     return annotated
 
@@ -1111,12 +1127,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             if training_schedule is not None:
                 print(
-                    "[top1] memorization curriculum: "
+                    "[top1] training curriculum: "
+                    "memorization="
                     f"{training_schedule['memorization']['input_rows']} rows -> "
                     f"{training_schedule['memorization']['scheduled_samples']} "
-                    "samples, "
-                    f"{training_schedule['memorization']['optimizer_steps']} "
-                    "optimizer steps; main training follows",
+                    "samples / "
+                    f"{training_schedule['memorization']['optimizer_steps']} steps; "
+                    "main="
+                    f"{training_schedule['main']['input_rows']} rows x "
+                    f"{training_schedule['main']['requested_epochs']:g} epochs -> "
+                    f"{training_schedule['main']['scheduled_samples']} samples / "
+                    f"{training_schedule['main']['expected_optimizer_steps']} steps; "
+                    "total="
+                    f"{training_schedule['total']['expected_optimizer_steps']} steps",
                     flush=True,
                 )
 
@@ -1126,6 +1149,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             transformers.TrainerCallback,
             torch,
             memorization_steps=args.memorization_steps,
+            main_epochs=args.epochs,
         )
         trainer = _trainer(
             transformers=transformers,
@@ -1193,6 +1217,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             history = _annotate_history_stages(
                 trainer.state.log_history,
                 memorization_steps=args.memorization_steps,
+                main_epochs=args.epochs,
+                total_steps=int(trainer.state.max_steps),
             )
             write_trainer_history(output_dir / "logs" / "trainer_history.jsonl", history)
             curves = build_curve_summary(history)

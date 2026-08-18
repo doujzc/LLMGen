@@ -23,6 +23,59 @@ TRAINING_RUN_SCHEMA_VERSION = 2
 EVALUATION_RUN_SCHEMA_VERSION = 1
 
 
+def training_progress_fields(
+    *,
+    step: int,
+    trainer_epoch: float | None,
+    max_steps: int,
+    memorization_steps: int,
+    main_epochs: float | None,
+) -> dict[str, Any]:
+    """Translate Trainer's combined-curriculum epoch into main-training progress."""
+
+    if step < 0 or max_steps < 0 or memorization_steps < 0:
+        raise ValueError("training progress values cannot be negative")
+    if main_epochs is not None and main_epochs <= 0:
+        raise ValueError("main_epochs must be positive")
+
+    bounded_step = min(step, max_steps) if max_steps else step
+    normalized_trainer_epoch = (
+        float(trainer_epoch)
+        if isinstance(trainer_epoch, Real) and math.isfinite(float(trainer_epoch))
+        else None
+    )
+    if memorization_steps and bounded_step <= memorization_steps:
+        stage = "memorization"
+        stage_step = bounded_step
+        stage_total_steps = memorization_steps
+        main_epoch = 0.0 if main_epochs is not None else None
+    else:
+        stage = "main"
+        stage_step = max(0, bounded_step - memorization_steps)
+        stage_total_steps = max(0, max_steps - memorization_steps)
+        if not memorization_steps:
+            main_epoch = normalized_trainer_epoch
+        elif main_epochs is not None and stage_total_steps:
+            main_epoch = main_epochs * min(stage_step / stage_total_steps, 1.0)
+        else:
+            main_epoch = None
+
+    stage_progress = (
+        min(stage_step / stage_total_steps, 1.0) if stage_total_steps else None
+    )
+    return {
+        "stage": stage,
+        "stage_step": stage_step,
+        "stage_total_steps": stage_total_steps,
+        "stage_progress": (
+            round(stage_progress, 6) if stage_progress is not None else None
+        ),
+        "main_epoch": round(main_epoch, 6) if main_epoch is not None else None,
+        "main_epochs": main_epochs,
+        "trainer_epoch": normalized_trainer_epoch,
+    }
+
+
 def utc_now() -> str:
     """Return an RFC 3339 UTC timestamp."""
 
@@ -383,12 +436,16 @@ class TrainingLogCallback:
         torch_module: Any | None = None,
         *,
         memorization_steps: int = 0,
+        main_epochs: float | None = None,
     ) -> None:
         if memorization_steps < 0:
             raise ValueError("memorization_steps cannot be negative")
+        if main_epochs is not None and main_epochs <= 0:
+            raise ValueError("main_epochs must be positive")
         self.store = store
         self.torch = torch_module
         self.memorization_steps = memorization_steps
+        self.main_epochs = main_epochs
 
     def _stage_for_next_step(self, step: int) -> str:
         if step < self.memorization_steps:
@@ -420,18 +477,40 @@ class TrainingLogCallback:
         del args, kwargs
         if not getattr(state, "is_world_process_zero", True):
             return control
-        metrics = json_safe(dict(logs or {}))
+        step = int(getattr(state, "global_step", 0))
+        progress = training_progress_fields(
+            step=step,
+            trainer_epoch=getattr(state, "epoch", None),
+            max_steps=max(0, int(getattr(state, "max_steps", 0))),
+            memorization_steps=self.memorization_steps,
+            main_epochs=self.main_epochs,
+        )
+        display_progress = {
+            "epoch": progress["main_epoch"],
+            "main_epoch": progress["main_epoch"],
+            "trainer_epoch": progress["trainer_epoch"],
+            "stage": progress["stage"],
+            "stage_progress": progress["stage_progress"],
+        }
+        if isinstance(logs, dict):
+            logs.update(display_progress)
+        metrics = json_safe({**dict(logs or {}), **display_progress})
         non_finite = [
             key
             for key, value in (logs or {}).items()
             if isinstance(value, Real) and not math.isfinite(float(value))
         ]
-        step = int(getattr(state, "global_step", 0))
         self.store.event(
             "trainer_log",
             step=step,
-            epoch=getattr(state, "epoch", None),
-            stage=self._stage_for_completed_step(step),
+            epoch=progress["main_epoch"],
+            main_epoch=progress["main_epoch"],
+            main_epochs=progress["main_epochs"],
+            trainer_epoch=progress["trainer_epoch"],
+            stage=progress["stage"],
+            stage_step=progress["stage_step"],
+            stage_total_steps=progress["stage_total_steps"],
+            stage_progress=progress["stage_progress"],
             metrics=metrics,
             system=_runtime_memory(self.torch),
             numerical_issue=non_finite or None,
@@ -495,6 +574,7 @@ def make_training_log_callback(
     torch_module: Any | None = None,
     *,
     memorization_steps: int = 0,
+    main_epochs: float | None = None,
 ) -> TrainingLogCallback:
     """Bind the logging behavior to the installed Transformers callback API.
 
@@ -515,6 +595,7 @@ def make_training_log_callback(
         store,
         torch_module,
         memorization_steps=memorization_steps,
+        main_epochs=main_epochs,
     )
 
 

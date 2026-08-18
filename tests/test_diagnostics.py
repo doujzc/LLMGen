@@ -41,17 +41,26 @@ class DiagnosticsTests(unittest.TestCase):
     def test_curve_summary_keeps_periodic_and_final_validation(self) -> None:
         curves = build_curve_summary(
             [
-                {"step": 5, "epoch": 0.5, "loss": 1.2, "grad_norm": 2.0},
-                {"step": 5, "epoch": 0.5, "eval_loss": 1.0},
-                {"step": 10, "epoch": 1.0, "final_loss": 0.8},
+                {
+                    "step": 5,
+                    "epoch": 1.0,
+                    "main_epoch": 1.0,
+                    "trainer_epoch": 0.5,
+                    "stage_progress": 0.25,
+                    "loss": 1.2,
+                    "grad_norm": 2.0,
+                },
+                {"step": 5, "epoch": 1.0, "eval_loss": 1.0},
+                {"step": 10, "epoch": 3.0, "final_loss": 0.8},
             ]
         )
 
         self.assertEqual(len(curves["validation"]), 2)
         self.assertEqual(curves["best_eval_loss"], 0.8)
         self.assertEqual(curves["validation"][-1]["source"], "final_loss")
+        self.assertEqual(curves["train"][0]["main_epoch"], 1.0)
+        self.assertEqual(curves["train"][0]["trainer_epoch"], 0.5)
 
 
 if __name__ == "__main__":
     unittest.main()
-
