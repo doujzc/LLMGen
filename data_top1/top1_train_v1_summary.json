@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "dataset_version": "top1_train_v1",
+  "seed": 20260818,
+  "rows": 1000,
+  "candidate_counts": {
+    "StockAdvice": 142,
+    "StockOther": 143,
+    "StockQuery": 143,
+    "GeneralProduct": 143,
+    "EcommerceProduct": 143,
+    "ChitChat": 143,
+    "NoAvailable": 143
+  },
+  "source_type_counts": {
+    "intent_change_augmentation": 300,
+    "promptgen_production_hardcase_reviewed": 46,
+    "promptgen_xiaoyi_reviewed": 654
+  },
+  "multi_turn_rows": 650,
+  "multi_turn_ratio": 0.65,
+  "base_profile": {
+    "rows": 700,
+    "candidate_counts": {
+      "StockAdvice": 100,
+      "StockOther": 100,
+      "StockQuery": 100,
+      "GeneralProduct": 100,
+      "EcommerceProduct": 100,
+      "ChitChat": 100,
+      "NoAvailable": 100
+    },
+    "multi_turn_rows": 350,
+    "difficulty_counts": {
+      "adversarial": 52,
+      "core": 39,
+      "core_oos": 100,
+      "edge": 8,
+      "hard": 164,
+      "hard_negative": 291,
+      "production_hardcase": 46
+    },
+    "authored_scenario_families": 107
+  },
+  "message_count_distribution": {
+    "1": 350,
+    "2": 4,
+    "3": 493,
+    "4": 2,
+    "5": 151
+  },
+  "unique_conversations": 1000,
+  "unique_current_utterances": 944,
+  "intent_change": {
+    "rows": 300,
+    "style": "direct",
+    "per_directed_pair_base": 7,
+    "directed_pair_counts": {
+      "ChitChat->EcommerceProduct": 7,
+      "ChitChat->GeneralProduct": 7,
+      "ChitChat->NoAvailable": 8,
+      "ChitChat->StockAdvice": 7,
+      "ChitChat->StockOther": 7,
+      "ChitChat->StockQuery": 7,
+      "EcommerceProduct->ChitChat": 8,
+      "EcommerceProduct->GeneralProduct": 7,
+      "EcommerceProduct->NoAvailable": 7,
+      "EcommerceProduct->StockAdvice": 7,
+      "EcommerceProduct->StockOther": 7,
+      "EcommerceProduct->StockQuery": 7,
+      "GeneralProduct->ChitChat": 7,
+      "GeneralProduct->EcommerceProduct": 8,
+      "GeneralProduct->NoAvailable": 7,
+      "GeneralProduct->StockAdvice": 7,
+      "GeneralProduct->StockOther": 7,
+      "GeneralProduct->StockQuery": 7,
+      "NoAvailable->ChitChat": 7,
+      "NoAvailable->EcommerceProduct": 7,
+      "NoAvailable->GeneralProduct": 7,
+      "NoAvailable->StockAdvice": 7,
+      "NoAvailable->StockOther": 7,
+      "NoAvailable->StockQuery": 7,
+      "StockAdvice->ChitChat": 7,
+      "StockAdvice->EcommerceProduct": 7,
+      "StockAdvice->GeneralProduct": 7,
+      "StockAdvice->NoAvailable": 7,
+      "StockAdvice->StockOther": 8,
+      "StockAdvice->StockQuery": 7,
+      "StockOther->ChitChat": 7,
+      "StockOther->EcommerceProduct": 7,
+      "StockOther->GeneralProduct": 7,
+      "StockOther->NoAvailable": 7,
+      "StockOther->StockAdvice": 7,
+      "StockOther->StockQuery": 8,
+      "StockQuery->ChitChat": 7,
+      "StockQuery->EcommerceProduct": 7,
+      "StockQuery->GeneralProduct": 8,
+      "StockQuery->NoAvailable": 7,
+      "StockQuery->StockAdvice": 7,
+      "StockQuery->StockOther": 7
+    },
+    "source_candidate_counts": {
+      "ChitChat": 43,
+      "EcommerceProduct": 43,
+      "GeneralProduct": 43,
+      "NoAvailable": 42,
+      "StockAdvice": 43,
+      "StockOther": 43,
+      "StockQuery": 43
+    },
+    "target_candidate_counts": {
+      "ChitChat": 43,
+      "EcommerceProduct": 43,
+      "GeneralProduct": 43,
+      "NoAvailable": 43,
+      "StockAdvice": 42,
+      "StockOther": 43,
+      "StockQuery": 43
+    },
+    "targets_reusing_a_base_current_utterance": 43
+  },
+  "selection_contract": {
+    "base_per_candidate": 100,
+    "base_multi_turn_per_candidate": 50,
+    "approved_legacy_candidates": {
+      "ecommerce_product_recommendation": "EcommerceProduct",
+      "no_route_chitchat": "ChitChat",
+      "no_route_non_retail": "GeneralProduct",
+      "no_route_other_finance": "StockOther",
+      "no_route_product_information": "GeneralProduct",
+      "no_route_product_other": "GeneralProduct",
+      "no_route_stock_advice": "StockAdvice",
+      "no_route_stock_research": "StockOther",
+      "stock_market_information": "StockQuery"
+    },
+    "approved_no_available_families": [
+      "oos_no_available_assistant_suggestion_not_selected",
+      "oos_no_available_common_task_followup",
+      "oos_no_available_insufficient_reference",
+      "oos_no_available_xiaoyi_common_tasks",
+      "oos_no_request_general_statement"
+    ],
+    "approved_intent_change_target_families": {
+      "NoAvailable": [
+        "oos_no_available_xiaoyi_common_tasks",
+        "oos_no_request_general_statement"
+      ]
+    },
+    "approved_intent_change_target_ids": {
+      "ChitChat": 38,
+      "NoAvailable": 37
+    },
+    "independent_intent_change_target_counts": {
+      "ChitChat": 20,
+      "NoAvailable": 10
+    },
+    "reviewed_production_rows": 46,
+    "excluded_source_splits": [
+      "dev",
+      "test"
+    ]
+  },
+  "historical_audit_reuse": {
+    "policy": "historical PromptGen audit cohorts are retired as unbiased evaluation when their source rows are reused for training",
+    "unique_audit_ids": 2816,
+    "unique_xiaoyi_seed_ids_used": 881,
+    "used_seed_ids_overlapping_audits": 612,
+    "reviewed_hard_case_rows_now_used_for_training": 46,
+    "cohort_files": [
+      {
+        "path": "../PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit.txt",
+        "sha256": "bee900c0a5f4dab430ba6ab881510434ccd808891fc6d46600b6f34fc2e0e3ef"
+      },
+      {
+        "path": "../PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_2.txt",
+        "sha256": "f6cc14966b74bc0fef938e79616b33ed0dc8c742d868acabf8e9479b1b4e5c2a"
+      },
+      {
+        "path": "../PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_3.txt",
+        "sha256": "f1ad52132da3335150affa7bcf4e44df620d8b69c504788de0943d7a426af004"
+      },
+      {
+        "path": "../PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_4.txt",
+        "sha256": "e3a38b90a84d8ce49f51cff0b5d3482e07d6cae76bd1be2d73c77fb8e5a876fd"
+      },
+      {
+        "path": "../PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_5.txt",
+        "sha256": "3b5c315700571cb99c8c5d83c98fb930273d76819122bd7a01aafa5423701fc2"
+      }
+    ]
+  },
+  "sources": {
+    "xiaoyi": {
+      "path": "../PromptGen/data/xiaoyi_intent_v1.jsonl",
+      "sha256": "8b46dccc67bdbdbc9dd4e3ab975560290852e4f397c34b6914a9d82bd2540584"
+    },
+    "hard_cases": {
+      "path": "../PromptGen/eval/combined_bad_cases_20260812.jsonl",
+      "sha256": "4bb879fdffd46c551a9845b0a233027cccb46b3e16de87485ab50e4cce472b56"
+    },
+    "semantic_policy": {
+      "path": "../PromptGen/intent_router/system_prompt.md",
+      "sha256": "1192a612f2e1c95f781a47edaad401c198f0f998cbc5a092b79370fe84c963d2",
+      "candidate_renames": {
+        "ProductOther": "GeneralProduct",
+        "Ecommerce": "EcommerceProduct"
+      },
+      "task_clarifications": {
+        "EcommerceProduct": "ordinary goods generally available through ecommerce; exclude vehicles, property, medicine, and services",
+        "StockQuery": "factual lookup only; future prediction, selection, and investment advice are StockAdvice"
+      }
+    },
+    "candidate_registry": {
+      "path": "configs/top1_candidates.json",
+      "sha256": "a88f463d2c43e5283e0591e19f20f5523195d0c01be51a6c076522c4f28a0f29"
+    }
+  },
+  "output": {
+    "path": "data_top1/top1_train_v1.jsonl",
+    "sha256": "0106ce5b5e2fa7c781bca556b7996b698d2b2eb3dc6011f9897fce3ca70bf10d"
+  }
+}

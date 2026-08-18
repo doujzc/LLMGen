@@ -38,3 +38,19 @@ uv run --no-sync python scripts/build_top1_intent_change.py \
 输出 `top1_intent_change_v1.jsonl` 和相邻的 summary。JSONL 使用标准 Top1 训练格式，
 可在构建最终 `train.jsonl` 时与主训练数据合并；两份生成文件继续由 `.gitignore`
 排除，不进入 Git。
+
+## Reviewed 1,000-row training set
+
+`scripts/build_top1_training_v1.py` 按 PromptGen 当前七候选语义边界构造均衡训练集。
+它不会粗粒度映射整个旧数据集：只选取与当前 taxonomy 一致的场景族，并加入 46 条
+重新核对过的生产难例。基础数据每类 100 条且单轮/多轮各半；随后覆盖全部 42 个有向
+候选切换，共加入 300 条直接 IntentChange，最终得到 1,000 条。
+
+```bash
+uv run --no-sync python scripts/build_top1_training_v1.py
+```
+
+输出 `top1_train_v1.jsonl` 和 `top1_train_v1_summary.json`。这两个版本化文件作为
+可复现实验数据提交到仓库；其它临时训练数据仍由 `.gitignore` 排除。PromptGen 的
+历史 audit cohort 一旦被该训练集复用，就不能再作为无偏评测集；summary 会明确记录
+复用数量和所有源文件哈希。
