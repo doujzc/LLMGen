@@ -21,7 +21,7 @@ if [[ -n "$TOP1_RESUME" && -z "$TOP1_OUTPUT_DIR" && -z "$TOP1_RUN_ID" ]]; then
 fi
 if [[ -z "$TOP1_OUTPUT_DIR" ]]; then
   if [[ -z "$TOP1_RUN_ID" ]]; then
-    RUN_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    RUN_TIMESTAMP="$(TZ=Asia/Shanghai date +%Y-%m-%dT%H-%M-%S%z)"
     GIT_REVISION="$(git rev-parse --short=8 HEAD 2>/dev/null || true)"
     TOP1_RUN_ID="$RUN_TIMESTAMP"
     if [[ -n "$GIT_REVISION" ]]; then

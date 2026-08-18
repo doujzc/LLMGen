@@ -100,11 +100,12 @@ bash scripts/train_top1.sh
 默认输出目录不是固定名称，而是：
 
 ```text
-runs/top1/<experiment_name>/<UTC时间>-<git短SHA>/
+runs/top1/<experiment_name>/2026-08-18T10-23-26+0800-<git短SHA>/
 ```
 
 `TOP1_EXPERIMENT_NAME` 用于归组同一实验，`TOP1_RUN_ID` 标识一次训练；也可以通过
-`TOP1_OUTPUT_DIR` 显式给出完整 run 目录。
+`TOP1_OUTPUT_DIR` 显式给出完整 run 目录。默认 run ID 以固定宽度的北京时间开头，
+因此同一 experiment 下的输出目录按名称排序时也会按创建时间排序。
 
 ## 训练语义
 
@@ -259,6 +260,8 @@ runs/evaluations/top1/suites/<suite_id>/members.jsonl
 和 history ablation 会混入签名。`predictions.jsonl` 同时保留原始候选、路径置信度、
 是否触发阈值及最终 `backend_decision`；
 `summary.json` 的 `top1_accuracy` 使用后端业务口径，并另存 `raw_candidate_accuracy`。
+默认 `evaluation_id` 同样以固定宽度的北京时间开头，所以同一模型的评测目录按名称排序
+时会按创建时间排序。
 
 新训练 bundle 会自动携带 decision policy，并将受约束生成契约写入 schema 4 manifest。
 评测也兼容 prompt/tokenizer 契约一致的 schema 2/3 模型：schema 3 的旧 policy 会在内存中

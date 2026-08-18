@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.metadata
 import json
@@ -21,6 +21,7 @@ from .top1 import Top1DataError, sha256_file, write_json, write_jsonl
 
 TRAINING_RUN_SCHEMA_VERSION = 2
 EVALUATION_RUN_SCHEMA_VERSION = 1
+BEIJING_TIMEZONE = timezone(timedelta(hours=8))
 
 
 def training_progress_fields(
@@ -84,10 +85,10 @@ def utc_now() -> str:
     )
 
 
-def compact_utc_now() -> str:
-    """Return a sortable timestamp suitable for an artifact directory name."""
+def compact_beijing_now() -> str:
+    """Return a sortable Beijing timestamp for an artifact directory name."""
 
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    return datetime.now(BEIJING_TIMEZONE).strftime("%Y-%m-%dT%H-%M-%S.%f%z")
 
 
 def canonical_sha256(payload: Mapping[str, Any]) -> str:

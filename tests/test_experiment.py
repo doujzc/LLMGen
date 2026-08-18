@@ -9,6 +9,7 @@ import unittest
 from llmgen.experiment import (
     RunStore,
     TrainingLogCallback,
+    compact_beijing_now,
     load_and_verify_model_artifact,
     make_training_log_callback,
     training_progress_fields,
@@ -18,6 +19,14 @@ from llmgen.top1 import Top1DataError, read_jsonl
 
 
 class ExperimentTests(unittest.TestCase):
+    def test_compact_artifact_timestamp_uses_beijing_timezone(self) -> None:
+        timestamp = compact_beijing_now()
+
+        self.assertRegex(
+            timestamp,
+            r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{6}\+0800$",
+        )
+
     def test_training_callback_inherits_transformers_lifecycle_defaults(self) -> None:
         class FakeTrainerCallback:
             def on_init_end(

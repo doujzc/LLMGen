@@ -19,7 +19,7 @@ from llmgen.experiment import (
     RunStore,
     append_jsonl,
     canonical_sha256,
-    compact_utc_now,
+    compact_beijing_now,
     directory_file_manifest,
     git_snapshot,
     load_and_verify_model_artifact,
@@ -678,7 +678,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     }
     evaluation_signature = canonical_sha256(semantic_config)
     evaluation_id = _safe_component(
-        args.evaluation_id or f"{compact_utc_now()}-{evaluation_signature[:8]}",
+        args.evaluation_id or f"{compact_beijing_now()}-{evaluation_signature[:8]}",
         label="evaluation_id",
     )
     suite_id = (
