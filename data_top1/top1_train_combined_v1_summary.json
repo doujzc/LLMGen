@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "dataset_version": "top1_train_combined_v1",
+  "rows": 1800,
+  "candidate_counts": {
+    "ChitChat": 257,
+    "EcommerceProduct": 257,
+    "GeneralProduct": 257,
+    "NoAvailable": 257,
+    "StockAdvice": 257,
+    "StockOther": 258,
+    "StockQuery": 257
+  },
+  "source_dataset_counts": {
+    "top1_controlled_multiturn_v1": 800,
+    "top1_train_v1": 1000
+  },
+  "source_type_counts": {
+    "intent_change_augmentation": 300,
+    "llm_controlled_multiturn": 800,
+    "promptgen_production_hardcase_reviewed": 46,
+    "promptgen_xiaoyi_reviewed": 654
+  },
+  "phenomenon_counts": {
+    "assistant_distractor": 56,
+    "base": 700,
+    "clarification_revision": 70,
+    "contextual_follow_up": 98,
+    "intent_change": 720,
+    "progressive_reveal": 128,
+    "rambling": 28
+  },
+  "single_turn_rows": 350,
+  "multi_turn_rows": 1450,
+  "multi_turn_ratio": 0.8055555555555556,
+  "message_count_distribution": {
+    "1": 350,
+    "2": 4,
+    "3": 493,
+    "4": 2,
+    "5": 428,
+    "7": 263,
+    "9": 260
+  },
+  "unique_ids": 1800,
+  "unique_conversations": 1800,
+  "unique_current_utterances": 1735,
+  "reused_current_utterance_groups": 60,
+  "current_utterance_label_conflicts": 0,
+  "sources": [
+    {
+      "path": "data_top1/top1_train_v1.jsonl",
+      "sha256": "0106ce5b5e2fa7c781bca556b7996b698d2b2eb3dc6011f9897fce3ca70bf10d",
+      "rows": 1000
+    },
+    {
+      "path": "data_top1/generated/top1_controlled_multiturn_v1/train.jsonl",
+      "sha256": "60e64af89738e8df991c2e203da2089be254842cbf73032d1da9dd83e6ad4021",
+      "rows": 800
+    }
+  ],
+  "output": {
+    "path": "data_top1/top1_train_combined_v1.jsonl",
+    "sha256": "d43bd08e31a3d7ca56c78ff2b1f7c9a1742522de02cd249f7b948d4c13c39b49"
+  }
+}

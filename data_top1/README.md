@@ -83,3 +83,20 @@ uv run --no-sync python scripts/generate_top1_multiturn.py \
 TOP1_TRAIN_DATA=data_top1/generated/top1_controlled_multiturn_v1/train.jsonl \
   bash scripts/train_top1.sh
 ```
+
+## 可直接训练的 combined v1
+
+`scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集和 controlled
+multiturn 800 条增强集。构建时拒绝重复 ID、完全重复对话、非法候选和源数据版本漂移，
+并记录两份输入及最终输出的 SHA256。
+
+```bash
+uv run --no-sync python scripts/build_top1_combined_v1.py
+```
+
+输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 1,800 条。`configs/top1.env`
+已将它设为默认训练数据，因此构建后可直接启动：
+
+```bash
+bash scripts/train_top1.sh
+```
