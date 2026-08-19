@@ -11,6 +11,7 @@ from llmgen.inspection import (
     compare_evaluation_runs,
     discover_evaluation_runs,
     discover_training_runs,
+    evaluation_statistics,
     load_evaluation_run,
     load_training_run,
 )
@@ -240,6 +241,87 @@ class InspectionTests(unittest.TestCase):
             sum(float(row["confidence"]) for row in scores),
             1.0,
         )
+
+    def test_evaluation_statistics_are_projected_for_dashboard_charts(self) -> None:
+        statistics = evaluation_statistics(
+            {
+                "rows": 10,
+                "top1_accuracy": 0.8,
+                "macro_recall_observed_candidates": 0.75,
+                "per_candidate": {
+                    "A": {
+                        "support": 6,
+                        "predicted": 5,
+                        "precision": 0.8,
+                        "recall": 2 / 3,
+                    }
+                },
+                "conversation_strata": {
+                    "single_turn": {
+                        "rows": 4,
+                        "accuracy": 0.75,
+                        "backend_accuracy": 1.0,
+                    }
+                },
+                "prompt_fitting_strata": {},
+                "calibration": {
+                    "expected_calibration_error": 0.12,
+                    "bins": [
+                        {
+                            "lower": 0.8,
+                            "upper": 0.9,
+                            "rows": 4,
+                            "accuracy": 0.75,
+                            "confidence": 0.84,
+                        }
+                    ],
+                },
+                "routing_policy": {"output_route_coverage": 0.6},
+                "history_ablation": {"rows": 3, "history_helped": 1},
+                "backend": {
+                    "accuracy": 0.9,
+                    "per_label": {
+                        "Available": {
+                            "support": 5,
+                            "predicted": 5,
+                            "precision": 0.8,
+                            "recall": 0.8,
+                        }
+                    },
+                    "available_oos": {
+                        "unsafe_oos_accept_rate": 0.1,
+                        "available_false_reject_rate": 0.2,
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(statistics["kpis"][0]["value"], 10)
+        self.assertEqual(len(statistics["candidate_metrics"]), 2)
+        self.assertEqual(statistics["strata"][0]["scope"], "对话")
+        self.assertEqual(len(statistics["calibration"]), 2)
+        self.assertEqual(statistics["calibration_support"][0]["rows"], 4)
+
+    def test_evaluation_visual_helpers_escape_labels_and_highlight_errors(self) -> None:
+        heatmap = debug_top1._confusion_heatmap_html(
+            {"A<script>": {"A<script>": 3, "B": 1}},
+            title="Matrix",
+        )
+        kpis = debug_top1._kpi_html(
+            (
+                {
+                    "name": "Unsafe <rate>",
+                    "value": 0.125,
+                    "format": "percent",
+                    "tone": "danger",
+                },
+            )
+        )
+
+        self.assertNotIn("<script>", heatmap)
+        self.assertIn("220,38,38", heatmap)
+        self.assertIn("12.50%", kpis)
+        self.assertIn("Unsafe &lt;rate&gt;", kpis)
 
     @staticmethod
     def _snapshot(root: Path) -> dict[str, bytes]:

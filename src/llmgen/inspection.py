@@ -28,15 +28,20 @@ def discover_evaluation_runs(root: str | Path) -> list[dict[str, Any]]:
             model = _mapping(manifest.get("model"))
             semantic = _mapping(manifest.get("semantic_inference"))
             available_oos = _mapping(summary.get("available_oos"))
+            evaluation_id = manifest.get("evaluation_id")
+            model_id_short = _short_identifier(model.get("model_id"))
             records.append(
                 {
+                    "run_ref": _run_reference(model_id_short, evaluation_id),
                     "run_dir": str(run_dir),
                     "created_at": manifest.get("created_at"),
                     "state": status.get("state", "UNKNOWN"),
-                    "evaluation_id": manifest.get("evaluation_id"),
+                    "evaluation_id": evaluation_id,
                     "suite_id": manifest.get("suite_id"),
                     "model_id": model.get("model_id"),
+                    "model_id_short": model_id_short,
                     "dataset": dataset.get("path"),
+                    "dataset_name": _path_name(dataset.get("path")),
                     "dataset_sha256": dataset.get("sha256"),
                     "decoding": semantic.get("decoding_mode"),
                     "route_threshold": semantic.get("route_threshold"),
@@ -185,6 +190,94 @@ def load_evaluation_run(
         "matching_rows": matching_rows,
         "displayed_rows": len(projected),
         "cases": projected,
+    }
+
+
+def evaluation_statistics(metrics: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one metrics payload into chart-ready read-only statistics."""
+
+    backend = _mapping(metrics.get("backend"))
+    available_oos = _mapping(backend.get("available_oos"))
+    routing = _mapping(metrics.get("routing_policy"))
+    calibration = _mapping(metrics.get("calibration"))
+    kpis = [
+        {
+            "name": "样本数",
+            "value": metrics.get("rows"),
+            "format": "integer",
+            "tone": "neutral",
+        },
+        {
+            "name": "后端准确率",
+            "value": backend.get("accuracy"),
+            "format": "percent",
+            "tone": "primary",
+        },
+        {
+            "name": "候选准确率",
+            "value": metrics.get("top1_accuracy"),
+            "format": "percent",
+            "tone": "neutral",
+        },
+        {
+            "name": "候选 Macro Recall",
+            "value": metrics.get("macro_recall_observed_candidates"),
+            "format": "percent",
+            "tone": "neutral",
+        },
+        {
+            "name": "OOS 误接收率",
+            "value": available_oos.get("unsafe_oos_accept_rate"),
+            "format": "percent",
+            "tone": "danger",
+        },
+        {
+            "name": "可用请求误拒率",
+            "value": available_oos.get("available_false_reject_rate"),
+            "format": "percent",
+            "tone": "warning",
+        },
+        {
+            "name": "最终路由覆盖率",
+            "value": routing.get("output_route_coverage"),
+            "format": "percent",
+            "tone": "neutral",
+        },
+        {
+            "name": "ECE",
+            "value": calibration.get("expected_calibration_error"),
+            "format": "decimal",
+            "tone": "neutral",
+        },
+    ]
+    return {
+        "kpis": kpis,
+        "candidate_metrics": _classification_metric_rows(
+            _mapping(metrics.get("per_candidate")),
+            name_field="candidate",
+        ),
+        "backend_metrics": _classification_metric_rows(
+            _mapping(backend.get("per_label")),
+            name_field="backend",
+        ),
+        "strata": _strata_rows(metrics),
+        "calibration": _calibration_rows(calibration),
+        "calibration_support": _calibration_support_rows(calibration),
+        "routing": _named_numeric_rows(
+            {
+                "原始路由覆盖率": routing.get("raw_route_coverage"),
+                "最终路由覆盖率": routing.get("output_route_coverage"),
+                "阈值拒绝率": routing.get("threshold_abstention_rate"),
+                "拒绝后候选准确率": routing.get("selective_candidate_accuracy"),
+                "Available Precision": available_oos.get("available_precision"),
+                "Available Recall": available_oos.get("available_recall"),
+                "OOS Precision": available_oos.get("oos_precision"),
+                "OOS Recall": available_oos.get("oos_recall"),
+            }
+        ),
+        "history_ablation": _named_numeric_rows(
+            _mapping(metrics.get("history_ablation"))
+        ),
     }
 
 
@@ -351,6 +444,138 @@ def _optional_json(path: Path) -> dict[str, Any]:
 
 def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _short_identifier(value: Any, length: int = 12) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value if len(value) <= length else value[:length]
+
+
+def _path_name(value: Any) -> str | None:
+    return Path(value).name if isinstance(value, str) and value else None
+
+
+def _run_reference(model_id: Any, evaluation_id: Any) -> str:
+    model = str(model_id or "unknown-model")
+    evaluation = str(evaluation_id or "unknown-evaluation")
+    return f"{model}/{evaluation}"
+
+
+def _classification_metric_rows(
+    values: Mapping[str, Any],
+    *,
+    name_field: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    for name, raw_metrics in values.items():
+        item = _mapping(raw_metrics)
+        for metric in ("precision", "recall"):
+            value = item.get(metric)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            rows.append(
+                {
+                    name_field: str(name),
+                    "metric": metric,
+                    "value": float(value),
+                    "support": item.get("support"),
+                    "predicted": item.get("predicted"),
+                }
+            )
+    return rows
+
+
+def _strata_rows(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
+    groups = (
+        ("对话", _mapping(metrics.get("conversation_strata"))),
+        ("Prompt", _mapping(metrics.get("prompt_fitting_strata"))),
+    )
+    rows = []
+    for scope, values in groups:
+        for name, raw_metrics in values.items():
+            item = _mapping(raw_metrics)
+            for metric in ("accuracy", "backend_accuracy"):
+                value = item.get(metric)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                rows.append(
+                    {
+                        "scope": scope,
+                        "stratum": str(name),
+                        "label": f"{scope} · {name}",
+                        "metric": metric,
+                        "value": float(value),
+                        "rows": item.get("rows"),
+                    }
+                )
+    return rows
+
+
+def _calibration_rows(calibration: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    bins = calibration.get("bins")
+    if not isinstance(bins, list):
+        return rows
+    for raw_bin in bins:
+        item = _mapping(raw_bin)
+        lower = item.get("lower")
+        upper = item.get("upper")
+        if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
+            continue
+        label = f"{float(lower):.1f}–{float(upper):.1f}"
+        midpoint = (float(lower) + float(upper)) / 2
+        for metric in ("accuracy", "confidence"):
+            value = item.get(metric)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            rows.append(
+                {
+                    "bin": label,
+                    "midpoint": midpoint,
+                    "metric": metric,
+                    "value": float(value),
+                    "rows": item.get("rows"),
+                }
+            )
+    return rows
+
+
+def _calibration_support_rows(
+    calibration: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    bins = calibration.get("bins")
+    if not isinstance(bins, list):
+        return []
+    rows = []
+    for raw_bin in bins:
+        item = _mapping(raw_bin)
+        lower = item.get("lower")
+        upper = item.get("upper")
+        count = item.get("rows")
+        if (
+            not isinstance(lower, (int, float))
+            or not isinstance(upper, (int, float))
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+        ):
+            continue
+        rows.append(
+            {
+                "bin": f"{float(lower):.1f}–{float(upper):.1f}",
+                "rows": count,
+            }
+        )
+    return rows
+
+
+def _named_numeric_rows(values: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        rows.append({"metric": str(name), "value": value})
+    return rows
 
 
 def _integer(value: Any, *, default: int) -> int:

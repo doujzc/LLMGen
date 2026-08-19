@@ -327,8 +327,9 @@ ssh -L 7860:127.0.0.1:7860 <nvidia-server>
 
 - Case 调试：单轮/多轮临时推理，分开显示原始候选和后端决策；按需运行历史消融与
   七候选路径评分，并检查 checkpoint 内置 system prompt、最终模型输入和 token 裁剪。
-- Evaluation 浏览：读取现有 run，过滤错误、查看两套混淆矩阵、回查原始对话，并对比
-  同一模型的多次评测；只有数据 SHA256 一致时才进行逐 Case 对比。
+- Evaluation 浏览：点击 run 直接加载详情，展示关键 KPI、候选/后端 precision-recall、
+  对话与 prompt 分层、置信度校准、路由/OOS 统计和两套可视化混淆矩阵；支持过滤错误、
+  回查原始对话，并对比同一模型的多次评测。只有数据 SHA256 一致时才逐 Case 对比。
 - Training 浏览：读取状态、summary、loss/LR/grad norm 曲线、manifest 和最近事件。
 
 模型采用懒加载，内存中只保留一个 checkpoint。关闭页面后，手工输入的 Case 不会保存；
