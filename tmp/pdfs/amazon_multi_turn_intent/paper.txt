@@ -1,0 +1,1109 @@
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+             Building Multi-turn Intent Classification with LLM-based Labeling    
+                                                                                  
+                                                                                  
+                       BiancenXie ,KaiqiBian,JaiRanjanSinghGusain                 
+                                ∗        ∗                                        
+                         ManikandarajanRamanathan,RajMaragoud                     
+                                      Amazon                                      
+                  {biancen, kbbian, jgusain, mramnat, maragoud}@amazon.com        
+                                                                                  
+                                                                                  
+                                                                                  
+                      Abstract            In recent years, LLMs have demonstrated strong
+                                          potentialforimprovingintentdetectionduetotheir
+            Intent classification is essential for customer                       
+                                          few-shot generalization and broad world knowl-
+            service routing, connecting customers to the                          
+                                          edge(Zhaoetal.,2023;Aroraetal.,2024). How-
+            appropriateagentsandreducinghandlingtime                              
+            andoperationalcost. Developingareal-world ever, deploying intent models that achieve both
+            multi-turnintentclassificationsystemischal- high accuracy and low latency at scale remains
+            lengingduetocomplexintenttaxonomies,dy- challengingincustomerservice. 
+            namic intent switching within conversations,                          
+                                          First, scalability becomes a bottleneck as busi-
+            and limited labeled training data. To ad-                             
+                                          nessdomainsorproductlinesexpand.Inreal-world
+            dressthesechallenges,weproposeascalable                               
+                                          e-commerce systems, a high-level intent such as
+            multi-turnintentclassificationframeworkfore-                          
+            commercecustomerservicethatmodelsintent “Cancel”or“Refund”maybeassociatedwithmulti-
+            alongmultipledimensions.WeintroduceLLM- pleproducts. Modelingintentsataproduct-specific
+            basedlabelingstrategiestoannotaterealcus- levelleadstolabelexplosionandincreasingmodel
+            tomertranscriptsatscaleandaugmenttraining complexity. Moreover, maintaining a consistent
+            withLLM-simulatedmulti-turndialoguesthat                              
+                                          intent taxonomy and obtaining sufficient labeled
+            expandcoverageoftopicandintentswitches,                               
+                                          training data becomes difficult at scale (Qi et al.,
+            whicharerareinexistingtranscripts. Through                            
+                                          2021; Liu et al., 2024a). Additional scalability
+            extensiveexperiments,wefindthatexplanation-                           
+                                          challengesarisefromcompoundintents. Userut-
+            guided labeling with a self-critique step pro-                        
+            ducesthemostaccuratetraininglabels. Fine- terances may express multiple, non-mutually ex-
+            tuned models built on a RoBERTa backbone clusive intents, such as requesting an order can-
+            outperform zero-shot LLM prompting while cellationwhilereportinganunrecognizedcharge.
+            achievingsubstantiallylowerinferencelatency.                          
+                                          Traditional flat intent classifiers are ill-suited to
+            Finally, we show that a hybrid approach that                          
+                                          this.                                   
+            combines the fine-tuned classifier with LLM                           
+                                          Second, context carryover and intent switch-
+            promptingfurtherimprovesaccuracyoverei-                               
+            thercomponentalone. Overall,ourresultspro- ing increase the difficulty of intent detection in
+            vide practical guidance for building and de- multi-turn conversations. The domain of user in-
+            ployinghigh-accuracy,low-latency,large-scale tent might be inferred from prior context, while
+            multi-turnintentclassificationsystems. usergoalscanshiftinmid-dialogue. Forexample,
+                                          acustomermayinitiallyseekhelptroubleshooting
+          1 Introduction                                                          
+                                          aserviceissueandlatershifttorequestingservice
+          Agenticcustomerservicehasbecomeincreasingly cancellation. Withoutmodelingconversationalhis-
+          important for e-commerce platforms (Cui et al., tory,asystemmaymisattributethecurrentintent
+          2017;Zhouetal.,2023). Differentagents, either orfailtolinkittotherelevantcontext. Priorwork
+          LLMs(LargeLanguageModels)orworkflows,are hasincorporatedcontextualsignalsforintentpre-
+          designed or trained to handle specific customer diction(Wu et al., 2021; Nandi et al., 2024), but
+          issues. Intentdetectionisthereforecrucialforeffi- typicallyassumesaccesstocomprehensivelabeled
+          cientrouting. Intentclassificationfailuresmaylead multi-turn data or context features. Addressing
+          toirrelevantresponsesorunnecessarilyescalateto topic shifts and intent switches in real customer-
+          humanagents,increasingoperationalcostandde- serviceapplicationsremainsunderexplored.
+          gradingcustomerexperience(Qietal.,2021).                                
+                                          Finally,low-latencyrequirementsconstrainprac-
+            ∗Bothauthorscontributedequally. tical deployment in production. Although LLMs
+                                        68                                        
+  ProceedingsoftheSecondWorkshoponCustomizableNLP:ProgressandChallengesinCustomizingNLPforaDomain,Application,Group,orIndividual
+                                 (CustomNLP4U),pages68–83                         
+                         July3,2026©2026AssociationforComputationalLinguistics    
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          havestrongpotentialforintentclassification,high centworkshowsLLMscanactasusersimulators
+          latencymakesthemunsuitableforreal-timeinfer- (BalogandZhai,2025;Balogetal.,2025). Unlike
+          ence. Productiondeploymentsmustthereforebal- simulators aimed at general task completion, our
+          ance classification accuracy with computational simulatortargetsreal-worldmulti-turnbehaviors—
+          efficiency(Liuetal.,2024a).     especiallyintentswitching—usingcontroltomain-
+          Toaddressthesechallenges,we(i)decomposein- taincoherenceandconstraingeneration.
+          tentunderstandingintothreedimensions—Domain,                            
+                                          2.3 Chain-of-Thoughtandself-critique    
+          Intent,andIssue—sothataddingnewdomainsor                                
+                                              reasoning                           
+          intentsexpandsonlytherelevantdimension. This                            
+          reducestheeffectivelabelspaceandsupportscom- Chain-of-Thought and self-refinement improve
+          pound intent modeling by separating actionable LLM outputs via intermediate reasoning and it-
+          intent types (e.g., “Cancel”, “Informational In- erative revision (Wei et al., 2022; Kojima et al.,
+          quiry”)fromissueattributes(e.g.,“Unrecognized 2022; Madaan et al., 2023; Shinn et al., 2023).
+          Charge”, “Sync/Download”). We then (ii) fine- Weapplytheseideastotranscriptlabeling(rather
+          tunelightweightmodelsleveragingvariousLLMs- thaninference-timein-contextlearning)togenerate
+          based methods to generate labels from customer higher-qualitytrainingdataforlow-latencyintent
+          agent transcripts at scale. The model processes models. Compacttransformerstudentsfurthersup-
+          the concatenation of the dialogue history and the portefficientdeployment(Sanhetal.,2019;Jiao
+          currentturn,enablingcontext-aware,turn-levelin- etal.,2020;Wangetal.,2020).
+          tent detection. Finally, (iii) we augment training                      
+                                          3  Preliminary                          
+          datawithLLM-simulatedmulti-turndialoguesthat                            
+          injecttopicandintentswitches—patternsthatare We formulate multi-turn intent classification as a
+          rareintranscriptsbutcriticalforrobustness. multi-class text classification problem. Given a
+                                          conversationhistory andthecustomer’scurrent
+          2 Relatedwork                                C                          
+                                          utteranceq,theobjectiveistopredictanintentlabel
+                                          t from a predefined set T = t ,...,t using a
+          2.1 Multi-turnintentclassification                 1    k               
+                                                            {      }              
+                                          model . The predicted intent tˆis obtained by
+          Multi-turn intent classification incorporates dia- M                    
+                                          maximizingtheposteriorprobability:      
+          logue context to improve intent prediction. Prior                       
+          work uses contextual encoders for customer ser- tˆ= argmax P(t q, ;θ), (1)
+                                                      t T   | C                   
+          viceintentdetectionandmodelscross-turndepen- ∈                          
+          denciesviahierarchicalorgraph-basedstructures whereP(t q, ;θ)denotestheprobabilityofin-
+                                                 | C                              
+          (Wang et al., 2021; Senese et al., 2020; Liu and tenttconditionedon(q, ),parameterizedbyθ of
+                                                         C                        
+          Chen,2019;Qinetal.,2021). Wefollowthisline . AsmentionedinSection1,incorporatingboth
+                                          M                                       
+          butfocusondata-drivenrobustnesstocontextcar- q and in our model is essential because of con-
+                                              C                                   
+          ryoverandintentswitchingviacontrollablesimu- text carryover and intent switching in multi-turn
+          lation.                         settings.                               
+          LLMs have also been explored for intent detec- The number of intents k grow rapidly as product
+          tionthroughpromptingandhybridrouting(Arora linesexpand. Toaddressthescalabilityissue,we
+          et al., 2024), as well as retrieval-augmented or proposeanontologythatcapturescomplementary
+          demonstration-basedpipelinesforfew-shotintent aspects of intent understanding (Figure 1): Do-
+          prediction(Yuetal.,2021;Zhangetal.,2025;Liu main,representingproductcategories;Intent,dis-
+          etal.,2024b). Incontrast,weprimarilyuseLLMs tinguishingconversationalintentsfromactionable
+          forautomaticlabelinganddatagenerationtotrain intents;andIssue,representingslot-levelattributes
+          lightweightmodels,withoptionalLLMfallbackat associated with each intent. This decomposition
+          inferencetime.                  reduces classification complexity as well as sup-
+                                          portscompoundintentmodelingnaturallybyde-
+          2.2 Usersimulation                                                      
+                                          couplingintentidentificationfromissuedetection,
+          User simulation is widely used for synthetic dia- allowingthesystemtojointlypredictanintentand
+          loguegenerationandsystemevaluation,including itsassociatedissue.        
+          agenda-basedandneuralapproaches(Schatzmann We train separate models to classify Domain, In-
+          etal.,2007;Linetal.,2021;Sunetal.,2022). Re- tent, and Issue. Their outputs are then com-
+                                        69                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                              Figure1: Intentclassificationontology.              
+                                                                                  
+                                                                                  
+          posed and mapped to downstream actions, in- WeprompttheLLMtoinferthecustomer’sintent
+          cludingworkflows,LLM-basedagents,orhuman- given the current user query q and its associated
+                                                             i                    
+          agent hand-offs (Figure 2). Considering the la- conversationhistoryC . Thepromptprovidesthe
+                                                        i                         
+          tencyrequirement,weleverageafoundationmodel, taxonomy along with descriptions of each label,
+          Claude 3.7 Sonnet1, to generate high-quality la- andinstructstheLLMtooutputasinglelabelac-
+          beledtrainingdata. Inthefollowingsections,we companied by a free-form explanation. This ex-
+          introduceandevaluatemultipleLLM-basedlabel- planation cites the key evidence in both the cur-
+          inganddataaugmentationstrategiesthatleverage rentqueryq andthecontextC thatsupportsthe
+                                                  i          i                    
+          existingtranscriptdatatofinetuneourmodelsun- model’sdecision. Wehypothesizethataskingthe
+          derthisontology.                LLMtoarticulateitsreasoningandsupportingevi-
+                                          denceleadstomoreaccurateintentclassification
+                                          byitself.                               
+                                          Two-stagelabelingwithself-critique      
+                                          Weadoptatwo-stagelabelingstrategythatdecom-
+                                          poses intent annotation into an initial prediction
+                                          followedbyanexplicitself-critiqueandrevision.
+                                          Stage1appliesthesingle-stagereasoning-guided
+                                          labeling procedure described in the previous sec-
+            Figure2: Intentdetectionsystemarchitecture tion, producinganintentlabelwithabriefexpla-
+                                          nation. InStage2,theLLMisgiventheoriginal
+                                          inputtogetherwiththeStage-1predictionandratio-
+          4 Method                        nale,andispromptedtoactasacritic. Itassesses
+                                          consistencywiththedialogueevidenceandintent
+          4.1 Labelingstrategyforintentclassification                             
+                                          taxonomyinStage-1,flagsfailures(e.g.,reliance
+          In real conversations, either the agent or the cus- on spurious keywords, missed contextual signals
+          tomermayconsecutivelyinputseveralutterances. inC ,confusionbetweencloselyrelatedintents,or
+                                             i                                    
+          However, the dialogue between a customer and hallucinatedassumptions),andtheneitherconfirms
+          a chatbot is typically conducted in an alternat- theStage-1labelorrevisesitwithashortjustifica-
+          ing manner. To construct data that aligns with tion. Stage2mustexplicitlyindicatewhetherthe
+          the chatbot format, we merge consecutive utter- labeliskeptorrevised;whenrevised,itmustcite
+          ances from the same role into a single unit, re- minimalsupportingevidence(e.g.,aspecificutter-
+          sultinginadialogued = [q 1 ,a 1 ,...,q n ,a n ]where anceinC i orphraseinq i )motivatingthecorrection.
+          q i represents the user’s current query and a i rep- Wehypothesizethatthistwo-stageself-critiqueim-
+          resents the agent’s response. For a query q i , we proves accuracy by correcting errors introduced
+          defineitscontextorconversationhistoryasC i = duringinitialreasoning.    
+          [q ,a ,...,q ,a ]. In the following, we pro-                            
+           1 1   i 1 i 1                  Toevaluateourhypothesis,wemanuallyreviewed
+                 −   −                                                            
+          posedifferentlabelgenerationstrategiesforbuild-                         
+                                          morethan5,500randomlysampledtestinstances
+          ingourintentclassificationmodels.                                       
+                                          andreporttheresultsinTable1. Thesingle-stage
+          Single-stagereasoning-guidedlabeling andtwo-stagestrategiesproducedidenticalannota-
+                                          tionsforapproximately87%ofsamples,andthese
+            1https://www.anthropic.com/news/                                      
+          claude-3-7-sonnet               were largely accurate. In the remaining 13% of
+                                        70                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          caseswherethestrategiesdisagreed,thetwo-stage                           
+          approachwascorrectinthemajorityofinstances,                             
+          suggestingthatthesecond-stagereassessmentre-                            
+          duceshallucinationsandoverallannotationerrors.                          
+                                                                                  
+          4.2 Dataaugmentationstrategyforintent                                   
+             classification                                                       
+          Althoughoure-commerceplatformprovidesaccess                             
+          tomillionsofrealcustomerservicetranscriptsbe-                           
+          tweenagentandcustomersthatcanbeleveragedto                              
+          trainmodels,thesetranscriptsaretypicallysingle- Figure3: Multi-turnconversationsimulator
+          topic and follow a largely linear progression. In                       
+          contrast,customer–botinteractionsarepotentially                         
+                                          a threshold τ, we accept the lightweight model’s
+          dynamic: usersmayswitchintentsorchangegoals                             
+                                          prediction. Otherwise,weextractthemodel’stop
+          inasinglesession. Consequently,modelstrained                            
+                                          K intentcandidatesandinvokeanLLMtoperform
+          solelyonrealtranscriptsoftenfailtogeneralizeto                          
+                                          constrained disambiguationoverthiscandidateset.
+          thesecomplexpatterns.                                                   
+                                          Thishybriddesignroutesmostintentdetectionre-
+          Data generation using dialogue simulator: To                            
+                                          queststhroughthelow-latencylightweightmodel,
+          bridge this gap, we develop a multi-turn dia-                           
+                                          while reserving LLM calls for a small subset of
+          logue generation framework that simulates real-                         
+                                          ambiguous cases. The choice of τ and K is mo-
+          istic customer–bot interactions. Our framework                          
+                                          tivated by the accuracy vs coverage analyses in
+          usesanLLM-baseduserquerysimulatorthatinter-                             
+                                          AppendixC.6(Figures5and6).              
+          actswithanLLM-basedresponsesimulator,while                              
+          a Simulator Controller orchestrates the conversa- 5 Experimentalsetup   
+          tion by initializing dialogues, managing turn-by-                       
+          turnflow,andintroducingtopic/intentshiftswhen 5.1 Datasets              
+          appropriate. Thecontrollercombinesintent-level Weapplytheanonymizationproceduredescribed
+          planningwithcontrolledrandomnesstoelicitun- in Appendix A. Each sample consists of conver-
+          derrepresented behaviors in real transcripts (e.g., sationhistory,thecurrentcustomerutterance,and
+          chit-chat, intent changes, follow-up and clarifica- itscorrespondingannotationsforintent,issue,and
+          tion questions). At each turn, it selects the next productcategory. Tobuildabalanceddataset,we
+          userintentandpromptstheusersimulatortopro- usestratifiedsamplingacrossmonthsanddomains.
+          ducethecorrespondingutterance,afterwhichthe Since some categories are significantly overrep-
+          response simulator generates the bot reply. We resented,wefurtherdownsamplehigh-frequency
+          alsoinjectalternativeseedqueriessampledfroma categorieswhenformingthefinaltrainingandeval-
+          multi-domaintop-querydatabasetofacilitatetopic uation splits. We provide additional dataset con-
+          andintenttransitions. Theoverallinteractionflow structiondetailsareprovidedinAppendixB.
+          is shown in Figure 3 and simulation prompt tem-                         
+          plate can be found in Appendix C.3. Finally, we 5.2 Evaluationbenchmarks
+          use the two stage labeling strategy in Section 4.1 We consider the following baselines to evaluate
+          toautomaticallylabelsimulateddialogues. andbenchmarkourLLM-basedlabelinganddata
+                                          augmentationmethods:                    
+          4.3 HybridapproachofLLMandfine-tuned                                    
+             model                                                                
+                                          • RoBERTa: We fine-tune three separate  
+          Todemonstratehowafine-tunedlightweightmodel RoBERTa-base (Liu et al., 2019) classifica-
+          canbecombinedwithanLLMtobalanceaccuracy tion models (Intent, Domain, and Issue), en-
+          and latency, we introduce a hybrid intent detec- abling simultaneous prediction across multiple
+          tion strategy that couples fast local classification label spaces. To compare prompting and data-
+          with selective LLM escalation. As shown in Ap- generationchoicesforfine-tuning(Section4),we
+          pendixC.5andFigure4,thelightweightmodelfirst train variants using: (i) single-stage reasoning-
+          outputsanintentprobabilitydistributionalongwith guided labeling, (ii) two-stage labeling with
+          aconfidencescore. Iftheconfidencescoreexceeds self-critique, and (iii) two-stage labeling with
+                                        71                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+             Table1a:Stagewisemetricbreakdown                                     
+                   Outcome      Count              Table1b:Overallaccuracy        
+                 Stage2iscorrect 566                 Outcome Accuracy             
+                 Stage1iscorrect 84                                               
+            BothStage1&Stage2areincorrect 70       Stage2iscorrect 97%            
+             BothStage1&Stage2arecorrect 4802      Stage1iscorrect 88%            
+                    Total        5522                                             
+                                                                                  
+                           Table1: Stage1andStage2performanceanalysis             
+                                                                                  
+           self-critiqueplusdialogue-simulatoraugmenta- ModelType Single-Stage Two-Stage Two-Stage+
+           tion. WeprovideimplementationdetailsinAp- Labeling Labeling DataAugm.  
+                                                                                  
+           pendixC.4.                      IntentModel 80.70% 80.30% 79.50%       
+                                           ProductModel 80.90% 80.80% 81.70%      
+          • Claude Sonnet 3.7 zero-shot: We evaluate                              
+                                           IssueModel 76.70% 79.10% 78.20%        
+           ClaudeSonnet3.7inazero-shotsettingusinga                               
+           promptthatenumeratestheintenttaxonomyand Table2: Automatedevaluationaccuracyresults
+           providesbriefdefinitionsforeachlabel.                                  
+          • NovaProzero-shot: WemirrortheClaudeSon-                               
+           net3.7Zero-shotsetupbutreplaceClaudewith tial performance gains on the issue classification
+           NovaPro,asmallerLLMthatofferslowerinfer- task. We hypothesize that issue classification in-
+           encelatency.                   volvesgreaterambiguityandisthereforemorechal-
+          • Hybrid approach (fine-tuned RoBERTa + lenging. Thetwo-stagepromptingstrategy,which
+           Claude Sonnet 3.7): Following Section 4.3, encouragesadditionalself-verificationandrefine-
+           we first use the best-performing fine-tuned ment,produceshigher-qualitylabelsandimproves
+           RoBERTamodeltoretrievethetop-3candidate fine-tuningperformance.        
+           labelsforeachclassifier(Intent,Domain,Issue).                          
+           WethenpromptClaudeSonnet3.7toselectthe 6.2 Humanevaluation             
+           finallabelconditionedonthesecandidates. This                           
+                                          Tocomprehensivelyevaluatetheeffectivenessof
+           hybridbaselinetestswhetherzero-shotprompt-                             
+                                          our labeling and data augmentation strategies, as
+           ing can further improve over RoBERTa fine-                             
+                                          wellasthebenefitsofthehybridapproach,wecom-
+           tuning.                                                                
+                                          pareacrossseveralbaselineapproaches(seeSec-
+                                          tion 5.2) using a 1,206 human-annotated dataset.
+          6 Results                                                               
+                                          The dataset is constructed by random sampling,
+          6.1 Automaticevaluationonfine-tuned with 50% from the evaluation dataset described
+             RoBERTamodels                in Section 5.1 and the remaining 50% from pro-
+          As described in Sections 4.1 and 4.2, we employ duction traffic. The results, presented in Table 3,
+          multipledatalabelingandaugmentationstrategies illustrateperformanceacrossall3typesofclassifi-
+          togeneratetrainingdataforfine-tuningRoBERTa cationmodelsandanoverallaggregateassessment
+          models. Specifically,weconsiderthreeapproaches basedonPrecision,Recall,andF1-score.
+          forcomparison: (1)asingle-stagepromptingstrat- Overall, our results show that models fine-tuned
+          egy, (2) a two-stage prompting strategy, and (3) withthetwo-stagelabelingstrategyandaugmented
+          a two-stage prompting strategy + simulated dia- withsimulateddialoguedataoutperformalternative
+          loguedataaugmentation. Wegenerateground-truth approaches. Whiletrainingwithdatageneratedvia
+          labels using an LLM according to each strategy. single-stagepromptingalreadyyieldsstrongperfor-
+          WereportautomaticevaluationresultsinTable2. mance,addingself-critiquestagefurtherimproves
+          Models trained under all three strategies achieve labelingaccuracyandmodelperformance. More-
+          comparableperformanceacrossclassificationtasks, over,incorporatingsimulatedmulti-turndialogues
+          indicating that the fine-tuned models are able to helpsthemodelbetterhandleintentswitches,con-
+          effectively learn from their corresponding LLM tributing to additional gains (F1 score increases
+          teachermodels. Notably,modelsfine-tunedusing by 2%-5% compared to single-stage prompting).
+          thetwo-stagepromptingstrategyexhibitsubstan- Finally,weobservethatintentclassificationperfor-
+                                        72                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                   IntentModel   ProductModel  IssueModel         
+                               Precision Recall F1Score Precision Recall F1Score Precision Recall F1Score
+              RoBERTa(Single-stagelabeling) 73% 71% 72% 73% 65% 69% 67% 61% 64%   
+              RoBERTa(Two-stagelabeling) 74% 73% 73% 72% 69% 70% 72% 64% 68%      
+           RoBERTa(Two-stagelabeling+dataaugmentation) 75% 74% 74% 75% 72% 73% 73% 66% 69%
+                 Hybridapproach 77% 75%  76%  78%  74% 76%  74%  68% 71%          
+                NovaProzero-Shot 48% 42% 45%  61%  52% 56%  42%  35% 38%          
+               ClaudeSonnet3.7zero-shot 75% 67% 71% 61% 69% 65% 54% 51% 52%       
+             Table3: Performancecomparisonacrossdifferentbaselinesforintent,product,andissueclassification
+          mance is further improved by a hybrid approach modelincreasedthebotautomationrateby4.91%
+          thatcombinesafine-tunedRoBERTamodelwith andimprovedthepositivecustomerresponserate
+          LLM-basedprompting.             by 7.89%, demonstrating benefits for both cus-
+          Purely prompting-based methods (e.g., Claude tomerexperienceandoperationalefficiencywhile
+          zero-shotandNovazero-shot)exhibitinferiorper- achievinglowend-to-endproductionlatency(P50:
+                                                                                  
+          formance. Thisdegradationlikelystemsfromthe 0.12s;P90: 0.16s;P99: 0.20s).
+          absenceofdomain-specificcustomerservicetrain-                           
+                                          7  Conclusion                           
+          ing data, which increases the likelihood of hallu-                      
+          cinations and intent misclassification. Although                        
+                                          In this paper, we address multi-turn intent detec-
+          thehybridapproachalsoemployspromptingwhen                               
+                                          tion for customer service applications. To han-
+          model confidence is low, it substantially outper-                       
+                                          dlethescalabilityandheterogeneityofintenttax-
+          formsstandaloneprompting. Thisgainstemsfrom                             
+                                          onomies, we propose an ontology that captures
+          using the fine-tuned RoBERTa model to first re-                         
+                                          complementary facets of user intent. To mitigate
+          trieve a limited set of relevant intent candidates,                     
+                                          thescarcityofannotateddata,weintroduceLLM-
+          therebyconstrainingtheLLM’sdecisionspaceand                             
+                                          basedlabelingmethodsthatgeneratehigh-quality
+          enablingmoreaccuratefinalpredictions.                                   
+                                          supervisionfromexistingcustomertranscripts,and
+          WealsoevaluateP50andP90latencyacrossdiffer-                             
+                                          augmenttrainingwithLLM-simulatedmulti-turn
+          ent methods, with results summarized in Table 4.                        
+                                          dialoguesthatexplicitlymodeltopicshiftsandin-
+          ThefindingsindicatethatRoBERTaachievesthe                               
+                                          tentswitches.                           
+                                          Ourexperimentsshowthattwo-stagelabelingwith
+                Model      P50Latency P90Latency self-critique, combined with simulated dialogue
+                RoBERTa      0.08s  0.1s  augmentation, consistently outperforms alterna-
+             NovaProZero-shot 1.98s 3.97s                                         
+                                          tive labeling strategies. The resulting fine-tuned
+           ClaudeSonnet3.7Zero-Shot 5.93s 7.52s                                   
+          Hybrid(RoBERTa+Zero-shot) 1.99s 3.1s RoBERTa models outperform pre-trained LLMs
+                                          inzero-shotsettingswhileachievingsubstantially
+           Table4: Modellatencyperformancecomparison lowerlatency. Ahybridroutingstrategythatcom-
+                                          bines fine-tuned RoBERTa with an LLM further
+          lowestlatency,approximately20–50 fasterthan improvesperformanceonambiguouscases.
+                                ×                                                 
+          LLMzero-shot. Whilethehybridapproachdeliv- Ourfindingsprovideactionableguidanceforprac-
+          ersimprovedaccuracy,itincurshigherlatencythan titionersbuildingproductionmulti-turnintentde-
+          RoBERTa,suggestingatrade-offbetweenperfor- tectionsystemsbyeffectivelycombiningrealtran-
+          mancegainsandinferenceefficiency. scriptdatawithLLM-generateddialogues. 
+                                          8  Limitations                          
+          6.3 Onlinedeploymentperformance                                         
+          Wedeployedtheintentclassificationmodel(fine- Our evaluationis basedon customer servicecon-
+          tunedRoBERTa-base)inane-commercecustomer versationsfromaspecificsetofproducts,locales,
+          serviceproductionsystems. Comparedtotheprevi- andworkflowdesigns,soresultsmaynotfullygen-
+          ouslydeployedsingle-turnintentdetectionsystem, eralizetootherdomainswithdifferentintenttax-
+          whichcouldnotsupporttopicshiftsorcontextcar- onomiesordialoguepatterns. Inaddition,model
+          ryoverinanongoingsessions,ourmodelenables qualitydependsontheconsistencyofupstreamla-
+          seamlessanddynamicintentroutinginmulti-turn bels (human or LLM-assisted); any ambiguity in
+          interactions. Inaone-monthonlineA/Btest, our intentdefinitionsornoiseinautomaticlabelingcan
+                                        73                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          propagatetotrainingandinflateofflineestimates. YinhanLiu,MyleOtt,NamanGoyal,JingfeiDu,Man-
+          Finally,offlinemetricsmaynotperfectlytranslate darJoshi,DanqiChen,OmerLevy,MikeLewis,Luke
+                                          Zettlemoyer,andVeselinStoyanov.2019. Roberta: A
+          to end-to-end customer impact because real de-                          
+                                          robustly optimized bert pretraining approach. arXiv
+          ployments involve additional constraints (policy,                       
+                                          preprintarXiv:1907.11692.               
+          UI, latency, and fallback behavior) and are sub-                        
+          ject to distribution shift over time; broader cross- ZhengyuanLiuandNancyChen.2019. Readingturn
+                                          byturn: Hierarchicalattentionarchitectureforspoken
+          domain/locale testing and controlled online stud-                       
+                                          dialogue comprehension. In Proceedings of the 57th
+          iesareneededtovalidaterobustnessanduserout-                             
+                                          AnnualMeetingoftheAssociationforComputational
+          comes.                          Linguistics.                            
+                                          ZihanLiu,YimingChen,HaoZhang,etal.2024b. Lara:
+                                          Linguistic-adaptive retrieval-augmentation for multi-
+          References                                                              
+                                          turn intent classification. In Proceedings of the 2024
+          GauravArora,ShreyaJain,andSrujanaMerugu.2024. ConferenceonEmpiricalMethodsinNaturalLanguage
+          IntentdetectionintheageofLLMs. InProceedingsof Processing.              
+          the2024ConferenceonEmpiricalMethodsinNatural                            
+          LanguageProcessing: IndustryTrack. AmanMadaan, NiketTandon,PrakharGupta,Skyler
+                                          Hallinan, Luyu Gao, Sarah Wiegreffe, Nanyun Raja,
+          KrisztianBalog,NolwennBernard,SaberZerhoudi,and ShivangGulati,ShubhamTan,etal.2023. Self-refine:
+          ChengXiangZhai.2025. Theoryandtoolkitsforuser Iterativerefinementwithself-feedback. arXivpreprint
+          simulationintheeraofgenerativeAI:Usermodeling, arXiv:2303.17651.        
+          synthetic data generation, and system evaluation. In                    
+          Proceedingsofthe48thInternationalACMSIGIRCon- SubhadipNandi,NeerajAgrawal,AnshikaSingh,and
+          ferenceonResearchandDevelopmentinInformation PriyankaBhatt.2024. Enhancingcustomerservicechat-
+          Retrieval(SIGIR’25),pages4138–4141,Padua,Italy. botswithcontext-awarenluthroughselectiveattention
+          AssociationforComputingMachinery. andmulti-tasklearning. InProceedingsofthe8thInter-
+                                          nationalConferenceonDataScienceandManagement
+          Krisztian Balog and ChengXiang Zhai. 2025. User ofData(CODS-COMAD2024),pages220–228.Asso-
+          simulationintheeraofgenerativeAI:Usermodeling, ciationforComputingMachinery.
+          syntheticdatageneration,andsystemevaluation. arXiv                      
+          preprintarXiv:2501.04410.       HaodeQi,LinPan,AtinSood,AbhishekShah,Ladislav
+                                          Kunc, Mo Yu, and Saloni Potdar. 2021. Benchmark-
+          LeiCui,ShaohanHuang,FuruWei,ChuanqiTan,Chao- ingcommercialintentdetectionserviceswithpractice-
+          qunDuan,andMingZhou.2017. Superagent: Acus- driven evaluations. In Proceedings of the 2021 Con-
+          tomerservicechatbotfore-commercewebsites. InPro- ferenceoftheNorthAmericanChapteroftheAssocia-
+          ceedings of ACL 2017, system demonstrations, pages tionforComputationalLinguistics: HumanLanguage
+          97–102.                         Technologies: IndustryPapers,pages304–310,Online.
+                                          AssociationforComputationalLinguistics. 
+          XiaoqiJiao,YichunYin,LifengShang,XinJiang,Xiao                          
+          Chen,LinlinLi,FangWang,andQunLiu.2020. Tiny- Libo Qin, Zhou Chen, Wanxiang Che, Hang Li, and
+          BERT:DistillingBERTfornaturallanguageunderstand- TingLiu.2021. Knowingwheretoleverage: Context-
+          ing. InFindingsoftheAssociationforComputational aware graph convolutional network with an adaptive
+          Linguistics: EMNLP2020,pages4163–4174,Online. fusionlayerforcontextualspokenlanguageunderstand-
+          AssociationforComputationalLinguistics. ing.                            
+          TakeshiKojima,ShixiangShaneGu,MachelReid,Yu- Victor Sanh, Lysandre Debut, Julien Chaumond, and
+          taka Matsuo, and Yusuke Iwasawa. 2022. Large lan- Thomas Wolf. 2019. DistilBERT, a distilled version
+          guagemodelsarezero-shotreasoners. arXivpreprint of BERT: smaller, faster, cheaper and lighter. arXiv
+          arXiv:2205.11916.               preprintarXiv:1910.01108.               
+          Hsien-chin Lin, Nurul Lubis, Songbo Hu, Carel van JostSchatzmann,BlaiseThomson,KarlWeilhammer,
+          Niekerk,ChristianGeishauser,MichaelHeck,Shutong Hui Ye, and Steve Young. 2007. Agenda-based user
+          Feng, and Milica Gasic. 2021. Domain-independent simulation for bootstrapping a POMDP dialogue sys-
+          usersimulationwithtransformersfortask-orienteddi- tem. In Human Language Technologies 2007: The
+          alogue systems. In Proceedings of the 22nd Annual ConferenceoftheNorthAmericanChapteroftheAs-
+          MeetingoftheSpecialInterestGrouponDiscourseand sociation for Computational Linguistics; Companion
+          Dialogue,pages445–456,SingaporeandOnline.Asso- Volume,ShortPapers,pages149–152,Rochester,New
+          ciationforComputationalLinguistics. York.AssociationforComputationalLinguistics.
+          JunhuaLiu,YongKeatTan,BinFu,andKwanHuiLim. MatteoAntonioSenese,GiuseppeRizzo,MauroDrag-
+          2024a. Balancingaccuracyandefficiencyinmulti-turn oni, and Maurizio Morisio. 2020. MTSI-BERT: A
+          intentclassificationforLLM-powereddialogsystems session-aware knowledge-based conversational agent.
+          inproduction.                   In Proceedings of the Twelfth Language Resources
+                                        74                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          andEvaluationConference,pages717–725,Marseille,                         
+          France.EuropeanLanguageResourcesAssociation.                            
+          NoahShinn,FedericoCassano,EdwardBerman,Ash-                             
+          winGopinath, KarthikNarasimhan, andShunyuYao.                           
+          2023. Reflexion: Language agents with verbal rein-                      
+          forcementlearning. arXivpreprintarXiv:2303.11366.                       
+          Weiwei Sun, Shuyu Guo, Shuo Zhang, Pengjie Ren,                         
+          Zhumin Chen, Maarten de Rijke, and Zhaochun Ren.                        
+          2022. Metaphorical user simulators for evaluat-                         
+          ing task-oriented dialogue systems. arXiv preprint                      
+          arXiv:2204.00763.                                                       
+          PeiyaoWang,JoyceFang,andJuliaReinspach.2021.                            
+          CS-BERT:apretrainedmodelforcustomerservicedia-                          
+          logues. InProceedingsofthe3rdWorkshoponNatural                          
+          LanguageProcessingforConversationalAI,pages130–                         
+          142,Online.AssociationforComputationalLinguistics.                      
+          WenhuiWang,FuruWei,LiDong,HangboBao,Nan                                 
+          Yang, and Ming Zhou. 2020. MiniLM: Deep self-                           
+          attentiondistillationfortask-agnosticcompressionof                      
+          pre-trainedtransformers. InAdvancesinNeuralInfor-                       
+          mationProcessingSystems.                                                
+          JasonWei,XuezhiWang,DaleSchuurmans,Maarten                              
+          Bosma,BrianIchter,FeiXia,EdH.Chi,QuocV.Le,                              
+          andDennyZhou.2022. Chain-of-thoughtprompting                            
+          elicitsreasoninginlargelanguagemodels. InAdvances                       
+          inNeuralInformationProcessingSystems.                                   
+          Ting-Wei Wu, Ruolin Su, and Biing-Hwang Juang.                          
+          2021. Acontext-awarehierarchicalBERTfusionnet-                          
+          workformulti-turndialogactdetection. InProceedings                      
+          ofInterspeech2021,pages1239–1243.                                       
+          DianYu,LuhengHe,YuanZhang,XinyaDu,Panupong                              
+          Pasupat,andQiLi.2021. Few-shotintentclassification                      
+          andslotfillingwithretrievedexamples. InProceedings                      
+          ofthe2021ConferenceoftheNorthAmericanChapter                            
+          oftheAssociationforComputationalLinguistics: Hu-                        
+          manLanguageTechnologies, pages734–749, Online.                          
+          AssociationforComputationalLinguistics.                                 
+          Ziji Zhang, Michael Yang, Zhiyu Chen, Yingying                          
+          Zhuang,Shu-TingPi,QunLiu,RajashekarMaragoud,                            
+          VyNguyen,andAnuragBeniwal.2025. REIC:RAG-                               
+          enhancedintentclassificationatscale. InProceedings                      
+          ofthe2025ConferenceonEmpiricalMethodsinNatu-                            
+          ralLanguageProcessing: IndustryTrack,pages1072–                         
+          1080,Suzhou(China).AssociationforComputational                          
+          Linguistics.                                                            
+          Wayne Xin Zhao, Kun Zhou, Junyi Li, Tianyi Tang,                        
+          Xiaolei Wang, Yupeng Hou, Yingqian Min, Beichen                         
+          Zhang,JunjieZhang,ZicanDong,YifanDu,ChenYang,                           
+          Yushuo Chen, Zhipeng Chen, Jinhao Jiang, Ruiyang                        
+          Ren,YifanLi,XinyuTang,ZikangLiu,PeiyuLiu,Jian-                          
+          Yun Nie, and Ji-Rong Wen. 2023. A survey of large                       
+          languagemodels.                                                         
+          YunhuaZhou,JiaweiHong,andXipengQiu.2023. To-                            
+          wardsopenenvironmentintentprediction. InFindings                        
+          oftheAssociationforComputationalLinguistics: ACL                        
+          2023,pages2226–2240,Toronto,Canada.Association                          
+          forComputationalLinguistics.                                            
+                                        75                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          Appendix                                                                
+          A  Dataanonymization                                                    
+                                                                                  
+          Duetobusinessconsiderations,Wemanuallyanonymizedboththelabelsandtranscriptstoensureno
+          personalinformationisincluded. Additionally,specificproductandservicenamesweredenonymized
+          to prevent the identification of the company from the transcript or label descriptions. Despite these
+          modifications,theconclusionsdrawnfromourexperimentsremainvalid.         
+                                                                                  
+          B  Dataconstruction                                                     
+                                                                                  
+          Thedatasetcomprisesbothrealcustomerserviceconversationsandsyntheticqueriescollectedbetween
+          2024 and 2025. We apply a stratified sampling strategy across months and domains as follows: (i) to
+          mitigateseasonalityeffectsandpreventoversamplingduringpeakperiods,wesampleanequalnumber
+          of data points from each month. (ii) to reduce bias toward particular product lines or use cases, we
+          furtherstratifythesamplingprocessbyselectinganequalnumberofexamplespermonthacrossupto
+          30existingskills(domains), whereeachskillcorrespondstoaspecifictaskthatanAmazonCustomer
+          Servicerepresentativecanperformforagivenproduct.                        
+          Becausecertaincategoriescontainsubstantiallymoreexamplesthanothers,weapplyadownsampling
+          procedure when constructing the final training and evaluation datasets. For each category, we cap the
+          numberofsamplesat20,000fortrainingand10,000fortesting. Thisdownsamplingstrategyisapplied
+          consistentlyacrossallmodeltypes,includingintent,domain,andissueclassifiers. Thetestsetwasheld
+          outstrictlyforfinalevaluation.                                          
+                                                                                  
+          C  Implementationdetails                                                
+                                                                                  
+          C.1 Classificationprompttemplate                                        
+          We use the following prompt template for conversation classification. It instructs the LLM to label
+          eachcustomer-servicedialoguealongthreedimensions: conversationalintent,issuetype,andproduct
+          category. For each example, the current utterance and its dialogue context are dynamically inserted
+          into the template. The prompt provides detailed annotation guidelines, including (i) leveraging the
+          full dialogue history for context-aware decisions and (ii) using structured reasoning to resolve am-
+          biguous cases. We define three separate prompt templates corresponding to Stage 1, Stage 2 annota-
+          tion and LLM zero-shot. Note LLM zero-shot does not ask LLM to provide justification explanation.
+          Classificationprompttemplateforstage1:                                  
+          ## Dialogue Context                                                     
+          {dialogue_context}                                                      
+          ## Turn T - Current Customer Utterance                                  
+          {turn_T_utterance}                                                      
+          ## Conversational/Actional Intent Options (Choose Exactly One)          
+                                                                                  
+          1. CANCEL - Request to cancel a subscription or service or product      
+          2. REFUND - Request for a refund related to a service or subscription   
+          3. CANCEL&REFUND - Explicitly state desire to cancel and request a refund
+          4. RETURN - Request for a return related to a service or product        
+          5. REPLACEMENT - Request for a replacement related to a service or product
+          6. RETAIN/SUBSCRIBE - Request to retain/subscribe subscription and NOT to cancel
+          7. TRADE-IN - Customer is requesting to trade-in devices                
+          8. ADS-FREE/ADS-REMOVAL - Customer is requesting to remove ads or subscribe ads free
+          9. TROUBLESHOOT - Customer describes an issue requiring troubleshooting 
+          10. INFORMATIONAL_INQUIRY - General "how-to" or "what-is" questions     
+          11. ISSUE_DEPENDENT_INQUIRY - Inquiries tied to a specific issue or service/product
+          12. Yes - The customer responded affirmatively                          
+          13. No - Customer generally respond with "No" or "Nope"                 
+          14. TRANSACTIONAL_OTHER - Other action-oriented or transactional inquiries
+          15. CHIT_CHAT/CONVERSATION_FILLER - Polite fillers, navigation phrases  
+          16. FRUSTRATION/COMPLAINT - General dissatisfaction expressed           
+          17. REQUEST_HUMAN_AGENT - Customer explicitly asks for a human agent    
+          18. END_CONVERSATION - Customer clearly states issue is resolved        
+                                        76                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          19. NON_AMAZON_TOPIC - Completely unrelated to Amazon products or services
+          ## Issue Options (Choose Exactly One)                                   
+                                                                                  
+          1. SETUP/REGISTRATION/ACTIVATION/INSTALLATION                           
+          2. CANCEL/REFUND/RETURN/REPLACEMENT/RETAIN/SUBSCRIBE/TRADE-IN/TRANSACTIONAL
+          3. CONNECT/PAIR                                                         
+          4. WIFI/NETWORK                                                         
+          5. SYNC/DOWNLOAD                                                        
+          6. PLAY/STREAMING/DISPLAY                                               
+          7. AUDIO/SOUND                                                          
+          8. DAMAGE/REPAIR                                                        
+          9. WARRANTY                                                             
+          10. DEVICE_HEALTH                                                       
+          11. DEFECT                                                              
+          12. BATTERY                                                             
+          13. SOFTWARE/OTA UPDATE                                                 
+          14. LOST/STOLEN                                                         
+          15. PROMOTIONS/CREDITS/LOOT                                             
+          16. RESTRICTIONS/PARENTAL_CONTROL                                       
+          17. HOUSEHOLD                                                           
+          18. PAYMENT_ISSUE/PURCHASE/COINS                                        
+          19. PRICING                                                             
+          20. UNRECOGNIZED_CHARGES/UNKNOWN_CHARGES/FRAUD_CHARGES                  
+          21. CONTENT_AVAILABILITY                                                
+          22. SHIPPING/DELIVERY                                                   
+          23. OTHER_ISSUE                                                         
+          24. NONE                                                                
+          ## Product Options (Choose Exactly One)                                 
+          1. Music                                                                
+          2. Video                                                                
+          3. SmartTV                                                              
+          [... additional product categories ...]                                 
+          ## Output Format (JSON)                                                 
+          {                                                                       
+            "predicted_conversational_intent": "One of the 19 intent labels",     
+            "predicted_issue": "One of the 24 issue labels",                      
+            "predicted_product": "One of the 31 product labels",                  
+            "reason": "Brief explanation justifying the choice"                   
+          }                                                                       
+          Classificationpromptforstage2:                                          
+          ## Taxonomy Intents                                                     
+          1. CANCEL - Request to cancel subscription/service/product or turn off  
+            auto renewal. Excludes refunds.                                       
+          2. REFUND - Request for refund related to service/subscription.         
+          3. CANCEL&REFUND - Explicitly cancel and request refund.                
+          4. RETURN - Request for return related to service/product.              
+          5. REPLACEMENT - Request for replacement related to service/product.    
+          6. RETAIN/SUBSCRIBE - Request to retain/subscribe, NOT cancel.          
+          7. TRADE-IN - Customer requesting to trade-in devices.                  
+          8. ADS-FREE/ADS-REMOVAL - Request to remove ads or subscribe ads free.  
+          9. TROUBLESHOOT - Customer describes issue requiring troubleshooting.   
+          10. INFORMATIONAL_INQUIRY - General "how-to" or "what-is" questions     
+            answerable from help pages. Excludes vague utterances like "I need    
+            help".                                                                
+          11. ISSUE_DEPENDENT_INQUIRY - Inquiries tied to specific issue/service/ 
+            product requiring customer context. Exclude transactional intents.    
+          12. Yes - Customer responded affirmatively. Don't confuse with          
+            END_CONVERSATION.                                                     
+          13. No - Customer responds "No" or "Nope". Don't confuse with           
+            END_CONVERSATION.                                                     
+          14. CHIT_CHAT/CONVERSATION_FILLER - Polite fillers (hi, thanks),        
+                                        77                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+            navigation phrases. Exclude frustration/complaint and Yes/No.         
+          15. FRUSTRATION/COMPLAINT - General dissatisfaction without clear request.
+          16. REQUEST_HUMAN_AGENT - Customer explicitly asks for human agent.     
+          17. END_CONVERSATION - Customer states issue resolved. Don't confuse with
+            polite chit-chat.                                                     
+          18. NON_RELATED_TOPIC - Completely unrelated to the e-commerce. Must be completely
+            off-topic.                                                            
+          ## Taxonomy Issues                                                      
+          1. SETUP/REGISTRATION/ACTIVATION/INSTALLATION - Issues registering,     
+            setting up, activating, or installing device/subscription/service/app.
+          2. CANCEL/REFUND/RETURN/REPLACEMENT/RETAIN/SUBSCRIBE/TRADE-IN/          
+            TRANSACTIONAL - Issue with transaction already occurred or attempted. 
+          3. CONNECT/PAIR - Issues connecting or bluetooth pairing.               
+          4. WIFI/NETWORK - Issues with networking or Wifi.                       
+          5. SYNC/DOWNLOAD - Trouble syncing/downloading (often eBook/App related).
+          6. PLAY/STREAMING/DISPLAY - Trouble playing content or visualizing.     
+          7. AUDIO/SOUND - Audio issues (no audio, low audio, etc.).              
+          8. DAMAGE/REPAIR - Device damage, inquiring about repair.               
+          9. WARRANTY - Inquiring about or checking warranty.                     
+          10. DEVICE_HEALTH - Device performance/stability issues (crashes, reboots,
+            bricked, frozen, responsiveness).                                     
+          11. DEFECT - General mention of device defect.                          
+          12. BATTERY - Battery issues.                                           
+          13. SOFTWARE/OTA UPDATE - Software update issues (stuck on update screen,
+            no update available).                                                 
+          14. LOST/STOLEN - Reporting lost/stolen device.                         
+          15. PROMOTIONS/CREDITS/LOOT - Issues with promotions, bundles, credits, 
+            loot.                                                                 
+          16. RESTRICTIONS/PARENTAL_CONTROL - Trouble with Parental Controls, Pins,
+            child purchases.                                                      
+          17. HOUSEHOLD - Issues with household (sharing content, adding members).
+            If PINs/Child Controls, select Parental Controls instead.             
+          18. PAYMENT_ISSUE/PURCHASE/COINS - Issue/inquiry related to payment, gift
+            cards, or coins.                                                      
+          19. PRICING - Price related issues (price match, price adjustment).     
+          20. UNRECOGNIZED_CHARGES/UNKNOWN_CHARGES/FRAUD_CHARGES - Generic        
+            unrecognized charges customer not aware of or deems fraud.            
+          21. CONTENT_AVAILABILITY - Issues with content availability.            
+          22. SHIPPING/DELIVERY - Shipping or delivery related issues.            
+          23. OTHER_ISSUE - Other action-oriented/transactional inquiries not     
+            mentioned above.                                                      
+          24. NONE - No specific issue, purely chit-chat, complaint or frustration.
+          ## Taxonomy Products                                                    
+          1. Music.                                                               
+          2. Video                                                                
+          3. Video Channels                                                       
+          4. SmartTV Cube                                                         
+          [... additional product categories ...]                                 
+          ClassificationprompttemplateforLLMzero-shot:                            
+          ## Dialogue Context                                                     
+          {dialogue_context}                                                      
+          ## Turn T - Current Customer Utterance                                  
+          {turn_T_utterance}                                                      
+          ## Conversational/Actional Intent Options (Choose Exactly One)          
+          1. CANCEL - Request to cancel a subscription or service or product      
+          2. REFUND - Request for a refund related to a service or subscription   
+          3. CANCEL&REFUND - Explicitly state desire to cancel and request a refund
+          4. RETURN - Request for a return related to a service or product        
+          5. REPLACEMENT - Request for a replacement related to a service or product
+          6. RETAIN/SUBSCRIBE - Request to retain/subscribe subscription and NOT to cancel
+                                        78                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          7. TRADE-IN - Customer is requesting to trade-in devices                
+          8. ADS-FREE/ADS-REMOVAL - Customer is requesting to remove ads or subscribe ads free
+          9. TROUBLESHOOT - Customer describes an issue requiring troubleshooting 
+          10. INFORMATIONAL_INQUIRY - General "how-to" or "what-is" questions     
+          11. ISSUE_DEPENDENT_INQUIRY - Inquiries tied to a specific issue or service/product
+          12. Yes - The customer responded affirmatively                          
+          13. No - Customer generally respond with "No" or "Nope"                 
+          14. TRANSACTIONAL_OTHER - Other action-oriented or transactional inquiries
+          15. CHIT_CHAT/CONVERSATION_FILLER - Polite fillers, navigation phrases  
+          16. FRUSTRATION/COMPLAINT - General dissatisfaction expressed           
+          17. REQUEST_HUMAN_AGENT - Customer explicitly asks for a human agent    
+          18. END_CONVERSATION - Customer clearly states issue is resolved        
+          19. NON_AMAZON_TOPIC - Completely unrelated to Amazon products or services
+          ## Issue Options (Choose Exactly One)                                   
+          1. SETUP/REGISTRATION/ACTIVATION/INSTALLATION                           
+          2. CANCEL/REFUND/RETURN/REPLACEMENT/RETAIN/SUBSCRIBE/TRADE-IN/TRANSACTIONAL
+          3. CONNECT/PAIR                                                         
+          4. WIFI/NETWORK                                                         
+          5. SYNC/DOWNLOAD                                                        
+          6. PLAY/STREAMING/DISPLAY                                               
+          7. AUDIO/SOUND                                                          
+          8. DAMAGE/REPAIR                                                        
+          9. WARRANTY                                                             
+          10. DEVICE_HEALTH                                                       
+          11. DEFECT                                                              
+          12. BATTERY                                                             
+          13. SOFTWARE/OTA UPDATE                                                 
+          14. LOST/STOLEN                                                         
+          15. PROMOTIONS/CREDITS/LOOT                                             
+          16. RESTRICTIONS/PARENTAL_CONTROL                                       
+          17. HOUSEHOLD                                                           
+          18. PAYMENT_ISSUE/PURCHASE/COINS                                        
+          19. PRICING                                                             
+          20. UNRECOGNIZED_CHARGES/UNKNOWN_CHARGES/FRAUD_CHARGES                  
+          21. CONTENT_AVAILABILITY                                                
+          22. SHIPPING/DELIVERY                                                   
+          23. OTHER_ISSUE                                                         
+          24. NONE                                                                
+          ## Product Options (Choose Exactly One)                                 
+          1. Music                                                                
+          2. Video                                                                
+          3. SmartTV                                                              
+          [... additional product categories ...]                                 
+          ## Output Format (JSON)                                                 
+          {                                                                       
+            "predicted_conversational_intent": "One of the 19 intent labels",     
+            "predicted_issue": "One of the 24 issue labels",                      
+            "predicted_product": "One of the 31 product labels",                  
+          }                                                                       
+          C.2 Systemprompt                                                        
+          We define three separate prompt templates corresponding to Stage 1, Stage 2 annotation and
+          LLM zero-shot. Note LLM zero-shot and Stage 1 annotation shares the same system prompt.
+          Stage1orLLMzero-shotsystemprompt:                                       
+          You are an expert annotation assistant specializing in analyzing conversations
+          between customers and bots/agents. Your task is to classify each customer message
+          (Turn T) into its primary intent and the most relevant Amazon product or
+          service discussed.                                                      
+          Use the provided dialogue history for context, and ensure that classifications
+          adhere strictly to the predefined categories. Always select exactly one intent
+                                        79                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          and one product for each message, even if the product is inferred from the
+          context.                                                                
+          If the product is ambiguous but likely Amazon-related, choose 'Other'. If the
+          message is unrelated to Amazon, select 'NON_AMAZON_TOPIC' as the intent. Provide
+          clear reasoning for your classifications, referencing specific dialogue cues and
+          your decision-making process.                                           
+                                                                                  
+          Stage2systemprompt:                                                     
+          You are a strict annotation reviewer. Your job is to AUDIT a prior classification
+          (Stage 1) for a customer’s Turn T, using the SAME taxonomy as Stage 1.  
+          Goals:                                                                  
+         - Verify that the predicted intent, issue, and product each match their definitions.
+         - Challenge the original reasoning (try to find contradictions or missing evidence).
+         - Correct any mistakes; otherwise confirm the original labels.           
+         - Be conservative with ambiguous cases: only use NON_AMAZON_TOPIC when clearly
+          unrelated to Amazon; do not confuse CHIT_CHAT with END_CONVERSATION; do not confuse
+          YES/NO with functional intents.                                         
+         - Always choose EXACTLY ONE intent, ONE issue, and ONE product from the Stage-1
+          taxonomy (no new labels).                                               
+         - Keep reasoning concise and reference concrete spans from the dialogue  
+          (short quotes). IMPORTANT: Do NOT repeat the Stage-1 JSON.              
+          Produce the reviewer JSON ONLY using the final_* keys.                  
+          C.3 Dynamicconversationsimulationprompttemplates                        
+          Thefollowingprompttemplateswereusedinthisstudytoserveatwo-stageapproachforgeneratingrealis-
+          ticcustomerserviceconversations. Thesystem_prompt_dialogue_helperanduser_intent_helper
+          worktogethertoanalyzeexistingconversationhistoryandidentifyallpossiblecustomerintents(such
+          as ChitChat, Frustration, IntentChange, or FollowUpQuestion) that could naturally occur next in the
+          dialogue flow. Once potential intents are identified, the system randomly selects one and employs
+          thesystem_prompt_talk_to_botanduser_prompt_turn_helpertemplatestogenerateauthenticcus-
+          tomer responses that align with the chosen intent. This dual-phase prompting strategy ensures that
+          simulated conversations maintain conversational coherence while introducing realistic variability in
+          customer behavior, enabling comprehensive testing of chatbot performance across diverse interaction
+          scenarios.                                                              
+          system_prompt_dialogue_helper:                                          
+          ROLE:                                                                   
+          You are the dialogue helper for a user simulator helping find the intent for the
+          user given a conversation history.                                      
+          TASK:                                                                   
+          Select out all POSSIBLE intent from CANDIDATE LIST to carry on the conversation
+          given the previous Conversation history.                                
+          GUIDELINES:                                                             
+          1. Read through the whole conversation and identify the subset of       
+          POSSIBLE INTENTS                                                        
+                                                                                  
+          CANDIDATE LIST:                                                         
+          1.ChitChat: Small talk loosely related to previous chat history         
+          2.Frustration: Expression of frustration in the middle of conversation  
+          3.intentChage: The user changes their request midway through a conversation, the
+          request can be related to previous Conversation history                 
+          4.FollowUpQuestion: The user asks follow-up questions that are related to previous
+          Conversation history                                                    
+          5.Clarification: The user asks for clarification for certain points in previous
+          Conversation history                                                    
+          6.Rambling: Speaker(s) ramble and repeat themselves. They may paraphrase themselves
+          7.ContactRealAgent: Request to speak to a real agent                    
+          8.EndConversation: End Conversation naturally when the issue or problem is resolved
+                                        80                                        
+                                                                                  
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          Here is the input format                                                
+          <Conversation history>                                                  
+          [provide chat_history here]                                             
+          </Conversation history>                                                 
+          Here is the output format                                               
+          <Possible Intents>                                                      
+          [provide possible intents here]                                         
+          </Possible Intents>                                                     
+          user_intent_helper:                                                     
+          Here is your input:                                                     
+                                                                                  
+          <Conversation history>                                                  
+          {chat_history}                                                          
+          </Conversation history>                                                 
+          Now respond with what the customer would say next:                      
+                                                                                  
+          system_prompt_talk_to_bot:                                              
+          ROLE:                                                                   
+          You are a user engaging in a natural conversation with a customer service bot or
+          agent. Your goal is to generate the next user turn based on the conversation
+          history and the intent provided below.                                  
+          OBJECTIVES                                                              
+          Conversation-Level Goal:                                                
+          Seek a resolution (e.g., HOW-TO answer) to the seed query provided below.
+          Current Turn Goal:                                                      
+          Generate a user response that aligns with the current intent described below.
+          INTENT DEFINITIONS                                                      
+          ChitChat – Casual or light-hearted comments loosely related to the conversation.
+          Frustration – Expressions of annoyance or dissatisfaction.              
+          IntentChange – The user changes their goal mid-conversation, potentially related
+          to prior turns.                                                         
+          FollowUpQuestion – User asks a question that builds directly on prior discussion.
+          Clarification – User requests clarification about something mentioned previously.
+          Rambling – User paraphrases, repeats, or meanders while staying within the topic.
+          ContactRealAgent: Request to speak to a real agent                      
+          EndConversation: End Conversation naturally when the issue or problem is resolved
+          GUIDELINES:                                                             
+         -If no chat history exists, begin with the seed query.                   
+         -Respond naturally: ask relevant questions, express preferences, or make decisions
+          as needed.                                                              
+         -If the bot successfully resolves the task and provides a reference number, reply
+          only with: "I'm all set" (no additional text).                          
+         -If the bot is repetitive or unhelpful across multiple turns, escalate by using
+          Contact Real Agent intent and say "talk to a real agent".               
+         -Do not impersonate a bot or break character.                            
+         -Be concise and speak like a real customer in real life. Each response should be
+          less than 25 words.                                                     
+         -If the intent is either ContactRealAgent or EndConversation. Be concise and the
+          response should be straight foward.                                     
+          Here is the input format                                                
+          <seed_query>                                                            
+          [provide seed_query here]                                               
+          </seed_query>                                                           
+          <Provided Intent>                                                       
+          [provide intent here]                                                   
+          </Provided Intent>                                                      
+          <Conversation history>                                                  
+          [provide chat_history here]                                             
+          </Conversation history>                                                 
+          Here is the output format                                               
+          <Current Turn>                                                          
+                                        81                                        
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+          [provide the current turn]                                              
+          </Current Turn>                                                         
+          """                                                                     
+                                                                                  
+          user_prompt_turn_helper:                                                
+          Here is your input:                                                     
+          <Conversation history>                                                  
+          {chat_history}                                                          
+                                                                                  
+          </Conversation history>                                                 
+          <Provided Intent>                                                       
+          {provided_intent}                                                       
+          </Provided Intent>                                                      
+          Now respond with what the customer would say next:                      
+                                                                                  
+          C.4 RoBERTamodelfine-tuningimplementationdetails                        
+          WeuseRoBERTa-baseforintentdetectionmodel,optimizingwithcross-entropyandtheAdamoptimizer.
+          Modelsaretrainedfor10epochson8NVIDIAA10GPUs,withlearningratesof1e-5,batchsizesof32
+          andearlystopping(patience=5)topreventoverfitting.                       
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                              Figure4: Hybriddeploymentapproach                   
+                                                                                  
+                                                                                  
+          C.5 HybridapproachworkflowimplementationDetails                         
+          Figure4illustratestheworkflowofourhybridapproach. Inourimplementation,wesettheconfidence
+          thresholdtoτ = 0.7anduseK = 3candidateintentsforLLMdisambiguation(seeAppendixC.6). We
+          useafine-tunedRoBERTamodelasthelightweightclassifier,andinvokeClaudeSonnet3.7forintent
+          classificationwhentheconfidencescorefallsbelowthethreshold.             
+                                                                                  
+          C.6 Analysisofτ andK inhybridapproach                                   
+          Weselecttheconfidencethresholdbybalancingaccuracyandcoverage. AsshowninFigure5,setting
+          thethresholdto0.7allowsourfine-tunedmodeltocoverroughly80%ofintent-detectionrequestswhile
+          maintaining about 85% accuracy. We therefore choose 0.7 as the operating point because it offers a
+          practicaltradeoff: thelow-latencymodelcanhandlethemajorityoftrafficwithsufficientlyhighaccuracy
+          for direct deployment. For the remaining low-confidence cases (confidence 0.7), we defer intent
+                                                          ≤                       
+          detectiontoanLLM.Importantly,fortheseinstances,theground-truthintentappearsinourfine-tuned
+          model’stop-3predictionsnearly90%ofthetime(Figure6). Thissuggeststhatlowconfidencetypically
+          reflectsambiguityamongasmallsetofplausibleintentsratherthanacompletefailure. Accordingly,we
+          asktheLLMtoselectamongthetop-3candidateintentsproducedbythefine-tunedmodel.
+          This yields an effective hybrid intent detection strategy: high-confidence requests (confidence 0.7)
+                                                                    ≥             
+          are handled directly by the lightweight model, while only a small fraction of ambiguous cases trigger
+          a secondary LLM call over a constrained top-3 label set. This design improves accuracy on difficult
+          utteranceswhilekeepingoveralllatencyundercontrol.                       
+          Thisisasectionintheappendix.                                            
+                                        82                                        
+                                                                                  
+                                                                                  
+
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                    Figure5: Accuracy–coveragetradeoffunderdifferentconfidencethresholds
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                         Figure6: Top-K accuracyforlow-confidencepredictions      
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                                                                  
+                                        83                                        
+                                                                                  
+                                                                                  
+                                                                                  

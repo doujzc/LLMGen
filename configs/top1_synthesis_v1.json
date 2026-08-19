@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v1",
+  "seed": 20260818,
+  "target_count": 800,
+  "intent_change_per_pair": 10,
+  "generator_model": "Deepseek-V4-Flash-0731",
+  "labeler_model": "GLM-5.2",
+  "reviewer_model": "Qwen3.7-Plus",
+  "generator_temperature": 0.9,
+  "judge_temperature": 0.0,
+  "generation_batch_size": 1,
+  "judgment_batch_size": 10,
+  "max_workers": 4,
+  "max_sample_attempts": 12,
+  "request_attempts": 4,
+  "request_timeout_seconds": 180,
+  "generation_max_tokens": 5000,
+  "judgment_max_tokens": 5000
+}

@@ -54,3 +54,32 @@ uv run --no-sync python scripts/build_top1_training_v1.py
 可复现实验数据提交到仓库；其它临时训练数据仍由 `.gitignore` 排除。PromptGen 的
 历史 audit cohort 一旦被该训练集复用，就不能再作为无偏评测集；summary 会明确记录
 复用数量和所有源文件哈希。
+
+## 独立的可控多轮合成
+
+`scripts/generate_top1_multiturn.py` 是与现有训练集构建器完全分离的 LLM 合成流程。
+它先固化结构化对话计划，再由生成模型逐轮实现；GLM 与 Qwen 在看不到计划标签的情况
+下独立盲判。只有计划标签、两次盲判标签、对话现象和质量门全部一致的样本才进入
+`train.jsonl`。IntentChange 还要求两模型分别确认末轮只包含新需求，不承接、确认或评价
+上一轮，也不使用切换元话语；任一模型否决就重新生成。
+
+默认计划 800 条，其中 420 条以每个有向组合 10 条的配额覆盖全部 42 个 IntentChange，
+其余覆盖渐进披露、上下文省略、修正澄清、assistant 干扰和冗余表达。运行过程支持断点
+续跑；相同输出目录只能继续同一个 manifest，配置或输入变化时必须使用新目录。
+
+```bash
+uv run --no-sync python scripts/generate_top1_multiturn.py \
+  --credentials-file ~/Codes/api_keys/llm_api.txt
+```
+
+默认产物位于 `data_top1/generated/top1_controlled_multiturn_v1/`，包含不可变 manifest、
+计划、模型原始响应、逐次接受/拒绝记录、最终 `train.jsonl` 和质量汇总。该目录仍由
+`.gitignore` 排除，不改变现有 `top1_train_v1.jsonl`。只检查计划而不调用 API 时使用
+`--plan-only`。
+
+生成数据可直接作为独立训练输入：
+
+```bash
+TOP1_TRAIN_DATA=data_top1/generated/top1_controlled_multiturn_v1/train.jsonl \
+  bash scripts/train_top1.sh
+```
