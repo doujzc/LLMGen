@@ -121,12 +121,10 @@ def load_evaluation_run(
     target_candidate: str | None = None,
     predicted_candidate: str | None = None,
     errors_only: bool = False,
-    limit: int = 500,
+    backend_correct: bool | None = None,
 ) -> dict[str, Any]:
     """Load one evaluation run and project its cases without changing artifacts."""
 
-    if limit <= 0:
-        raise ValueError("limit must be positive")
     root = _required_directory(run_dir)
     manifest = read_json_object(root / "eval_manifest.json")
     summary = _optional_json(root / "summary.json")
@@ -146,16 +144,19 @@ def load_evaluation_run(
             continue
         if errors_only and prediction.get("correct") is not False:
             continue
-        matching_rows += 1
-        if len(projected) >= limit:
+        backend = _mapping(prediction.get("backend_decision"))
+        if (
+            backend_correct is not None
+            and backend.get("correct") is not backend_correct
+        ):
             continue
+        matching_rows += 1
         row_index = _integer(prediction.get("row_index"), default=-1)
         source_row = (
             dataset_rows[row_index]
             if 0 <= row_index < len(dataset_rows)
             else None
         )
-        backend = _mapping(prediction.get("backend_decision"))
         diagnostics = _mapping(prediction.get("diagnostics"))
         history = _mapping(prediction.get("history_ablation"))
         messages = _safe_messages(source_row)
@@ -188,81 +189,52 @@ def load_evaluation_run(
         "metrics": metrics,
         "dataset_status": dataset_status,
         "matching_rows": matching_rows,
-        "displayed_rows": len(projected),
         "cases": projected,
     }
 
 
 def evaluation_statistics(metrics: Mapping[str, Any]) -> dict[str, Any]:
-    """Project one metrics payload into chart-ready read-only statistics."""
+    """Project one metrics payload into dashboard-ready read-only statistics."""
 
     backend = _mapping(metrics.get("backend"))
+    backend_labels = _backend_label_accuracy_rows(backend)
+    positive_rows = [
+        row for row in backend_labels if row["sample_type"] == "positive"
+    ]
+    negative_rows = [
+        row for row in backend_labels if row["sample_type"] == "negative"
+    ]
     available_oos = _mapping(backend.get("available_oos"))
     routing = _mapping(metrics.get("routing_policy"))
-    calibration = _mapping(metrics.get("calibration"))
     kpis = [
+        {
+            "name": "后端总准确率",
+            "value": backend.get("accuracy"),
+            "format": "percent",
+            "tone": "primary",
+        },
+        {
+            "name": "正样本准确率",
+            "value": _combined_accuracy(positive_rows),
+            "format": "percent",
+            "tone": "neutral",
+        },
+        {
+            "name": "负样本准确率",
+            "value": _combined_accuracy(negative_rows),
+            "format": "percent",
+            "tone": "neutral",
+        },
         {
             "name": "样本数",
             "value": metrics.get("rows"),
             "format": "integer",
             "tone": "neutral",
         },
-        {
-            "name": "后端准确率",
-            "value": backend.get("accuracy"),
-            "format": "percent",
-            "tone": "primary",
-        },
-        {
-            "name": "候选准确率",
-            "value": metrics.get("top1_accuracy"),
-            "format": "percent",
-            "tone": "neutral",
-        },
-        {
-            "name": "候选 Macro Recall",
-            "value": metrics.get("macro_recall_observed_candidates"),
-            "format": "percent",
-            "tone": "neutral",
-        },
-        {
-            "name": "OOS 误接收率",
-            "value": available_oos.get("unsafe_oos_accept_rate"),
-            "format": "percent",
-            "tone": "danger",
-        },
-        {
-            "name": "可用请求误拒率",
-            "value": available_oos.get("available_false_reject_rate"),
-            "format": "percent",
-            "tone": "warning",
-        },
-        {
-            "name": "最终路由覆盖率",
-            "value": routing.get("output_route_coverage"),
-            "format": "percent",
-            "tone": "neutral",
-        },
-        {
-            "name": "ECE",
-            "value": calibration.get("expected_calibration_error"),
-            "format": "decimal",
-            "tone": "neutral",
-        },
     ]
     return {
         "kpis": kpis,
-        "candidate_metrics": _classification_metric_rows(
-            _mapping(metrics.get("per_candidate")),
-            name_field="candidate",
-        ),
-        "backend_metrics": _classification_metric_rows(
-            _mapping(backend.get("per_label")),
-            name_field="backend",
-        ),
-        "strata": _strata_rows(metrics),
-        "calibration": _calibration_rows(calibration),
-        "calibration_support": _calibration_support_rows(calibration),
+        "backend_labels": backend_labels,
         "routing": _named_numeric_rows(
             {
                 "原始路由覆盖率": routing.get("raw_route_coverage"),
@@ -284,8 +256,6 @@ def evaluation_statistics(metrics: Mapping[str, Any]) -> dict[str, Any]:
 def compare_evaluation_runs(
     first_dir: str | Path,
     second_dir: str | Path,
-    *,
-    limit: int = 500,
 ) -> dict[str, Any]:
     """Compare aggregate results and same-dataset case changes for two runs."""
 
@@ -367,7 +337,7 @@ def compare_evaluation_runs(
     return {
         "same_dataset": same_dataset,
         "aggregate": aggregate,
-        "case_changes": changes[:limit],
+        "case_changes": changes,
         "case_change_count": len(changes),
     }
 
@@ -462,111 +432,53 @@ def _run_reference(model_id: Any, evaluation_id: Any) -> str:
     return f"{model}/{evaluation}"
 
 
-def _classification_metric_rows(
-    values: Mapping[str, Any],
-    *,
-    name_field: str,
+def _backend_label_accuracy_rows(
+    backend: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    rows = []
-    for name, raw_metrics in values.items():
-        item = _mapping(raw_metrics)
-        for metric in ("precision", "recall"):
-            value = item.get(metric)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            rows.append(
-                {
-                    name_field: str(name),
-                    "metric": metric,
-                    "value": float(value),
-                    "support": item.get("support"),
-                    "predicted": item.get("predicted"),
-                }
-            )
-    return rows
-
-
-def _strata_rows(metrics: Mapping[str, Any]) -> list[dict[str, Any]]:
-    groups = (
-        ("对话", _mapping(metrics.get("conversation_strata"))),
-        ("Prompt", _mapping(metrics.get("prompt_fitting_strata"))),
+    policy = _mapping(backend.get("decision_policy"))
+    fallback = policy.get("fallback_backend_label")
+    per_label = _mapping(backend.get("per_label"))
+    configured_labels = policy.get("backend_labels")
+    labels = (
+        [str(label) for label in configured_labels]
+        if isinstance(configured_labels, list)
+        else [str(label) for label in per_label]
     )
     rows = []
-    for scope, values in groups:
-        for name, raw_metrics in values.items():
-            item = _mapping(raw_metrics)
-            for metric in ("accuracy", "backend_accuracy"):
-                value = item.get(metric)
-                if isinstance(value, bool) or not isinstance(value, (int, float)):
-                    continue
-                rows.append(
-                    {
-                        "scope": scope,
-                        "stratum": str(name),
-                        "label": f"{scope} · {name}",
-                        "metric": metric,
-                        "value": float(value),
-                        "rows": item.get("rows"),
-                    }
-                )
-    return rows
-
-
-def _calibration_rows(calibration: Mapping[str, Any]) -> list[dict[str, Any]]:
-    rows = []
-    bins = calibration.get("bins")
-    if not isinstance(bins, list):
-        return rows
-    for raw_bin in bins:
-        item = _mapping(raw_bin)
-        lower = item.get("lower")
-        upper = item.get("upper")
-        if not isinstance(lower, (int, float)) or not isinstance(upper, (int, float)):
-            continue
-        label = f"{float(lower):.1f}–{float(upper):.1f}"
-        midpoint = (float(lower) + float(upper)) / 2
-        for metric in ("accuracy", "confidence"):
-            value = item.get(metric)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            rows.append(
-                {
-                    "bin": label,
-                    "midpoint": midpoint,
-                    "metric": metric,
-                    "value": float(value),
-                    "rows": item.get("rows"),
-                }
-            )
-    return rows
-
-
-def _calibration_support_rows(
-    calibration: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    bins = calibration.get("bins")
-    if not isinstance(bins, list):
-        return []
-    rows = []
-    for raw_bin in bins:
-        item = _mapping(raw_bin)
-        lower = item.get("lower")
-        upper = item.get("upper")
-        count = item.get("rows")
-        if (
-            not isinstance(lower, (int, float))
-            or not isinstance(upper, (int, float))
-            or isinstance(count, bool)
-            or not isinstance(count, int)
-        ):
-            continue
+    for label in labels:
+        item = _mapping(per_label.get(label))
+        support = item.get("support")
+        correct = item.get("correct")
+        normalized_support = (
+            int(support)
+            if isinstance(support, int) and not isinstance(support, bool)
+            else 0
+        )
+        normalized_correct = (
+            int(correct)
+            if isinstance(correct, int) and not isinstance(correct, bool)
+            else 0
+        )
         rows.append(
             {
-                "bin": f"{float(lower):.1f}–{float(upper):.1f}",
-                "rows": count,
+                "label": label,
+                "sample_type": "negative" if label == fallback else "positive",
+                "accuracy": (
+                    normalized_correct / normalized_support
+                    if normalized_support
+                    else None
+                ),
+                "correct": normalized_correct,
+                "support": normalized_support,
             }
         )
     return rows
+
+
+def _combined_accuracy(rows: Sequence[Mapping[str, Any]]) -> float | None:
+    support = sum(int(row.get("support") or 0) for row in rows)
+    correct = sum(int(row.get("correct") or 0) for row in rows)
+    return correct / support if support else None
 
 
 def _named_numeric_rows(values: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -45,8 +45,6 @@ EVALUATION_COLUMNS = (
     "route_threshold",
     "rows",
     "backend_accuracy",
-    "raw_candidate_accuracy",
-    "unsafe_oos_accept_rate",
 )
 EVALUATION_COLUMN_LABELS = (
     "Run",
@@ -56,8 +54,6 @@ EVALUATION_COLUMN_LABELS = (
     "阈值",
     "样本",
     "后端准确率",
-    "候选准确率",
-    "OOS 误接收",
 )
 TRAINING_COLUMNS = (
     "created_at",
@@ -71,35 +67,33 @@ TRAINING_COLUMNS = (
 )
 CASE_COLUMNS = (
     "row_index",
-    "target",
-    "predicted",
-    "candidate_correct",
+    "backend_correct",
     "target_backend",
     "predicted_backend",
-    "backend_correct",
+    "target",
+    "predicted",
     "route_status",
     "confidence",
+    "last_user",
     "message_count",
     "history_dropped",
     "current_user_truncated",
     "history_changed_prediction",
-    "last_user",
 )
 CASE_COLUMN_LABELS = (
     "序号",
-    "目标候选",
-    "预测候选",
-    "候选正确",
+    "后端结果",
     "目标后端",
     "预测后端",
-    "后端正确",
+    "目标候选",
+    "预测候选",
     "路由状态",
     "置信度",
+    "最后用户请求",
     "消息数",
     "丢弃历史",
     "当前轮截断",
     "历史改变预测",
-    "最后用户请求",
 )
 COMPARE_COLUMNS = (
     "row_index",
@@ -113,6 +107,7 @@ COMPARE_COLUMNS = (
     "change",
     "last_user",
 )
+BACKEND_RESULT_CHOICES = ("正确", "错误")
 
 APP_CSS = """
 .readonly-banner {
@@ -165,22 +160,47 @@ APP_CSS = """
 .matrix { width: 100%; border-collapse: separate; border-spacing: 3px; font-size: .76rem; }
 .matrix th { padding: 5px; color: var(--body-text-color-subdued); font-weight: 550; }
 .matrix td { min-width: 42px; padding: 7px 5px; border-radius: 5px; text-align: center; }
-.evaluation-chart path[role="graphics-symbol"][aria-roledescription="bar"] {
-  fill: #64748b;
+.label-accuracy {
+  padding: 14px 16px;
+  border: 1px solid var(--border-color-primary);
+  border-radius: 12px;
+  background: var(--block-background-fill);
 }
-.evaluation-chart path[aria-label*="metric: precision"] { fill: #2563eb !important; }
-.evaluation-chart path[aria-label*="metric: recall"] { fill: #14b8a6 !important; }
-.evaluation-chart path[aria-label*="metric: accuracy"][aria-roledescription="bar"] {
-  fill: #64748b !important;
+.label-accuracy h3 { margin: 0 0 4px; font-size: 1rem; }
+.label-accuracy .definition {
+  margin-bottom: 14px;
+  color: var(--body-text-color-subdued);
+  font-size: .8rem;
 }
-.evaluation-chart path[aria-label*="metric: backend_accuracy"] {
-  fill: #2563eb !important;
+.label-accuracy-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 180px) minmax(140px, 1fr) 72px 90px;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
 }
-.evaluation-chart path[aria-label*="metric: accuracy"][aria-roledescription="line mark"] {
-  stroke: #2563eb !important;
+.label-accuracy-row .label { font-weight: 600; }
+.label-accuracy-row .track {
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, .2);
 }
-.evaluation-chart path[aria-label*="metric: confidence"][aria-roledescription="line mark"] {
-  stroke: #dc2626 !important;
+.label-accuracy-row .fill {
+  height: 100%;
+  border-radius: inherit;
+  background: #2563eb;
+}
+.label-accuracy-row.negative .fill { background: #64748b; }
+.label-accuracy-row .rate { font-variant-numeric: tabular-nums; font-weight: 650; }
+.label-accuracy-row .support {
+  color: var(--body-text-color-subdued);
+  font-size: .8rem;
+  text-align: right;
+}
+@media (max-width: 720px) {
+  .label-accuracy-row { grid-template-columns: 100px 1fr 62px; }
+  .label-accuracy-row .support { display: none; }
 }
 """
 
@@ -711,6 +731,47 @@ def _kpi_html(kpis: Sequence[Mapping[str, Any]]) -> str:
     return '<div class="kpi-grid">' + "".join(cards) + "</div>"
 
 
+def _backend_label_accuracy_html(rows: Sequence[Mapping[str, Any]]) -> str:
+    items = []
+    for row in rows:
+        label = escape(str(row.get("label") or "unknown"))
+        sample_type = str(row.get("sample_type") or "positive")
+        row_class = "negative" if sample_type == "negative" else "positive"
+        accuracy = row.get("accuracy")
+        if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
+            normalized = min(1.0, max(0.0, float(accuracy)))
+            rate = f"{normalized:.2%}"
+            width = f"{normalized * 100:.2f}%"
+        else:
+            rate = "—"
+            width = "0%"
+        correct = row.get("correct")
+        support = row.get("support")
+        count = (
+            f"{int(correct)}/{int(support)}"
+            if isinstance(correct, int)
+            and not isinstance(correct, bool)
+            and isinstance(support, int)
+            and not isinstance(support, bool)
+            else "—"
+        )
+        items.append(
+            f'<div class="label-accuracy-row {row_class}">'
+            f'<div class="label">{label}</div>'
+            f'<div class="track"><div class="fill" style="width:{width}"></div></div>'
+            f'<div class="rate">{rate}</div>'
+            f'<div class="support">正确/总数 {count}</div>'
+            "</div>"
+        )
+    content = "".join(items) or '<div class="definition">暂无后端 Label 指标。</div>'
+    return (
+        '<div class="label-accuracy"><h3>各后端 Label 准确率</h3>'
+        '<div class="definition">按真实 Label 分组，准确率 = 后端预测完全正确数 / 该 Label 样本数。'
+        "正样本为可路由后端，负样本为 fallback 后端。</div>"
+        f"{content}</div>"
+    )
+
+
 def _format_statistic(value: Any, format_name: str) -> str:
     if value is None or isinstance(value, bool):
         return "—"
@@ -781,7 +842,7 @@ def _rows_frame(pandas: Any, rows: Sequence[Mapping[str, Any]], columns: Sequenc
 def _evaluation_runs_frame(pandas: Any, rows: Sequence[Mapping[str, Any]]):
     frame = _rows_frame(pandas, rows, EVALUATION_COLUMNS)
     frame.columns = list(EVALUATION_COLUMN_LABELS)
-    for column in ("后端准确率", "候选准确率", "OOS 误接收"):
+    for column in ("后端准确率",):
         frame[column] = frame[column].map(
             lambda value: (
                 f"{float(value) * 100:.2f}%"
@@ -794,10 +855,11 @@ def _evaluation_runs_frame(pandas: Any, rows: Sequence[Mapping[str, Any]]):
 
 def _evaluation_cases_frame(pandas: Any, rows: Sequence[Mapping[str, Any]]):
     frame = _rows_frame(pandas, rows, CASE_COLUMNS)
-    for column in ("candidate_correct", "backend_correct"):
-        frame[column] = frame[column].map(
-            lambda value: "✓" if value is True else "✗" if value is False else "—"
+    frame["backend_correct"] = frame["backend_correct"].map(
+        lambda value: (
+            "✓ 正确" if value is True else "✗ 错误" if value is False else "—"
         )
+    )
     for column in ("current_user_truncated", "history_changed_prediction"):
         frame[column] = frame[column].map(
             lambda value: "是" if value is True else "否" if value is False else "—"
@@ -810,7 +872,35 @@ def _evaluation_cases_frame(pandas: Any, rows: Sequence[Mapping[str, Any]]):
         )
     )
     frame.columns = list(CASE_COLUMN_LABELS)
-    return frame
+    if frame.empty:
+        return frame
+
+    def row_style(row: Any) -> list[str]:
+        result = row["后端结果"]
+        background = (
+            "rgba(34, 197, 94, 0.12)"
+            if result == "✓ 正确"
+            else "rgba(239, 68, 68, 0.12)"
+            if result == "✗ 错误"
+            else "transparent"
+        )
+        return [f"background-color: {background}"] * len(row)
+
+    return frame.style.apply(row_style, axis=1).map(
+        lambda _value: "font-weight: 700",
+        subset=["后端结果"],
+    )
+
+
+def _backend_correct_filter(values: Any) -> bool | None:
+    if not isinstance(values, (list, tuple, set)):
+        return None
+    selected = {str(value) for value in values}
+    if selected == {"正确"}:
+        return True
+    if selected == {"错误"}:
+        return False
+    return None
 
 
 def build_app(
@@ -929,54 +1019,33 @@ def build_app(
 
     def load_evaluation(
         run_dir: str,
-        target: str | None,
-        predicted: str | None,
-        errors_only: bool,
+        backend_results: Sequence[str] | None,
     ):
         try:
+            backend_correct = _backend_correct_filter(backend_results)
             detail = load_evaluation_run(
                 run_dir,
-                target_candidate=target or None,
-                predicted_candidate=predicted or None,
-                errors_only=errors_only,
+                backend_correct=backend_correct,
             )
             statistics = evaluation_statistics(detail["metrics"])
             dataset = detail["dataset_status"]
             state = dataset.get("state")
             message = (
-                f"数据集回查：`{state}` · Case 筛选命中 "
-                f"**{detail['matching_rows']}** 条 · 当前显示 "
-                f"**{detail['displayed_rows']}** 条（上限 500）"
+                f"数据集回查：`{state}` · Case 共 "
+                f"**{detail['matching_rows']}** 条"
             )
             backend_metrics = _mapping(detail["metrics"].get("backend"))
             return (
                 message,
                 gr.HTML(value=_evaluation_header_html(detail), visible=True),
                 gr.HTML(value=_kpi_html(statistics["kpis"]), visible=True),
-                _rows_frame(
-                    pd,
-                    statistics["candidate_metrics"],
-                    ("candidate", "metric", "value", "support", "predicted"),
+                gr.HTML(
+                    value=_backend_label_accuracy_html(statistics["backend_labels"]),
+                    visible=True,
                 ),
-                _rows_frame(
-                    pd,
-                    statistics["backend_metrics"],
-                    ("backend", "metric", "value", "support", "predicted"),
-                ),
-                _rows_frame(
-                    pd,
-                    statistics["strata"],
-                    ("scope", "stratum", "label", "metric", "value", "rows"),
-                ),
-                _rows_frame(
-                    pd,
-                    statistics["calibration"],
-                    ("bin", "midpoint", "metric", "value", "rows"),
-                ),
-                _rows_frame(
-                    pd,
-                    statistics["calibration_support"],
-                    ("bin", "rows"),
+                _confusion_heatmap_html(
+                    backend_metrics.get("confusion_matrix"),
+                    title="后端混淆矩阵",
                 ),
                 _rows_frame(pd, statistics["routing"], ("metric", "value")),
                 _rows_frame(
@@ -988,48 +1057,20 @@ def build_app(
                     detail["metrics"].get("confusion_matrix"),
                     title="候选混淆矩阵",
                 ),
-                _confusion_heatmap_html(
-                    backend_metrics.get("confusion_matrix"),
-                    title="后端混淆矩阵",
-                ),
                 _evaluation_cases_frame(pd, detail["cases"]),
                 detail["cases"],
                 detail["summary"],
                 detail["metrics"],
             )
         except (Exception, SystemExit) as exc:
-            candidate_empty = _rows_frame(
-                pd,
-                [],
-                ("candidate", "metric", "value", "support", "predicted"),
-            )
-            backend_empty = _rows_frame(
-                pd,
-                [],
-                ("backend", "metric", "value", "support", "predicted"),
-            )
-            strata_empty = _rows_frame(
-                pd,
-                [],
-                ("scope", "stratum", "label", "metric", "value", "rows"),
-            )
-            calibration_empty = _rows_frame(
-                pd,
-                [],
-                ("bin", "midpoint", "metric", "value", "rows"),
-            )
             return (
                 f"❌ `{type(exc).__name__}`：{exc}",
                 gr.HTML(value="", visible=False),
                 gr.HTML(value="", visible=False),
-                candidate_empty,
-                backend_empty,
-                strata_empty,
-                calibration_empty,
-                _rows_frame(pd, [], ("bin", "rows")),
-                _rows_frame(pd, [], ("metric", "value")),
-                _rows_frame(pd, [], ("metric", "value")),
+                gr.HTML(value="", visible=False),
                 "",
+                _rows_frame(pd, [], ("metric", "value")),
+                _rows_frame(pd, [], ("metric", "value")),
                 "",
                 _evaluation_cases_frame(pd, []),
                 [],
@@ -1082,9 +1123,7 @@ def build_app(
 
     def select_evaluation(
         rows: Sequence[Mapping[str, Any]],
-        target: str | None,
-        predicted: str | None,
-        errors_only_value: bool,
+        backend_results: Sequence[str] | None,
         evt: gr.SelectData,
     ):
         run_dir = selected_evaluation_run(rows, evt)
@@ -1094,9 +1133,7 @@ def build_app(
             run_dir,
             *load_evaluation(
                 run_dir,
-                target,
-                predicted,
-                errors_only_value,
+                backend_results,
             ),
         )
 
@@ -1285,23 +1322,12 @@ def build_app(
                     label="当前 Evaluation Run",
                     scale=5,
                 )
-                target_filter = gr.Dropdown(
-                    choices=[None, *default_candidates],
-                    value=None,
-                    label="Target 过滤",
+                backend_result_filter = gr.Dropdown(
+                    choices=list(BACKEND_RESULT_CHOICES),
+                    value=list(BACKEND_RESULT_CHOICES),
+                    multiselect=True,
+                    label="Case 后端结果",
                     scale=2,
-                )
-                predicted_filter = gr.Dropdown(
-                    choices=[None, *default_candidates],
-                    value=None,
-                    label="Prediction 过滤",
-                    scale=2,
-                )
-                errors_only = gr.Checkbox(
-                    value=True,
-                    label="仅错误",
-                    scale=1,
-                    min_width=140,
                 )
                 load_evaluation_button = gr.Button(
                     "加载 / 应用筛选",
@@ -1311,104 +1337,33 @@ def build_app(
                 )
             evaluation_status = gr.Markdown()
             evaluation_header = gr.HTML(visible=False)
-            evaluation_kpis = gr.HTML(visible=False)
 
             with gr.Tabs():
                 with gr.Tab("统计概览"):
-                    with gr.Row():
-                        candidate_metrics_plot = gr.BarPlot(
-                            value=pd.DataFrame(
-                                columns=["candidate", "metric", "value"]
-                            ),
-                            x="candidate",
-                            y="value",
-                            color="metric",
-                            color_map={"precision": "#2563eb", "recall": "#14b8a6"},
-                            y_lim=[0, 1],
-                            x_label_angle=-25,
-                            y_axis_format=".0%",
-                            title="候选 Precision / Recall",
-                            height=320,
-                            elem_classes="evaluation-chart",
+                    evaluation_kpis = gr.HTML(visible=False)
+                    backend_label_accuracy = gr.HTML(visible=False)
+                    backend_confusion = gr.HTML()
+                    with gr.Accordion("辅助诊断（默认收起）", open=False):
+                        gr.Markdown(
+                            "候选层指标、路由策略和历史消融只用于进一步定位问题，"
+                            "不作为本页主指标。"
                         )
-                        backend_metrics_plot = gr.BarPlot(
-                            value=pd.DataFrame(
-                                columns=["backend", "metric", "value"]
-                            ),
-                            x="backend",
-                            y="value",
-                            color="metric",
-                            color_map={"precision": "#7c3aed", "recall": "#f59e0b"},
-                            y_lim=[0, 1],
-                            x_label_angle=-15,
-                            y_axis_format=".0%",
-                            title="后端 Precision / Recall",
-                            height=320,
-                            elem_classes="evaluation-chart",
-                        )
-                    with gr.Row():
-                        strata_plot = gr.BarPlot(
-                            value=pd.DataFrame(
-                                columns=["label", "metric", "value"]
-                            ),
-                            x="label",
-                            y="value",
-                            color="metric",
-                            color_map={
-                                "accuracy": "#64748b",
-                                "backend_accuracy": "#2563eb",
-                            },
-                            y_lim=[0, 1],
-                            x_label_angle=-25,
-                            y_axis_format=".0%",
-                            title="对话与 Prompt 分层表现",
-                            height=340,
-                            elem_classes="evaluation-chart",
-                        )
-                        calibration_plot = gr.LinePlot(
-                            value=pd.DataFrame(
-                                columns=["midpoint", "metric", "value"]
-                            ),
-                            x="midpoint",
-                            y="value",
-                            color="metric",
-                            color_map={"accuracy": "#2563eb", "confidence": "#dc2626"},
-                            x_lim=[0, 1],
-                            y_lim=[0, 1],
-                            x_axis_format=".1f",
-                            y_axis_format=".0%",
-                            title="置信度校准",
-                            height=340,
-                            elem_classes="evaluation-chart",
-                        )
-                    with gr.Row():
-                        calibration_support_plot = gr.BarPlot(
-                            value=pd.DataFrame(columns=["bin", "rows"]),
-                            x="bin",
-                            y="rows",
-                            color_map={"rows": "#94a3b8"},
-                            x_label_angle=-25,
-                            title="置信度区间样本量",
-                            height=280,
-                            elem_classes="evaluation-chart",
-                        )
-                        routing_statistics = gr.Dataframe(
-                            value=pd.DataFrame(columns=["metric", "value"]),
-                            interactive=False,
-                            label="路由与 OOS 统计",
-                            max_height=280,
-                            wrap=False,
-                        )
-                        history_statistics = gr.Dataframe(
-                            value=pd.DataFrame(columns=["metric", "value"]),
-                            interactive=False,
-                            label="历史消融统计",
-                            max_height=280,
-                            wrap=False,
-                        )
-                    with gr.Row():
-                        candidate_confusion = gr.HTML(scale=2)
-                        backend_confusion = gr.HTML(scale=1)
+                        with gr.Row():
+                            routing_statistics = gr.Dataframe(
+                                value=pd.DataFrame(columns=["metric", "value"]),
+                                interactive=False,
+                                label="路由与 OOS 统计",
+                                max_height=280,
+                                wrap=False,
+                            )
+                            history_statistics = gr.Dataframe(
+                                value=pd.DataFrame(columns=["metric", "value"]),
+                                interactive=False,
+                                label="历史消融统计",
+                                max_height=280,
+                                wrap=False,
+                            )
+                        candidate_confusion = gr.HTML()
 
                 with gr.Tab("Case 分析"):
                     evaluation_cases = gr.Dataframe(
@@ -1416,9 +1371,8 @@ def build_app(
                         interactive=False,
                         label="Cases（点击一行查看完整对话）",
                         max_height=440,
-                        show_search="filter",
                         show_row_numbers=True,
-                        pinned_columns=3,
+                        pinned_columns=4,
                         wrap=True,
                     )
                     with gr.Row():
@@ -1465,15 +1419,11 @@ def build_app(
                 evaluation_status,
                 evaluation_header,
                 evaluation_kpis,
-                candidate_metrics_plot,
-                backend_metrics_plot,
-                strata_plot,
-                calibration_plot,
-                calibration_support_plot,
+                backend_label_accuracy,
+                backend_confusion,
                 routing_statistics,
                 history_statistics,
                 candidate_confusion,
-                backend_confusion,
                 evaluation_cases,
                 evaluation_cases_state,
                 evaluation_summary,
@@ -1495,15 +1445,13 @@ def build_app(
                 select_evaluation,
                 inputs=[
                     evaluation_rows_state,
-                    target_filter,
-                    predicted_filter,
-                    errors_only,
+                    backend_result_filter,
                 ],
                 outputs=[evaluation_run, *evaluation_detail_outputs],
             )
             load_evaluation_button.click(
                 load_evaluation,
-                inputs=[evaluation_run, target_filter, predicted_filter, errors_only],
+                inputs=[evaluation_run, backend_result_filter],
                 outputs=evaluation_detail_outputs,
             )
             evaluation_cases.select(

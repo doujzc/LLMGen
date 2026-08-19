@@ -48,14 +48,65 @@ class InspectionTests(unittest.TestCase):
 
             discovered = discover_evaluation_runs(root / "evaluations")
             detail = load_evaluation_run(run, errors_only=True)
+            backend_errors = load_evaluation_run(run, backend_correct=False)
 
             self.assertEqual(len(discovered), 1)
             self.assertEqual(discovered[0]["evaluation_id"], "eval-1")
             self.assertEqual(detail["dataset_status"]["state"], "verified")
             self.assertEqual(detail["matching_rows"], 1)
+            self.assertEqual(backend_errors["matching_rows"], 1)
             self.assertEqual(detail["cases"][0]["last_user"], "case one")
             self.assertIn("assistant: answer", detail["cases"][0]["dialogue"])
             self.assertEqual(before, self._snapshot(root))
+
+    def test_evaluation_case_projection_has_no_row_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dataset = root / "cases.jsonl"
+            write_jsonl(
+                dataset,
+                (
+                    {
+                        "messages": [{"role": "user", "content": f"case {index}"}],
+                        "target_candidate_name": "A",
+                    }
+                    for index in range(501)
+                ),
+            )
+            run = root / "evaluation"
+            run.mkdir()
+            write_json(
+                run / "eval_manifest.json",
+                {
+                    "evaluation_id": "all-cases",
+                    "dataset": {
+                        "path": str(dataset),
+                        "sha256": sha256_file(dataset),
+                    },
+                },
+            )
+            write_jsonl(
+                run / "predictions.jsonl",
+                (
+                    {
+                        "row_index": index,
+                        "target_candidate_name": "A",
+                        "predicted_candidate_name": "A",
+                        "correct": True,
+                        "backend_decision": {
+                            "target_backend_label": "A",
+                            "predicted_backend_label": "A",
+                            "correct": True,
+                        },
+                    }
+                    for index in range(501)
+                ),
+            )
+
+            detail = load_evaluation_run(run)
+
+            self.assertEqual(detail["matching_rows"], 501)
+            self.assertEqual(len(detail["cases"]), 501)
 
     def test_evaluation_comparison_only_diffs_cases_for_same_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -242,7 +293,7 @@ class InspectionTests(unittest.TestCase):
             1.0,
         )
 
-    def test_evaluation_statistics_are_projected_for_dashboard_charts(self) -> None:
+    def test_evaluation_statistics_prioritize_backend_accuracy(self) -> None:
         statistics = evaluation_statistics(
             {
                 "rows": 10,
@@ -280,12 +331,24 @@ class InspectionTests(unittest.TestCase):
                 "history_ablation": {"rows": 3, "history_helped": 1},
                 "backend": {
                     "accuracy": 0.9,
+                    "decision_policy": {
+                        "backend_labels": ["Available", "Fallback"],
+                        "fallback_backend_label": "Fallback",
+                    },
                     "per_label": {
                         "Available": {
                             "support": 5,
                             "predicted": 5,
+                            "correct": 4,
                             "precision": 0.8,
                             "recall": 0.8,
+                        },
+                        "Fallback": {
+                            "support": 5,
+                            "predicted": 5,
+                            "correct": 5,
+                            "precision": 1.0,
+                            "recall": 1.0,
                         }
                     },
                     "available_oos": {
@@ -296,11 +359,12 @@ class InspectionTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(statistics["kpis"][0]["value"], 10)
-        self.assertEqual(len(statistics["candidate_metrics"]), 2)
-        self.assertEqual(statistics["strata"][0]["scope"], "对话")
-        self.assertEqual(len(statistics["calibration"]), 2)
-        self.assertEqual(statistics["calibration_support"][0]["rows"], 4)
+        self.assertEqual(statistics["kpis"][0]["value"], 0.9)
+        self.assertEqual(statistics["kpis"][1]["value"], 0.8)
+        self.assertEqual(statistics["kpis"][2]["value"], 1.0)
+        self.assertEqual(statistics["backend_labels"][0]["accuracy"], 0.8)
+        self.assertEqual(statistics["backend_labels"][1]["sample_type"], "negative")
+        self.assertNotIn("candidate_metrics", statistics)
 
     def test_evaluation_visual_helpers_escape_labels_and_highlight_errors(self) -> None:
         heatmap = debug_top1._confusion_heatmap_html(
@@ -317,11 +381,47 @@ class InspectionTests(unittest.TestCase):
                 },
             )
         )
+        labels = debug_top1._backend_label_accuracy_html(
+            (
+                {
+                    "label": "Available<script>",
+                    "sample_type": "positive",
+                    "accuracy": 0.8,
+                    "correct": 4,
+                    "support": 5,
+                },
+            )
+        )
 
         self.assertNotIn("<script>", heatmap)
+        self.assertNotIn("<script>", labels)
         self.assertIn("220,38,38", heatmap)
+        self.assertIn("80.00%", labels)
         self.assertIn("12.50%", kpis)
         self.assertIn("Unsafe &lt;rate&gt;", kpis)
+
+    def test_case_filter_and_styling_follow_backend_correctness(self) -> None:
+        import pandas as pd
+
+        styled = debug_top1._evaluation_cases_frame(
+            pd,
+            (
+                {
+                    "row_index": 3,
+                    "backend_correct": False,
+                    "target_backend": "NoAvailable",
+                    "predicted_backend": "Ecommerce",
+                    "target": "GeneralProduct",
+                    "predicted": "EcommerceProduct",
+                },
+            ),
+        )
+
+        self.assertEqual(debug_top1._backend_correct_filter(["正确"]), True)
+        self.assertEqual(debug_top1._backend_correct_filter(["错误"]), False)
+        self.assertIsNone(debug_top1._backend_correct_filter(["正确", "错误"]))
+        self.assertEqual(styled.data.iloc[0]["后端结果"], "✗ 错误")
+        self.assertIn("rgba(239, 68, 68, 0.12)", styled.to_html())
 
     @staticmethod
     def _snapshot(root: Path) -> dict[str, bytes]:

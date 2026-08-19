@@ -148,6 +148,11 @@ def build_summary(
         if len({str(row.get("target_candidate_name")) for row in values}) > 1
     }
     message_counts = Counter(len(normalize_messages(row.get("messages"))) for row in rows)
+    reviewed_corrections = [
+        row["label_review_correction"]
+        for row in rows
+        if isinstance(row.get("label_review_correction"), dict)
+    ]
     return {
         "schema_version": 1,
         "dataset_version": DATASET_VERSION,
@@ -169,6 +174,25 @@ def build_summary(
         "unique_current_utterances": len(current_utterances),
         "reused_current_utterance_groups": len(reused_current),
         "current_utterance_label_conflicts": len(conflicting_current),
+        "reviewed_label_corrections": {
+            "rows": len(reviewed_corrections),
+            "repair_version_counts": dict(
+                sorted(
+                    Counter(
+                        str(correction.get("repair_version"))
+                        for correction in reviewed_corrections
+                    ).items()
+                )
+            ),
+            "reason_code_counts": dict(
+                sorted(
+                    Counter(
+                        str(correction.get("reason_code"))
+                        for correction in reviewed_corrections
+                    ).items()
+                )
+            ),
+        },
         "sources": [
             {
                 "path": _display_path(path),

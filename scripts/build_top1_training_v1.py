@@ -888,7 +888,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "task_clarifications": {
                         "EcommerceProduct": (
                             "ordinary goods generally available through ecommerce; "
-                            "exclude vehicles, property, medicine, and services"
+                            "include pre-purchase model comparison, price, promotion, "
+                            "performance, and suitability even without a platform cue; "
+                            "exclude vehicles, property, medicine, software, and services"
                         ),
                         "StockQuery": (
                             "factual lookup only; future prediction, selection, and "

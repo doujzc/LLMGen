@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "repair_version": "top1_ecommerce_boundary_repairs_v1",
+  "policy": "Ordinary ecommerce goods in pre-purchase recommendation, comparison, price, promotion, performance, or suitability scenarios are EcommerceProduct even when a concrete model is named or no platform is mentioned.",
+  "repairs": [
+    {
+      "id": "top1_controlled_multiturn_v1_assistant_distractor_generalproduct_008",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_contextual_follow_up_generalproduct_013",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_noavailable_to_generalproduct_010",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_assistant_distractor_generalproduct_004",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockother_to_generalproduct_009",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockquery_to_generalproduct_003",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_clarification_revision_generalproduct_002",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_recommendation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_progressive_reveal_generalproduct_005",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_accessory_recommendation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_clarification_revision_generalproduct_004",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_recommendation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_contextual_follow_up_generalproduct_010",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockadvice_to_generalproduct_006",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_suitability"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_progressive_reveal_generalproduct_018",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockadvice_to_generalproduct_008",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_noavailable_to_generalproduct_001",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_rambling_generalproduct_004",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_suitability"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockother_to_generalproduct_006",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_suitability"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockadvice_to_generalproduct_001",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_accessory_recommendation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_contextual_follow_up_generalproduct_014",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_comparison"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_contextual_follow_up_generalproduct_011",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_replacement"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockquery_to_generalproduct_002",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_suitability"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_contextual_follow_up_generalproduct_008",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockadvice_to_generalproduct_007",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_cost"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockadvice_to_generalproduct_009",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_evaluation"
+    },
+    {
+      "id": "top1_controlled_multiturn_v1_intent_change_stockquery_to_generalproduct_004",
+      "from_candidate_name": "GeneralProduct",
+      "to_candidate_name": "EcommerceProduct",
+      "reason_code": "ordinary_goods_pre_purchase_suitability"
+    }
+  ]
+}

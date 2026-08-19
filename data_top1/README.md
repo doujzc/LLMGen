@@ -84,6 +84,18 @@ TOP1_TRAIN_DATA=data_top1/generated/top1_controlled_multiturn_v1/train.jsonl \
   bash scripts/train_top1.sh
 ```
 
+普通电商商品的购买前品牌/型号选择、比较、价格优惠、性能评价和适用性判断统一属于
+`EcommerceProduct`，即使 query 已经给出具体型号或没有点名京东、淘宝。药品、整车、
+房屋、服务和软件，以及已有商品的使用、故障、售后和订单事务仍属于
+`GeneralProduct`。对已生成数据进行人工边界复核时，使用显式 ID 清单应用修订：
+
+```bash
+uv run --no-sync python scripts/repair_top1_ecommerce_labels.py
+```
+
+修订不会改写原始双模型判断；每条修订记录在 `label_review_correction`，summary 同时记录
+修订清单、输入和修订后数据的 SHA256。
+
 ## 可直接训练的 combined v1
 
 `scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集和 controlled
