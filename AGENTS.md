@@ -36,4 +36,8 @@ or learned/model-based methods.
 
 ## Safety
 
-Do not commit API keys, local model paths, weights, training data, or `runs/` outputs.
+Do not commit API keys, local model paths, weights, unreviewed/raw training data, or
+`runs/` outputs. A reviewed, versioned training dataset may be committed when the
+user explicitly requests it and its provenance and validation summary are included.
+Keep raw LLM responses, rejected attempts, caches, and other intermediate generation
+artifacts ignored.

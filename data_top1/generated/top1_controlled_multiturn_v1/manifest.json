@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v1",
+  "created_at": "2026-08-18T08:01:38.852404+00:00",
+  "config": {
+    "schema_version": 1,
+    "pipeline_version": "top1_controlled_multiturn_v1",
+    "seed": 20260818,
+    "target_count": 800,
+    "intent_change_per_pair": 10,
+    "generator_model": "Deepseek-V4-Flash-0731",
+    "labeler_model": "GLM-5.2",
+    "reviewer_model": "Qwen3.7-Plus",
+    "generator_temperature": 0.9,
+    "judge_temperature": 0.0,
+    "generation_batch_size": 1,
+    "judgment_batch_size": 10,
+    "max_workers": 4,
+    "max_sample_attempts": 12,
+    "request_attempts": 4,
+    "request_timeout_seconds": 180,
+    "generation_max_tokens": 5000,
+    "judgment_max_tokens": 5000
+  },
+  "inputs": {
+    "candidate_registry": {
+      "path": "/Users/tourxu/Codes/LLMGen/configs/top1_candidates.json",
+      "sha256": "a88f463d2c43e5283e0591e19f20f5523195d0c01be51a6c076522c4f28a0f29"
+    },
+    "taxonomy_data": {
+      "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_labeldesc_paper_v1.jsonl",
+      "sha256": "378fa0a2caa0f28903f1f8fccd28d87057870870f8f597e611b98169e9d75a03"
+    }
+  },
+  "endpoint_sha256": "a683b480f841b79bb8c4fe6132001ee8c6a6a9ae8605caff48aa1acb19bbdeb8",
+  "taxonomy_prompt_sha256": "d47e38ee354935f42ece62d5c2685fd3b8c36f92b56b6a20dbb23549a10a5f99",
+  "planned_rows": 800,
+  "run_signature": "18d6d4be4aac81c69245154660034ffb1e5eb1566c86ce0a70202761cdcf2b96"
+}
