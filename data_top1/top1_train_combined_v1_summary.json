@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "dataset_version": "top1_train_combined_v1",
-  "rows": 1800,
+  "rows": 1992,
   "candidate_counts": {
     "ChitChat": 257,
-    "EcommerceProduct": 281,
-    "GeneralProduct": 233,
+    "EcommerceProduct": 377,
+    "GeneralProduct": 329,
     "NoAvailable": 257,
     "StockAdvice": 257,
     "StockOther": 258,
@@ -13,28 +13,30 @@
   },
   "source_dataset_counts": {
     "top1_controlled_multiturn_v1": 800,
+    "top1_retail_boundary_v1": 192,
     "top1_train_v1": 1000
   },
   "source_type_counts": {
     "intent_change_augmentation": 300,
     "llm_controlled_multiturn": 800,
     "promptgen_production_hardcase_reviewed": 46,
-    "promptgen_xiaoyi_reviewed": 654
+    "promptgen_xiaoyi_reviewed": 654,
+    "reviewed_structured_retail_boundary": 192
   },
   "phenomenon_counts": {
     "assistant_distractor": 56,
-    "base": 700,
+    "base": 892,
     "clarification_revision": 70,
     "contextual_follow_up": 98,
     "intent_change": 720,
     "progressive_reveal": 128,
     "rambling": 28
   },
-  "single_turn_rows": 350,
+  "single_turn_rows": 542,
   "multi_turn_rows": 1450,
-  "multi_turn_ratio": 0.8055555555555556,
+  "multi_turn_ratio": 0.7279116465863453,
   "message_count_distribution": {
-    "1": 350,
+    "1": 542,
     "2": 4,
     "3": 493,
     "4": 2,
@@ -42,9 +44,9 @@
     "7": 263,
     "9": 260
   },
-  "unique_ids": 1800,
-  "unique_conversations": 1800,
-  "unique_current_utterances": 1735,
+  "unique_ids": 1992,
+  "unique_conversations": 1992,
+  "unique_current_utterances": 1927,
   "reused_current_utterance_groups": 60,
   "current_utterance_label_conflicts": 0,
   "reviewed_label_corrections": {
@@ -72,10 +74,15 @@
       "path": "data_top1/generated/top1_controlled_multiturn_v1/train.jsonl",
       "sha256": "9afc027ab421d7d4777fb96247bcca3bd154656de99a90187ea5e0d976ff0ae0",
       "rows": 800
+    },
+    {
+      "path": "data_top1/top1_retail_boundary_v1.jsonl",
+      "sha256": "a6738458e0ea9793f630cecf7948808e7554816a755880798c908ed041ae82c3",
+      "rows": 192
     }
   ],
   "output": {
     "path": "data_top1/top1_train_combined_v1.jsonl",
-    "sha256": "2e2825c0110fa9c970285a9edfb76d0032db27489a091027359431f99e4cb045"
+    "sha256": "38c04b576d424b47030ab5443638637df62f23fcfe9fc8f875ab72d3fb60a189"
   }
 }

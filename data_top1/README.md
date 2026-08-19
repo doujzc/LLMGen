@@ -96,17 +96,34 @@ uv run --no-sync python scripts/repair_top1_ecommerce_labels.py
 修订不会改写原始双模型判断；每条修订记录在 `label_review_correction`，summary 同时记录
 修订清单、输入和修订后数据的 SHA256。
 
+## 普通零售资格边界数据
+
+`scripts/build_top1_retail_boundary_v1.py` 不按商品名称穷举，而是围绕四个结构化边界轴
+生成成对的最小差异样本：登记资产/零售模型、权利许可/商品副本、服务/零售工具、定制
+工程/家用成品。同一对使用完全相同的购买动作表达，只改变准确交易对象，避免模型继续把
+“买、多少钱、下单”当作 `EcommerceProduct` 的充分条件。
+
+```bash
+uv run --no-sync python scripts/build_top1_retail_boundary_v1.py
+```
+
+训练集 `top1_retail_boundary_v1.jsonl` 包含 192 条、96 对单轮样本，并自动合入默认 combined
+数据。`top1_retail_boundary_v1_validation.jsonl` 包含 64 条、32 对，仅用于边界评测；其对象
+家族与训练集完全隔离，不会合入训练。相邻 summary 记录抽象轴、候选分布和两个 split 的
+SHA256。
+
 ## 可直接训练的 combined v1
 
-`scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集和 controlled
-multiturn 800 条增强集。构建时拒绝重复 ID、完全重复对话、非法候选和源数据版本漂移，
-并记录两份输入及最终输出的 SHA256。
+`scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集、controlled
+multiturn 800 条增强集和 retail-boundary 192 条训练集。构建时拒绝重复 ID、完全重复
+对话、非法候选和源数据版本漂移，并记录三份输入及最终输出的 SHA256。边界 validation
+不参与合并。
 
 ```bash
 uv run --no-sync python scripts/build_top1_combined_v1.py
 ```
 
-输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 1,800 条。`configs/top1.env`
+输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 1,992 条。`configs/top1.env`
 已将它设为默认训练数据，因此构建后可直接启动：
 
 ```bash

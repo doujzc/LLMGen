@@ -12,6 +12,9 @@ data_top1/*
 !data_top1/top1_labeldesc_paper_v1.jsonl
 !data_top1/top1_train_v1.jsonl
 !data_top1/top1_train_v1_summary.json
+!data_top1/top1_retail_boundary_v1.jsonl
+!data_top1/top1_retail_boundary_v1_validation.jsonl
+!data_top1/top1_retail_boundary_v1_summary.json
 !data_top1/top1_train_combined_v1.jsonl
 !data_top1/top1_train_combined_v1_summary.json
 !data_top1/generated/

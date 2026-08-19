@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine the reviewed base set and controlled multi-turn augmentation."""
+"""Combine reviewed base, controlled multi-turn, and retail-boundary data."""
 
 from __future__ import annotations
 
@@ -26,11 +26,13 @@ DEFAULT_BASE_DATA = "data_top1/top1_train_v1.jsonl"
 DEFAULT_AUGMENTATION_DATA = (
     "data_top1/generated/top1_controlled_multiturn_v1/train.jsonl"
 )
+DEFAULT_RETAIL_BOUNDARY_DATA = "data_top1/top1_retail_boundary_v1.jsonl"
 DEFAULT_OUTPUT = "data_top1/top1_train_combined_v1.jsonl"
 DEFAULT_SUMMARY = "data_top1/top1_train_combined_v1_summary.json"
 EXPECTED_SOURCE_VERSIONS = (
     "top1_train_v1",
     "top1_controlled_multiturn_v1",
+    "top1_retail_boundary_v1",
 )
 
 
@@ -40,6 +42,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-data", default=DEFAULT_BASE_DATA)
     parser.add_argument("--augmentation-data", default=DEFAULT_AUGMENTATION_DATA)
+    parser.add_argument(
+        "--retail-boundary-data",
+        default=DEFAULT_RETAIL_BOUNDARY_DATA,
+    )
     parser.add_argument(
         "--candidate-registry",
         default="configs/top1_candidates.json",
@@ -212,22 +218,32 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     base_path = Path(args.base_data).expanduser().resolve()
     augmentation_path = Path(args.augmentation_data).expanduser().resolve()
+    retail_boundary_path = Path(args.retail_boundary_data).expanduser().resolve()
     candidate_path = Path(args.candidate_registry).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()
     summary_path = Path(args.summary).expanduser().resolve()
-    if output_path in {base_path, augmentation_path}:
+    source_paths = {base_path, augmentation_path, retail_boundary_path}
+    if len(source_paths) != 3:
+        raise Top1DataError("combined sources must be distinct")
+    if output_path in source_paths:
         raise Top1DataError("combined output cannot overwrite a source dataset")
-    if summary_path in {base_path, augmentation_path, output_path}:
+    if summary_path in {*source_paths, output_path}:
         raise Top1DataError("summary path must be distinct from data inputs and output")
 
     candidate_names = load_candidate_names(candidate_path)
     base_rows = read_jsonl(base_path)
     augmentation_rows = read_jsonl(augmentation_path)
+    retail_boundary_rows = read_jsonl(retail_boundary_path)
     validate_training_rows(base_rows, candidate_names, source=base_path)
     validate_training_rows(
         augmentation_rows,
         candidate_names,
         source=augmentation_path,
+    )
+    validate_training_rows(
+        retail_boundary_rows,
+        candidate_names,
+        source=retail_boundary_path,
     )
     _validate_source_version(
         base_rows,
@@ -239,17 +255,33 @@ def main(argv: Sequence[str] | None = None) -> None:
         expected=EXPECTED_SOURCE_VERSIONS[1],
         source=augmentation_path,
     )
+    _validate_source_version(
+        retail_boundary_rows,
+        expected=EXPECTED_SOURCE_VERSIONS[2],
+        source=retail_boundary_path,
+    )
     combined = combine_training_rows(
-        ((str(base_path), base_rows), (str(augmentation_path), augmentation_rows))
+        (
+            (str(base_path), base_rows),
+            (str(augmentation_path), augmentation_rows),
+            (str(retail_boundary_path), retail_boundary_rows),
+        )
     )
     report = validate_training_rows(combined, candidate_names, source=output_path)
-    if report["rows"] != len(base_rows) + len(augmentation_rows):
+    expected_rows = (
+        len(base_rows) + len(augmentation_rows) + len(retail_boundary_rows)
+    )
+    if report["rows"] != expected_rows:
         raise Top1DataError("combined dataset row count mismatch")
 
     write_jsonl(output_path, combined)
     summary = build_summary(
         combined,
-        sources=((base_path, base_rows), (augmentation_path, augmentation_rows)),
+        sources=(
+            (base_path, base_rows),
+            (augmentation_path, augmentation_rows),
+            (retail_boundary_path, retail_boundary_rows),
+        ),
         output_path=output_path,
     )
     write_json(summary_path, summary)
