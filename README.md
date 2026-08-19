@@ -35,7 +35,7 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 训练和验证文件使用 JSONL。每行只要求两个字段：
 
 ```json
-{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500 元以内"}],"target_candidate_name":"EcommerceProduct"}
+{"messages":[{"role":"user","content":"推荐一款耳机"},{"role":"assistant","content":"预算是多少？"},{"role":"user","content":"500 元以内"}],"target_candidate_name":"ProductEcommerce"}
 ```
 
 - `messages` 支持 `user`、`assistant`、`tool` 和 `system`；最后一条非 system
@@ -46,8 +46,8 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 - 不要求训练集覆盖全部候选，其他元数据字段会被忽略。
 
 训练保留七个细粒度候选，但部署决策按照
-`configs/top1_decision_policy.json` 显式映射：`StockQuery` 和 `EcommerceProduct` 是可用候选，
-`StockAdvice`、`StockOther`、`GeneralProduct`、`ChitChat` 和 `NoAvailable` 都映射为
+`configs/top1_decision_policy.json` 显式映射：`StockQuery` 和 `ProductEcommerce` 是可用候选，
+`StockAdvice`、`StockOther`、`ProductGeneral`、`ChitChat` 和 `NoAvailable` 都映射为
 后端 `NoAvailable`。代码不会根据候选名称或文本内容推断该映射。
 
 仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。

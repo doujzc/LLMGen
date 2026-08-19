@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply reviewed EcommerceProduct boundary corrections to generated data."""
+"""Apply reviewed ProductEcommerce boundary corrections to generated data."""
 
 from __future__ import annotations
 
@@ -169,7 +169,7 @@ def _update_summary(
         "policy": (
             "ordinary ecommerce goods in pre-purchase recommendation, comparison, "
             "price, promotion, performance, or suitability scenarios are "
-            "EcommerceProduct"
+            "ProductEcommerce"
         ),
     }
     output = summary.setdefault("output", {})

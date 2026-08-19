@@ -33,18 +33,20 @@ EXPECTED_CANDIDATES = (
     "StockAdvice",
     "StockOther",
     "StockQuery",
-    "GeneralProduct",
-    "EcommerceProduct",
+    "ProductGeneral",
+    "ProductEcommerce",
     "ChitChat",
     "NoAvailable",
 )
 
+# Stable dataset-ID components; they are not model candidate names and must not be
+# rewritten when a candidate is renamed.
 CANDIDATE_SLUGS = {
     "StockAdvice": "stock_advice",
     "StockOther": "stock_other",
     "StockQuery": "stock_query",
-    "GeneralProduct": "general_product",
-    "EcommerceProduct": "ecommerce_product",
+    "ProductGeneral": "general_product",
+    "ProductEcommerce": "ecommerce_product",
     "ChitChat": "chitchat",
     "NoAvailable": "no_available",
 }
@@ -58,10 +60,10 @@ APPROVED_LEGACY_CANDIDATES = {
     "no_route_stock_research": "StockOther",
     "no_route_other_finance": "StockOther",
     "stock_market_information": "StockQuery",
-    "no_route_product_information": "GeneralProduct",
-    "no_route_product_other": "GeneralProduct",
-    "no_route_non_retail": "GeneralProduct",
-    "ecommerce_product_recommendation": "EcommerceProduct",
+    "no_route_product_information": "ProductGeneral",
+    "no_route_product_other": "ProductGeneral",
+    "no_route_non_retail": "ProductGeneral",
+    "ecommerce_product_recommendation": "ProductEcommerce",
     "no_route_chitchat": "ChitChat",
 }
 
@@ -169,42 +171,42 @@ INDEPENDENT_INTENT_CHANGE_TARGETS = {
 # system prompt. Ambiguous and policy-drifted rows (for example an ungrounded
 # market fragment or a future stock prediction) are deliberately absent.
 REVIEWED_PRODUCTION_LABELS = {
-    "combined_20260812_002": "EcommerceProduct",
-    "combined_20260812_006": "EcommerceProduct",
-    "combined_20260812_008": "EcommerceProduct",
-    "combined_20260812_010": "EcommerceProduct",
-    "combined_20260812_012": "EcommerceProduct",
-    "combined_20260812_015": "EcommerceProduct",
-    "combined_20260812_016": "EcommerceProduct",
-    "combined_20260812_021": "EcommerceProduct",
-    "combined_20260812_026": "EcommerceProduct",
-    "combined_20260812_027": "EcommerceProduct",
-    "combined_20260812_029": "EcommerceProduct",
-    "combined_20260812_035": "EcommerceProduct",
-    "combined_20260812_037": "EcommerceProduct",
-    "combined_20260812_038": "EcommerceProduct",
-    "combined_20260812_040": "EcommerceProduct",
-    "combined_20260812_045": "EcommerceProduct",
-    "combined_20260812_059": "EcommerceProduct",
-    "combined_20260812_060": "EcommerceProduct",
-    "combined_20260812_071": "EcommerceProduct",
-    "combined_20260812_072": "EcommerceProduct",
-    "combined_20260812_073": "EcommerceProduct",
-    "combined_20260812_074": "EcommerceProduct",
-    "combined_20260812_075": "EcommerceProduct",
-    "combined_20260812_076": "EcommerceProduct",
-    "combined_20260812_077": "EcommerceProduct",
-    "combined_20260812_078": "EcommerceProduct",
-    "combined_20260812_080": "EcommerceProduct",
-    "combined_20260812_081": "EcommerceProduct",
-    "combined_20260812_082": "EcommerceProduct",
-    "combined_20260812_083": "EcommerceProduct",
-    "combined_20260812_084": "EcommerceProduct",
-    "combined_20260812_085": "EcommerceProduct",
-    "combined_20260812_086": "EcommerceProduct",
-    "combined_20260812_087": "EcommerceProduct",
-    "combined_20260812_088": "EcommerceProduct",
-    "combined_20260812_089": "EcommerceProduct",
+    "combined_20260812_002": "ProductEcommerce",
+    "combined_20260812_006": "ProductEcommerce",
+    "combined_20260812_008": "ProductEcommerce",
+    "combined_20260812_010": "ProductEcommerce",
+    "combined_20260812_012": "ProductEcommerce",
+    "combined_20260812_015": "ProductEcommerce",
+    "combined_20260812_016": "ProductEcommerce",
+    "combined_20260812_021": "ProductEcommerce",
+    "combined_20260812_026": "ProductEcommerce",
+    "combined_20260812_027": "ProductEcommerce",
+    "combined_20260812_029": "ProductEcommerce",
+    "combined_20260812_035": "ProductEcommerce",
+    "combined_20260812_037": "ProductEcommerce",
+    "combined_20260812_038": "ProductEcommerce",
+    "combined_20260812_040": "ProductEcommerce",
+    "combined_20260812_045": "ProductEcommerce",
+    "combined_20260812_059": "ProductEcommerce",
+    "combined_20260812_060": "ProductEcommerce",
+    "combined_20260812_071": "ProductEcommerce",
+    "combined_20260812_072": "ProductEcommerce",
+    "combined_20260812_073": "ProductEcommerce",
+    "combined_20260812_074": "ProductEcommerce",
+    "combined_20260812_075": "ProductEcommerce",
+    "combined_20260812_076": "ProductEcommerce",
+    "combined_20260812_077": "ProductEcommerce",
+    "combined_20260812_078": "ProductEcommerce",
+    "combined_20260812_080": "ProductEcommerce",
+    "combined_20260812_081": "ProductEcommerce",
+    "combined_20260812_082": "ProductEcommerce",
+    "combined_20260812_083": "ProductEcommerce",
+    "combined_20260812_084": "ProductEcommerce",
+    "combined_20260812_085": "ProductEcommerce",
+    "combined_20260812_086": "ProductEcommerce",
+    "combined_20260812_087": "ProductEcommerce",
+    "combined_20260812_088": "ProductEcommerce",
+    "combined_20260812_089": "ProductEcommerce",
     "combined_20260812_011": "StockQuery",
     "combined_20260812_017": "StockQuery",
     "combined_20260812_019": "StockQuery",
@@ -233,12 +235,12 @@ ASSISTANT_BRIDGES = {
         "可以，我先按公开市场信息帮你梳理。",
         "好的，我们继续看相关证券行情。",
     ),
-    "GeneralProduct": (
+    "ProductGeneral": (
         "我可以继续说明这个商品或消费问题。",
         "好的，我们接着看这个已经提到的商品。",
         "明白，我先帮你处理这项商品信息。",
     ),
-    "EcommerceProduct": (
+    "ProductEcommerce": (
         "我可以继续按这些条件帮你筛选商品。",
         "好的，我们接着找符合要求的商品。",
         "明白，我继续帮你比较可购买的商品。",
@@ -399,7 +401,7 @@ def _reviewed_hard_cases(
         row = indexed[row_id]
         expected_backend = row.get("expected_system_output")
         required_backend = (
-            "RecommendProduct" if candidate == "EcommerceProduct" else "SearchStockQuotes"
+            "RecommendProduct" if candidate == "ProductEcommerce" else "SearchStockQuotes"
         )
         if expected_backend != required_backend:
             raise Top1DataError(
@@ -882,11 +884,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "path": _portable_path(source_prompt_path),
                     "sha256": sha256_file(source_prompt_path),
                     "candidate_renames": {
-                        "ProductOther": "GeneralProduct",
-                        "Ecommerce": "EcommerceProduct",
+                        "ProductOther": "ProductGeneral",
+                        "Ecommerce": "ProductEcommerce",
                     },
                     "task_clarifications": {
-                        "EcommerceProduct": (
+                        "ProductEcommerce": (
                             "ordinary goods generally available through ecommerce; "
                             "include pre-purchase model comparison, price, promotion, "
                             "performance, and suitability even without a platform cue; "

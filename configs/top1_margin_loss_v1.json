@@ -8,8 +8,8 @@
     "StockAdvice",
     "StockOther",
     "StockQuery",
-    "GeneralProduct",
-    "EcommerceProduct",
+    "ProductGeneral",
+    "ProductEcommerce",
     "ChitChat",
     "NoAvailable"
   ],
@@ -18,8 +18,8 @@
       "StockAdvice": 0,
       "StockOther": 2,
       "StockQuery": 3,
-      "GeneralProduct": 0,
-      "EcommerceProduct": 0,
+      "ProductGeneral": 0,
+      "ProductEcommerce": 0,
       "ChitChat": 0,
       "NoAvailable": 1
     },
@@ -27,8 +27,8 @@
       "StockAdvice": 2,
       "StockOther": 0,
       "StockQuery": 3,
-      "GeneralProduct": 0,
-      "EcommerceProduct": 1,
+      "ProductGeneral": 0,
+      "ProductEcommerce": 1,
       "ChitChat": 0,
       "NoAvailable": 1
     },
@@ -36,26 +36,26 @@
       "StockAdvice": 2,
       "StockOther": 2,
       "StockQuery": 0,
-      "GeneralProduct": 0,
-      "EcommerceProduct": 0,
+      "ProductGeneral": 0,
+      "ProductEcommerce": 0,
       "ChitChat": 0,
       "NoAvailable": 1
     },
-    "GeneralProduct": {
+    "ProductGeneral": {
       "StockAdvice": 0,
       "StockOther": 1,
       "StockQuery": 0,
-      "GeneralProduct": 0,
-      "EcommerceProduct": 3,
+      "ProductGeneral": 0,
+      "ProductEcommerce": 3,
       "ChitChat": 0,
       "NoAvailable": 1
     },
-    "EcommerceProduct": {
+    "ProductEcommerce": {
       "StockAdvice": 0,
       "StockOther": 1,
       "StockQuery": 0,
-      "GeneralProduct": 2,
-      "EcommerceProduct": 0,
+      "ProductGeneral": 2,
+      "ProductEcommerce": 0,
       "ChitChat": 0,
       "NoAvailable": 1
     },
@@ -63,8 +63,8 @@
       "StockAdvice": 0,
       "StockOther": 0,
       "StockQuery": 0,
-      "GeneralProduct": 0,
-      "EcommerceProduct": 0,
+      "ProductGeneral": 0,
+      "ProductEcommerce": 0,
       "ChitChat": 0,
       "NoAvailable": 2
     },
@@ -72,8 +72,8 @@
       "StockAdvice": 1,
       "StockOther": 1,
       "StockQuery": 3,
-      "GeneralProduct": 2,
-      "EcommerceProduct": 3,
+      "ProductGeneral": 2,
+      "ProductEcommerce": 3,
       "ChitChat": 2,
       "NoAvailable": 0
     }

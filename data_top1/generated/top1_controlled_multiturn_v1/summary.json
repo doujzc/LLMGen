@@ -11,9 +11,9 @@
   "acceptance_rate_per_attempt": 0.3394145099703012,
   "candidate_counts": {
     "ChitChat": 114,
-    "EcommerceProduct": 138,
-    "GeneralProduct": 90,
     "NoAvailable": 114,
+    "ProductEcommerce": 138,
+    "ProductGeneral": 90,
     "StockAdvice": 115,
     "StockOther": 115,
     "StockQuery": 114
@@ -28,8 +28,8 @@
   },
   "source_candidate_counts": {
     "ChitChat": 60,
-    "EcommerceProduct": 60,
-    "GeneralProduct": 60,
+    "ProductEcommerce": 60,
+    "ProductGeneral": 60,
     "NoAvailable": 60,
     "StockAdvice": 60,
     "StockOther": 60,
@@ -108,14 +108,14 @@
   "output": {
     "path": "/Users/tourxu/Codes/LLMGen/data_top1/generated/top1_controlled_multiturn_v1/train.jsonl",
     "exists": true,
-    "sha256": "9afc027ab421d7d4777fb96247bcca3bd154656de99a90187ea5e0d976ff0ae0"
+    "sha256": "717d3621b8a1c1a66c6163f9eba560d2596ad10239336af40f23b6060d0da8e8"
   },
   "post_generation_label_review": {
     "repair_version": "top1_ecommerce_boundary_repairs_v1",
     "repair_spec_path": "/Users/tourxu/Codes/LLMGen/configs/top1_ecommerce_boundary_repairs_v1.json",
-    "repair_spec_sha256": "cf5ced70373366335ec1a0d7c4bd8baad0a67b1f7fdf8b52516021599c8dfa19",
+    "repair_spec_sha256": "34bac29acae77d5c5919b09c59fe091019fed3c619d116627d2a0205fc00ea03",
     "source_sha256_before_review": "60e64af89738e8df991c2e203da2089be254842cbf73032d1da9dd83e6ad4021",
     "repaired_rows": 24,
-    "policy": "ordinary ecommerce goods in pre-purchase recommendation, comparison, price, promotion, performance, or suitability scenarios are EcommerceProduct"
+    "policy": "ordinary ecommerce goods in pre-purchase recommendation, comparison, price, promotion, performance, or suitability scenarios are ProductEcommerce"
   }
 }

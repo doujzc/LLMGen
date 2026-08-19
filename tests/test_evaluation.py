@@ -227,8 +227,8 @@ class EvaluationTests(unittest.TestCase):
             "StockAdvice",
             "StockOther",
             "StockQuery",
-            "GeneralProduct",
-            "EcommerceProduct",
+            "ProductGeneral",
+            "ProductEcommerce",
             "ChitChat",
             "NoAvailable",
         )
@@ -242,11 +242,11 @@ class EvaluationTests(unittest.TestCase):
             ("StockQuery", "Ecommerce"),
         )
         self.assertEqual(
-            policy.candidate_to_backend["EcommerceProduct"],
+            policy.candidate_to_backend["ProductEcommerce"],
             "Ecommerce",
         )
         self.assertEqual(
-            policy.candidate_to_backend["GeneralProduct"],
+            policy.candidate_to_backend["ProductGeneral"],
             "NoAvailable",
         )
         self.assertEqual(policy.candidate_to_backend["StockAdvice"], "NoAvailable")

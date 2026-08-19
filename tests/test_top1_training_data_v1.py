@@ -28,7 +28,7 @@ class Top1TrainingDataV1Tests(unittest.TestCase):
                     "scenario_family": "product",
                 }
             ),
-            "GeneralProduct",
+            "ProductGeneral",
         )
         self.assertIsNone(
             reviewed_source_candidate(

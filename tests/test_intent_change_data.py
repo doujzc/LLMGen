@@ -10,8 +10,8 @@ CANDIDATES = (
     "StockAdvice",
     "StockOther",
     "StockQuery",
-    "GeneralProduct",
-    "EcommerceProduct",
+    "ProductGeneral",
+    "ProductEcommerce",
     "ChitChat",
     "NoAvailable",
 )

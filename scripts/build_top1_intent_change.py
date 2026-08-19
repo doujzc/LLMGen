@@ -25,12 +25,14 @@ GENERATOR_VERSION = "intent_change_v1"
 DEFAULT_SEED = 20260817
 DEFAULT_PER_PAIR = 10
 
+# Stable dataset-ID components; they are not model candidate names and must not be
+# rewritten when a candidate is renamed.
 CANDIDATE_SLUGS = {
     "StockAdvice": "stock_advice",
     "StockOther": "stock_other",
     "StockQuery": "stock_query",
-    "GeneralProduct": "general_product",
-    "EcommerceProduct": "ecommerce_product",
+    "ProductGeneral": "general_product",
+    "ProductEcommerce": "ecommerce_product",
     "ChitChat": "chitchat",
     "NoAvailable": "no_available",
 }
@@ -39,14 +41,14 @@ CANDIDATE_SLUGS = {
 # to infer a label.
 LEGACY_TO_TOP1 = {
     "stock_market_information": "StockQuery",
-    "ecommerce_product_recommendation": "EcommerceProduct",
+    "ecommerce_product_recommendation": "ProductEcommerce",
     "no_route_stock_advice": "StockAdvice",
     "no_route_stock_other": "StockOther",
     "no_route_stock_research": "StockOther",
     "no_route_other_finance": "StockOther",
-    "no_route_product_information": "GeneralProduct",
-    "no_route_product_other": "GeneralProduct",
-    "no_route_non_retail": "GeneralProduct",
+    "no_route_product_information": "ProductGeneral",
+    "no_route_product_other": "ProductGeneral",
+    "no_route_non_retail": "ProductGeneral",
     "no_route_chitchat": "ChitChat",
     "no_route_multi_product": "NoAvailable",
     "no_route_no_available": "NoAvailable",
@@ -94,12 +96,12 @@ ASSISTANT_BRIDGES = {
         "可以，我先按公开市场信息帮你梳理。",
         "好的，我们继续看相关证券行情。",
     ),
-    "GeneralProduct": (
+    "ProductGeneral": (
         "我可以继续说明这个商品或消费问题。",
         "好的，我们接着看这个已经提到的商品。",
         "明白，我先帮你处理这项商品信息。",
     ),
-    "EcommerceProduct": (
+    "ProductEcommerce": (
         "我可以继续按这些条件帮你筛选商品。",
         "好的，我们接着找符合要求的商品。",
         "明白，我继续帮你比较可购买的商品。",

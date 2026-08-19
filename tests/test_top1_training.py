@@ -238,7 +238,7 @@ class Top1TrainingTests(unittest.TestCase):
             decision_policy = BackendDecisionPolicy(
                 candidate_to_backend={
                     "StockQuery": "StockQuery",
-                    "EcommerceProduct": "NoAvailable",
+                    "ProductEcommerce": "NoAvailable",
                 },
                 backend_labels=("StockQuery", "NoAvailable"),
                 fallback_backend_label="NoAvailable",
@@ -248,10 +248,10 @@ class Top1TrainingTests(unittest.TestCase):
                 output_dir=model_output,
                 tokenizer=tokenizer,
                 model=model,
-                candidate_names=("StockQuery", "EcommerceProduct"),
+                candidate_names=("StockQuery", "ProductEcommerce"),
                 candidate_tokens={
                     "StockQuery": (1, 2),
-                    "EcommerceProduct": (3, 4),
+                    "ProductEcommerce": (3, 4),
                 },
                 decision_policy=decision_policy,
                 system_prompt="route",
@@ -292,14 +292,14 @@ class Top1TrainingTests(unittest.TestCase):
             registry = json.loads((model_output / "candidate_registry.json").read_text())
             self.assertEqual(
                 registry["candidates"],
-                ["StockQuery", "EcommerceProduct"],
+                ["StockQuery", "ProductEcommerce"],
             )
             bundled_policy = load_backend_decision_policy(
                 model_output / "decision_policy.json",
-                ("StockQuery", "EcommerceProduct"),
+                ("StockQuery", "ProductEcommerce"),
             )
             self.assertEqual(
-                bundled_policy.candidate_to_backend["EcommerceProduct"],
+                bundled_policy.candidate_to_backend["ProductEcommerce"],
                 "NoAvailable",
             )
             self.assertEqual(
@@ -320,17 +320,17 @@ class Top1TrainingTests(unittest.TestCase):
                 contract,
                 registry_path=model_output / "candidate_registry.json",
                 prompt_path=model_output / "router_system_prompt.md",
-                candidate_names=("StockQuery", "EcommerceProduct"),
+                candidate_names=("StockQuery", "ProductEcommerce"),
             )
             self.assertEqual(contract_args.max_length, 1024)
             self.assertFalse(contract_args.trust_remote_code)
             evaluate_top1._validate_loaded_tokenizer(
                 contract,
                 tokenizer=tokenizer,
-                candidate_names=("StockQuery", "EcommerceProduct"),
+                candidate_names=("StockQuery", "ProductEcommerce"),
                 candidate_tokens={
                     "StockQuery": (1, 2),
-                    "EcommerceProduct": (3, 4),
+                    "ProductEcommerce": (3, 4),
                 },
                 transformers_version="5.5.4",
             )
@@ -384,10 +384,10 @@ class Top1TrainingTests(unittest.TestCase):
                 evaluate_top1._validate_loaded_tokenizer(
                     contract,
                     tokenizer=tokenizer,
-                    candidate_names=("StockQuery", "EcommerceProduct"),
+                    candidate_names=("StockQuery", "ProductEcommerce"),
                     candidate_tokens={
                         "StockQuery": (1, 2),
-                        "EcommerceProduct": (3, 4),
+                        "ProductEcommerce": (3, 4),
                     },
                     transformers_version="5.5.4",
                 )
@@ -400,7 +400,7 @@ class Top1TrainingTests(unittest.TestCase):
                     contract,
                     registry_path=model_output / "candidate_registry.json",
                     prompt_path=model_output / "router_system_prompt.md",
-                    candidate_names=("StockQuery", "EcommerceProduct"),
+                    candidate_names=("StockQuery", "ProductEcommerce"),
                 )
 
             (model_output / "router_system_prompt.md").write_text(
@@ -414,7 +414,7 @@ class Top1TrainingTests(unittest.TestCase):
                     contract,
                     registry_path=model_output / "candidate_registry.json",
                     prompt_path=model_output / "router_system_prompt.md",
-                    candidate_names=("StockQuery", "EcommerceProduct"),
+                    candidate_names=("StockQuery", "ProductEcommerce"),
                 )
 
     def test_margin_config_builds_directed_first_divergence_branches(self) -> None:
@@ -422,8 +422,8 @@ class Top1TrainingTests(unittest.TestCase):
             "StockAdvice",
             "StockOther",
             "StockQuery",
-            "GeneralProduct",
-            "EcommerceProduct",
+            "ProductGeneral",
+            "ProductEcommerce",
             "ChitChat",
             "NoAvailable",
         )
@@ -437,8 +437,8 @@ class Top1TrainingTests(unittest.TestCase):
                 "StockAdvice": (10, 11),
                 "StockOther": (10, 12),
                 "StockQuery": (10, 13),
-                "GeneralProduct": (20,),
-                "EcommerceProduct": (21,),
+                "ProductGeneral": (20,),
+                "ProductEcommerce": (21,),
                 "ChitChat": (22,),
                 "NoAvailable": (23,),
             },
@@ -454,7 +454,7 @@ class Top1TrainingTests(unittest.TestCase):
         product_to_ecommerce = next(
             branch
             for branch in branches[3]
-            if branch.competitor_name == "EcommerceProduct"
+            if branch.competitor_name == "ProductEcommerce"
         )
         self.assertEqual(advice_to_query.divergence_offset, 1)
         self.assertEqual(advice_to_query.target_token_id, 11)

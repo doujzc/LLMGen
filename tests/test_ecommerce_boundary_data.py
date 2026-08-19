@@ -28,10 +28,10 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
         row = {
             "id": "case-1",
             "messages": [{"role": "user", "content": "哪款更适合办公"}],
-            "target_candidate_name": "GeneralProduct",
+            "target_candidate_name": "ProductGeneral",
             "synthesis": {
-                "labeler_predicted_candidate_name": "GeneralProduct",
-                "reviewer_predicted_candidate_name": "GeneralProduct",
+                "labeler_predicted_candidate_name": "ProductGeneral",
+                "reviewer_predicted_candidate_name": "ProductGeneral",
             },
         }
         spec = {
@@ -39,8 +39,8 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
             "repairs": [
                 {
                     "id": "case-1",
-                    "from_candidate_name": "GeneralProduct",
-                    "to_candidate_name": "EcommerceProduct",
+                    "from_candidate_name": "ProductGeneral",
+                    "to_candidate_name": "ProductEcommerce",
                     "reason_code": "ordinary_goods_recommendation",
                 }
             ],
@@ -48,14 +48,14 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
 
         repaired = apply_label_repairs([row], spec)
 
-        self.assertEqual(repaired[0]["target_candidate_name"], "EcommerceProduct")
+        self.assertEqual(repaired[0]["target_candidate_name"], "ProductEcommerce")
         self.assertEqual(repaired[0]["synthesis"], row["synthesis"])
         self.assertEqual(
             repaired[0]["label_review_correction"],
             {
                 "repair_version": "review-v1",
-                "previous_target_candidate_name": "GeneralProduct",
-                "corrected_target_candidate_name": "EcommerceProduct",
+                "previous_target_candidate_name": "ProductGeneral",
+                "corrected_target_candidate_name": "ProductEcommerce",
                 "reason_code": "ordinary_goods_recommendation",
             },
         )
@@ -66,8 +66,8 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
             "repairs": [
                 {
                     "id": "case-1",
-                    "from_candidate_name": "GeneralProduct",
-                    "to_candidate_name": "EcommerceProduct",
+                    "from_candidate_name": "ProductGeneral",
+                    "to_candidate_name": "ProductEcommerce",
                     "reason_code": "ordinary_goods_recommendation",
                 }
             ],
@@ -75,7 +75,7 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
         row = {
             "id": "case-1",
             "messages": [{"role": "user", "content": "推荐一个"}],
-            "target_candidate_name": "GeneralProduct",
+            "target_candidate_name": "ProductGeneral",
         }
         once = apply_label_repairs([row], spec)
         self.assertEqual(apply_label_repairs(once, spec), once)
@@ -111,13 +111,13 @@ class EcommerceBoundaryDataTests(unittest.TestCase):
         candidates = load_candidate_names(CANDIDATE_PATH)
         descriptions = load_taxonomy_descriptions(TAXONOMY_PATH, candidates)
 
-        ecommerce = descriptions["EcommerceProduct"]["extended_definition"]
-        general = descriptions["GeneralProduct"]["extended_definition"]
+        ecommerce = descriptions["ProductEcommerce"]["extended_definition"]
+        general = descriptions["ProductGeneral"]["extended_definition"]
         self.assertIn("购买前", ecommerce)
         self.assertIn("多少钱", ecommerce)
         self.assertIn("有什么优惠", ecommerce)
         self.assertIn("是否适合某种用途", ecommerce)
-        self.assertIn("应归入 EcommerceProduct", general)
+        self.assertIn("应归入 ProductEcommerce", general)
 
     def test_conflicting_correction_metadata_is_rejected(self) -> None:
         spec = load_repair_spec(REPAIR_PATH)

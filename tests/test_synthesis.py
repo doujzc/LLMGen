@@ -22,8 +22,8 @@ CANDIDATES = (
     "StockAdvice",
     "StockOther",
     "StockQuery",
-    "GeneralProduct",
-    "EcommerceProduct",
+    "ProductGeneral",
+    "ProductEcommerce",
     "ChitChat",
     "NoAvailable",
 )
@@ -62,7 +62,7 @@ class SynthesisTests(unittest.TestCase):
         plan = DialogueBlueprint(
             scenario_id="case-1",
             phenomenon="contextual_follow_up",
-            target_candidate_name="EcommerceProduct",
+            target_candidate_name="ProductEcommerce",
             source_candidate_name=None,
             user_turn_count=3,
             seed=1,
@@ -98,18 +98,18 @@ class SynthesisTests(unittest.TestCase):
         plan = DialogueBlueprint(
             scenario_id="case-2",
             phenomenon="intent_change",
-            target_candidate_name="GeneralProduct",
+            target_candidate_name="ProductGeneral",
             source_candidate_name="StockQuery",
             user_turn_count=3,
             seed=2,
         )
         quality = {field: True for field in QUALITY_FIELDS}
         labeler = {
-            "predicted_candidate_name": "GeneralProduct",
+            "predicted_candidate_name": "ProductGeneral",
             "quality": quality,
         }
         reviewer = {
-            "predicted_candidate_name": "GeneralProduct",
+            "predicted_candidate_name": "ProductGeneral",
             "observed_phenomenon": "intent_change",
             "observed_source_candidate_name": "StockQuery",
             "intent_change_is_direct": True,
@@ -128,7 +128,7 @@ class SynthesisTests(unittest.TestCase):
         )
 
         reviewer = dict(reviewer)
-        reviewer["predicted_candidate_name"] = "EcommerceProduct"
+        reviewer["predicted_candidate_name"] = "ProductEcommerce"
         self.assertIn(
             "reviewer_label_mismatch",
             acceptance_reasons(plan, labeler, reviewer, directness),

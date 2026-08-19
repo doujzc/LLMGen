@@ -30,11 +30,11 @@ class RetailBoundaryDataTests(unittest.TestCase):
         self.assertEqual(len(validation_rows), 64)
         self.assertEqual(
             Counter(row["target_candidate_name"] for row in train_rows),
-            Counter({"GeneralProduct": 96, "EcommerceProduct": 96}),
+            Counter({"ProductGeneral": 96, "ProductEcommerce": 96}),
         )
         self.assertEqual(
             Counter(row["target_candidate_name"] for row in validation_rows),
-            Counter({"GeneralProduct": 32, "EcommerceProduct": 32}),
+            Counter({"ProductGeneral": 32, "ProductEcommerce": 32}),
         )
         self.assertEqual(len(BOUNDARY_AXES), 4)
         train_families = {row["boundary_family"] for row in train_rows}
@@ -58,7 +58,7 @@ class RetailBoundaryDataTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     {row["target_candidate_name"] for row in pair_rows},
-                    {"GeneralProduct", "EcommerceProduct"},
+                    {"ProductGeneral", "ProductEcommerce"},
                 )
                 self.assertEqual(
                     {row["boundary_axis"] for row in pair_rows},
@@ -83,19 +83,19 @@ class RetailBoundaryDataTests(unittest.TestCase):
         }
         self.assertEqual(
             labels_by_text["送他一架小型直升机大概要多少钱？"],
-            "GeneralProduct",
+            "ProductGeneral",
         )
         self.assertEqual(
             labels_by_text["送他一架遥控玩具直升机大概要多少钱？"],
-            "EcommerceProduct",
+            "ProductEcommerce",
         )
         self.assertEqual(
             labels_by_text["想买这本绘本的电子版权，能直接下单吗？"],
-            "GeneralProduct",
+            "ProductGeneral",
         )
         self.assertEqual(
             labels_by_text["想买这本绘本的纸质版，能直接下单吗？"],
-            "EcommerceProduct",
+            "ProductEcommerce",
         )
 
     def test_boundary_validation_is_not_in_combined_training_data(self) -> None:

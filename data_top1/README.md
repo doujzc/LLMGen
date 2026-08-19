@@ -12,6 +12,8 @@
 候选名必须存在于 `configs/top1_candidates.json`。训练启动后会在输出目录生成经过
 实际 tokenizer 长度裁剪的 `prepared/train.sft.jsonl`，验证集对应
 `prepared/validation.sft.jsonl`；相邻的 `*_profile.json` 只保存统计诊断，不复制正文。
+候选名称调整时只迁移候选配置和所有候选字段；已有样本的 `id`、`scenario_id`
+保持不变，作为稳定的溯源主键。训练、推理和评估都不会把这些主键写入模型 prompt。
 训练和评测都会把较早消息按时间顺序写入固定 Markdown `## Dialogue Context`，历史
 只使用紧凑的 `user:`、`assistant:` 或 `tool:` 行，并把最后一轮 user 消息放入
 `## Turn T - Current Customer Utterance`；反斜杠和换行控制字符会进行单行转义。
@@ -85,9 +87,9 @@ TOP1_TRAIN_DATA=data_top1/generated/top1_controlled_multiturn_v1/train.jsonl \
 ```
 
 普通电商商品的购买前品牌/型号选择、比较、价格优惠、性能评价和适用性判断统一属于
-`EcommerceProduct`，即使 query 已经给出具体型号或没有点名京东、淘宝。药品、整车、
+`ProductEcommerce`，即使 query 已经给出具体型号或没有点名京东、淘宝。药品、整车、
 房屋、服务和软件，以及已有商品的使用、故障、售后和订单事务仍属于
-`GeneralProduct`。对已生成数据进行人工边界复核时，使用显式 ID 清单应用修订：
+`ProductGeneral`。对已生成数据进行人工边界复核时，使用显式 ID 清单应用修订：
 
 ```bash
 uv run --no-sync python scripts/repair_top1_ecommerce_labels.py
@@ -101,7 +103,7 @@ uv run --no-sync python scripts/repair_top1_ecommerce_labels.py
 `scripts/build_top1_retail_boundary_v1.py` 不按商品名称穷举，而是围绕四个结构化边界轴
 生成成对的最小差异样本：登记资产/零售模型、权利许可/商品副本、服务/零售工具、定制
 工程/家用成品。同一对使用完全相同的购买动作表达，只改变准确交易对象，避免模型继续把
-“买、多少钱、下单”当作 `EcommerceProduct` 的充分条件。
+“买、多少钱、下单”当作 `ProductEcommerce` 的充分条件。
 
 ```bash
 uv run --no-sync python scripts/build_top1_retail_boundary_v1.py

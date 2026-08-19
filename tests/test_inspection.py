@@ -411,8 +411,8 @@ class InspectionTests(unittest.TestCase):
                     "backend_correct": False,
                     "target_backend": "NoAvailable",
                     "predicted_backend": "Ecommerce",
-                    "target": "GeneralProduct",
-                    "predicted": "EcommerceProduct",
+                    "target": "ProductGeneral",
+                    "predicted": "ProductEcommerce",
                 },
             ),
         )

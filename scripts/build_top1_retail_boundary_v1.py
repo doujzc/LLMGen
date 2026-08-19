@@ -316,10 +316,10 @@ def build_boundary_rows(split: str) -> list[dict[str, Any]]:
                     (
                         "unsupported",
                         pair.unsupported_object,
-                        "GeneralProduct",
+                        "ProductGeneral",
                         False,
                     ),
-                    ("retail", pair.retail_object, "EcommerceProduct", True),
+                    ("retail", pair.retail_object, "ProductEcommerce", True),
                 ):
                     rows.append(
                         {
@@ -391,7 +391,7 @@ def validate_boundary_rows(
             labels = {str(row.get("target_candidate_name")) for row in pair_rows}
             if sides != {"unsupported", "retail"}:
                 raise Top1DataError(f"{split}:{pair_id}: invalid pair sides")
-            if labels != {"GeneralProduct", "EcommerceProduct"}:
+            if labels != {"ProductGeneral", "ProductEcommerce"}:
                 raise Top1DataError(f"{split}:{pair_id}: invalid pair labels")
 
 

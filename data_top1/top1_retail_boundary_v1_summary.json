@@ -7,8 +7,8 @@
     "rows": 192,
     "pairs": 96,
     "candidate_counts": {
-      "EcommerceProduct": 96,
-      "GeneralProduct": 96
+      "ProductEcommerce": 96,
+      "ProductGeneral": 96
     },
     "axis_counts": {
       "custom_project_vs_household_product": 48,
@@ -18,14 +18,14 @@
     },
     "families": 24,
     "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_retail_boundary_v1.jsonl",
-    "sha256": "a6738458e0ea9793f630cecf7948808e7554816a755880798c908ed041ae82c3"
+    "sha256": "ba74bd4bc6c7676b61a66fff2126c1b2cbeab68475fdc64d1ddc6b36b35dd8d1"
   },
   "validation": {
     "rows": 64,
     "pairs": 32,
     "candidate_counts": {
-      "EcommerceProduct": 32,
-      "GeneralProduct": 32
+      "ProductEcommerce": 32,
+      "ProductGeneral": 32
     },
     "axis_counts": {
       "custom_project_vs_household_product": 16,
@@ -36,6 +36,6 @@
     "families": 8,
     "family_overlap_with_train": 0,
     "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_retail_boundary_v1_validation.jsonl",
-    "sha256": "4e9dcb6599298bf1455040f7a5763c9df5bc631c9b70253ae3b2b79f0788596f"
+    "sha256": "9a89626e40974deb56f8119868f3044e3fd3ab071d3af254082dcaa0696adf77"
   }
 }

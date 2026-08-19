@@ -58,8 +58,8 @@ class Top1CoreTests(unittest.TestCase):
                 "StockAdvice",
                 "StockOther",
                 "StockQuery",
-                "GeneralProduct",
-                "EcommerceProduct",
+                "ProductGeneral",
+                "ProductEcommerce",
                 "ChitChat",
                 "NoAvailable",
             ),
@@ -158,7 +158,7 @@ class Top1CoreTests(unittest.TestCase):
         tokenizer = CharacterTokenizer()
         candidate_tokens = candidate_token_sequences(
             tokenizer,
-            ("StockQuery", "EcommerceProduct"),
+            ("StockQuery", "ProductEcommerce"),
         )
         prepared = prepare_example(
             tokenizer,
@@ -238,7 +238,7 @@ class Top1CoreTests(unittest.TestCase):
                     "ignored_metadata": {"anything": True},
                 }
             ],
-            ("StockQuery", "EcommerceProduct"),
+            ("StockQuery", "ProductEcommerce"),
             source="train.jsonl",
         )
 
