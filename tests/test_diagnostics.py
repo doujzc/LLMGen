@@ -48,9 +48,17 @@ class DiagnosticsTests(unittest.TestCase):
                     "trainer_epoch": 0.5,
                     "stage_progress": 0.25,
                     "loss": 1.2,
+                    "margin_loss": 0.4,
+                    "margin_violation_rate": 0.25,
                     "grad_norm": 2.0,
                 },
-                {"step": 5, "epoch": 1.0, "eval_loss": 1.0},
+                {
+                    "step": 5,
+                    "epoch": 1.0,
+                    "eval_loss": 1.0,
+                    "eval_margin_loss": 0.3,
+                    "eval_margin_violation_rate": 0.2,
+                },
                 {"step": 10, "epoch": 3.0, "final_loss": 0.8},
             ]
         )
@@ -60,6 +68,8 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(curves["validation"][-1]["source"], "final_loss")
         self.assertEqual(curves["train"][0]["main_epoch"], 1.0)
         self.assertEqual(curves["train"][0]["trainer_epoch"], 0.5)
+        self.assertEqual(curves["train"][0]["margin_loss"], 0.4)
+        self.assertEqual(curves["validation"][0]["margin_violation_rate"], 0.2)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
+debug = [
+  "gradio>=6.24,<7",
+  "pandas>=2,<3",
+]
 train = [
   "accelerate>=1.2,<2",
   "deepspeed==0.16.4",

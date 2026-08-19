@@ -33,6 +33,15 @@ from llmgen.experiment import (
     write_model_artifact_manifest,
     write_trainer_history,
 )
+from llmgen.margin import (
+    MARGIN_LOSS_ALGORITHM,
+    CandidateMarginBranch,
+    MarginLossConfig,
+    candidate_margin_branches as _candidate_margin_branches,
+    load_margin_loss_config as _load_margin_loss_config,
+    margin_target_lookup as _margin_target_lookup,
+    margin_trainer_class as _margin_trainer_class,
+)
 from llmgen.top1 import (
     CONVERSATION_TEMPLATE,
     MAX_ASSISTANT_HISTORY_CHARACTERS,
@@ -78,6 +87,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--candidate-registry", required=True)
     parser.add_argument("--decision-policy", required=True)
     parser.add_argument("--system-prompt-file", required=True)
+    parser.add_argument(
+        "--margin-loss-config",
+        help=(
+            "Enable candidate Trie branch margin loss with this JSON config. "
+            "Omit to retain direct SFT loss exactly."
+        ),
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--experiment-name", default="top1")
     parser.add_argument("--run-id")
@@ -189,6 +205,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         required_files["validation data"] = args.validation_data
     if args.memorization_data:
         required_files["memorization data"] = args.memorization_data
+    if args.margin_loss_config:
+        required_files["margin-loss config"] = args.margin_loss_config
     for label, value in required_files.items():
         if not Path(value).expanduser().is_file():
             raise Top1DataError(f"{label} does not exist: {value}")
@@ -507,22 +525,46 @@ def _dataset_class(torch: Any):
     return Top1Dataset
 
 
-def _collator(torch: Any, pad_token_id: int):
+def _collator(
+    torch: Any,
+    pad_token_id: int,
+    *,
+    margin_target_lookup: Mapping[tuple[int, ...], int] | None = None,
+):
     def collate(features: list[Mapping[str, Sequence[int]]]) -> dict[str, Any]:
         max_length = max(len(row["input_ids"]) for row in features)
         input_ids = []
         attention_mask = []
         labels = []
+        margin_target_indices = []
         for row in features:
             padding = max_length - len(row["input_ids"])
             input_ids.append([*row["input_ids"], *([pad_token_id] * padding)])
             attention_mask.append([*row["attention_mask"], *([0] * padding)])
             labels.append([*row["labels"], *([-100] * padding)])
-        return {
+            if margin_target_lookup is not None:
+                target_path = tuple(
+                    int(token_id)
+                    for token_id in row["labels"]
+                    if int(token_id) != -100
+                )
+                try:
+                    margin_target_indices.append(margin_target_lookup[target_path])
+                except KeyError as exc:
+                    raise Top1DataError(
+                        "SFT labels do not match a configured candidate path"
+                    ) from exc
+        batch = {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "labels": torch.tensor(labels, dtype=torch.long),
         }
+        if margin_target_lookup is not None:
+            batch["margin_target_index"] = torch.tensor(
+                margin_target_indices,
+                dtype=torch.long,
+            )
+        return batch
 
     return collate
 
@@ -547,6 +589,7 @@ def _write_bundle(
     prepared_memorization_path: Path | None,
     training_schedule: Mapping[str, Any] | None,
     transformers_version: str,
+    margin_loss_config: MarginLossConfig | None,
 ) -> None:
     tokenizer.save_pretrained(str(output_dir))
     bundled_registry = output_dir / "candidate_registry.json"
@@ -555,6 +598,13 @@ def _write_bundle(
     write_json(bundled_decision_policy, decision_policy.payload())
     bundled_prompt = output_dir / "router_system_prompt.md"
     bundled_prompt.write_text(system_prompt.rstrip() + "\n", encoding="utf-8")
+    bundled_margin_config = None
+    if margin_loss_config is not None:
+        bundled_margin_config = output_dir / "margin_loss_config.json"
+        write_json(
+            bundled_margin_config,
+            margin_loss_config.payload(candidate_names),
+        )
     base_model_dependency = _base_model_dependency(args, model)
     base_model_revision = getattr(
         args,
@@ -643,6 +693,19 @@ def _write_bundle(
                 * args.per_device_train_batch_size
                 * args.gradient_accumulation_steps
             ),
+            "margin_loss": (
+                {
+                    "enabled": True,
+                    "path": bundled_margin_config.name,
+                    "sha256": sha256_file(bundled_margin_config),
+                    "algorithm": MARGIN_LOSS_ALGORITHM,
+                    "loss_weight": margin_loss_config.loss_weight,
+                    "logit_margin": margin_loss_config.logit_margin,
+                }
+                if margin_loss_config is not None
+                and bundled_margin_config is not None
+                else {"enabled": False}
+            ),
             "curriculum": training_schedule,
             "deepspeed": deepspeed_metadata,
         },
@@ -713,6 +776,7 @@ def _build_run_manifest(
     memorization_report: Mapping[str, Any] | None,
     validation_report: Mapping[str, Any] | None,
     deepspeed_metadata: Mapping[str, Any] | None,
+    margin_loss_config: MarginLossConfig | None,
 ) -> dict[str, Any]:
     try:
         launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -725,6 +789,7 @@ def _build_run_manifest(
         repository / "src" / "llmgen" / "experiment.py",
         repository / "src" / "llmgen" / "diagnostics.py",
         repository / "src" / "llmgen" / "evaluation.py",
+        repository / "src" / "llmgen" / "margin.py",
     )
     code = {
         "git": git_snapshot(repository),
@@ -759,6 +824,11 @@ def _build_run_manifest(
             "candidate_registry_sha256": sha256_file(args.candidate_registry),
             "decision_policy_sha256": sha256_file(args.decision_policy),
             "system_prompt_sha256": sha256_file(args.system_prompt_file),
+            "margin_loss_config_sha256": (
+                sha256_file(args.margin_loss_config)
+                if args.margin_loss_config
+                else None
+            ),
         },
         "configuration": {
             "max_length": args.max_length,
@@ -782,6 +852,11 @@ def _build_run_manifest(
             "gradient_checkpointing": args.gradient_checkpointing,
             "gradient_checkpointing_mode": args.gradient_checkpointing_mode,
             "trust_remote_code": args.trust_remote_code,
+            "margin_loss": (
+                {"enabled": True, **margin_loss_config.payload(candidate_names)}
+                if margin_loss_config is not None
+                else {"enabled": False}
+            ),
             "lora": (
                 {
                     "r": args.lora_r,
@@ -837,6 +912,7 @@ def _build_run_manifest(
 def _trainer(
     *,
     transformers: Any,
+    torch: Any,
     model: Any,
     training_args: Any,
     train_dataset: Any,
@@ -844,6 +920,8 @@ def _trainer(
     data_collator: Any,
     tokenizer: Any,
     callback: Any,
+    margin_loss_config: MarginLossConfig | None,
+    margin_branches: Mapping[int, Sequence[CandidateMarginBranch]] | None,
 ) -> Any:
     kwargs = {
         "model": model,
@@ -858,7 +936,16 @@ def _trainer(
         kwargs["processing_class"] = tokenizer
     elif "tokenizer" in parameters:
         kwargs["tokenizer"] = tokenizer
-    return transformers.Trainer(**kwargs)
+    if margin_loss_config is None:
+        return transformers.Trainer(**kwargs)
+    if margin_branches is None:
+        raise Top1DataError("enabled margin loss requires candidate branch metadata")
+    MarginTrainer = _margin_trainer_class(transformers, torch)
+    return MarginTrainer(
+        **kwargs,
+        margin_loss_config=margin_loss_config,
+        margin_branches=margin_branches,
+    )
 
 
 def _annotate_history_stages(
@@ -932,6 +1019,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not system_prompt:
             raise Top1DataError("system prompt file is empty")
         candidate_names = load_candidate_names(args.candidate_registry)
+        margin_loss_config = (
+            _load_margin_loss_config(args.margin_loss_config, candidate_names)
+            if args.margin_loss_config
+            else None
+        )
         decision_policy = load_backend_decision_policy(
             args.decision_policy,
             candidate_names,
@@ -989,6 +1081,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             memorization_report=memorization_report,
             validation_report=validation_report,
             deepspeed_metadata=deepspeed_metadata,
+            margin_loss_config=margin_loss_config,
         )
         if is_primary:
             store.initialize(
@@ -1012,6 +1105,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         tokenizer, model = _load_model_and_tokenizer(args, torch, transformers)
         candidate_tokens = candidate_token_sequences(tokenizer, candidate_names)
+        margin_branches = (
+            _candidate_margin_branches(
+                candidate_names,
+                candidate_tokens,
+                eos_token_id=int(tokenizer.eos_token_id),
+                config=margin_loss_config,
+            )
+            if margin_loss_config is not None
+            else None
+        )
+        margin_target_lookup = (
+            _margin_target_lookup(
+                candidate_names,
+                candidate_tokens,
+                eos_token_id=int(tokenizer.eos_token_id),
+            )
+            if margin_loss_config is not None
+            else None
+        )
         train_examples, train_sft_rows, train_diagnostics = _prepare_rows(
             train_rows,
             source=args.train_data,
@@ -1116,6 +1228,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 scheduled_rows=len(training_examples),
                 memorization_steps=args.memorization_steps,
                 validation_rows=len(validation_examples),
+                margin_loss_enabled=margin_loss_config is not None,
             )
             print(
                 "[top1] candidate supervision: "
@@ -1142,6 +1255,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"{training_schedule['total']['expected_optimizer_steps']} steps",
                     flush=True,
                 )
+            if margin_loss_config is not None:
+                print(
+                    "[top1] margin loss: "
+                    f"{MARGIN_LOSS_ALGORITHM}, "
+                    f"weight={margin_loss_config.loss_weight:g}, "
+                    f"logit_margin={margin_loss_config.logit_margin:g}",
+                    flush=True,
+                )
 
         Dataset = _dataset_class(torch)
         callback = make_training_log_callback(
@@ -1153,15 +1274,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         trainer = _trainer(
             transformers=transformers,
+            torch=torch,
             model=model,
             training_args=training_args,
             train_dataset=Dataset(training_examples),
             eval_dataset=(
                 Dataset(validation_examples) if validation_examples else None
             ),
-            data_collator=_collator(torch, int(tokenizer.pad_token_id)),
+            data_collator=_collator(
+                torch,
+                int(tokenizer.pad_token_id),
+                margin_target_lookup=margin_target_lookup,
+            ),
             tokenizer=tokenizer,
             callback=callback,
+            margin_loss_config=margin_loss_config,
+            margin_branches=margin_branches,
         )
         wait_for_everyone = getattr(
             getattr(trainer, "accelerator", None),
@@ -1209,6 +1337,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 prepared_memorization_path=prepared_memorization_path,
                 training_schedule=training_schedule,
                 transformers_version=str(transformers.__version__),
+                margin_loss_config=margin_loss_config,
             )
             artifact = write_model_artifact_manifest(
                 final_model_dir,
@@ -1241,6 +1370,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "model_id": artifact["model_id"],
                 "global_step": int(trainer.state.global_step),
                 "training_schedule": training_schedule,
+                "margin_loss": (
+                    {"enabled": True, **margin_loss_config.payload(candidate_names)}
+                    if margin_loss_config is not None
+                    else {"enabled": False}
+                ),
                 "best_checkpoint": best_checkpoint,
                 "best_eval_loss": curves["best_eval_loss"],
                 "train_metrics": dict(getattr(train_result, "metrics", {})),

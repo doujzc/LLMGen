@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "algorithm": "candidate_trie_branch_margin_v1",
+  "loss_weight": 0.2,
+  "logit_margin": 1.0,
+  "normalization": "priority_weighted_pair_mean",
+  "candidate_order": [
+    "StockAdvice",
+    "StockOther",
+    "StockQuery",
+    "GeneralProduct",
+    "EcommerceProduct",
+    "ChitChat",
+    "NoAvailable"
+  ],
+  "priority_matrix": {
+    "StockAdvice": {
+      "StockAdvice": 0,
+      "StockOther": 2,
+      "StockQuery": 3,
+      "GeneralProduct": 0,
+      "EcommerceProduct": 0,
+      "ChitChat": 0,
+      "NoAvailable": 1
+    },
+    "StockOther": {
+      "StockAdvice": 2,
+      "StockOther": 0,
+      "StockQuery": 3,
+      "GeneralProduct": 0,
+      "EcommerceProduct": 1,
+      "ChitChat": 0,
+      "NoAvailable": 1
+    },
+    "StockQuery": {
+      "StockAdvice": 2,
+      "StockOther": 2,
+      "StockQuery": 0,
+      "GeneralProduct": 0,
+      "EcommerceProduct": 0,
+      "ChitChat": 0,
+      "NoAvailable": 1
+    },
+    "GeneralProduct": {
+      "StockAdvice": 0,
+      "StockOther": 1,
+      "StockQuery": 0,
+      "GeneralProduct": 0,
+      "EcommerceProduct": 3,
+      "ChitChat": 0,
+      "NoAvailable": 1
+    },
+    "EcommerceProduct": {
+      "StockAdvice": 0,
+      "StockOther": 1,
+      "StockQuery": 0,
+      "GeneralProduct": 2,
+      "EcommerceProduct": 0,
+      "ChitChat": 0,
+      "NoAvailable": 1
+    },
+    "ChitChat": {
+      "StockAdvice": 0,
+      "StockOther": 0,
+      "StockQuery": 0,
+      "GeneralProduct": 0,
+      "EcommerceProduct": 0,
+      "ChitChat": 0,
+      "NoAvailable": 2
+    },
+    "NoAvailable": {
+      "StockAdvice": 1,
+      "StockOther": 1,
+      "StockQuery": 3,
+      "GeneralProduct": 2,
+      "EcommerceProduct": 3,
+      "ChitChat": 2,
+      "NoAvailable": 0
+    }
+  }
+}

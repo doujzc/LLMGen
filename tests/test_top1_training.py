@@ -35,6 +35,7 @@ def _training_args(root: Path) -> Namespace:
         candidate_registry="configs/top1_candidates.json",
         decision_policy="configs/top1_decision_policy.json",
         system_prompt_file=str(prompt),
+        margin_loss_config=None,
         output_dir=str(root / "output"),
         experiment_name="test-top1",
         run_id="run-001",
@@ -268,6 +269,7 @@ class Top1TrainingTests(unittest.TestCase):
                 prepared_memorization_path=None,
                 training_schedule=None,
                 transformers_version="5.5.4",
+                margin_loss_config=None,
             )
 
             manifest = json.loads((model_output / "router_manifest.json").read_text())
@@ -286,6 +288,7 @@ class Top1TrainingTests(unittest.TestCase):
                 manifest["training"]["effective_global_batch_size"],
                 16,
             )
+            self.assertEqual(manifest["training"]["margin_loss"], {"enabled": False})
             registry = json.loads((model_output / "candidate_registry.json").read_text())
             self.assertEqual(
                 registry["candidates"],
@@ -413,6 +416,128 @@ class Top1TrainingTests(unittest.TestCase):
                     prompt_path=model_output / "router_system_prompt.md",
                     candidate_names=("StockQuery", "EcommerceProduct"),
                 )
+
+    def test_margin_config_builds_directed_first_divergence_branches(self) -> None:
+        candidates = (
+            "StockAdvice",
+            "StockOther",
+            "StockQuery",
+            "GeneralProduct",
+            "EcommerceProduct",
+            "ChitChat",
+            "NoAvailable",
+        )
+        config = train_top1._load_margin_loss_config(
+            "configs/top1_margin_loss_v1.json",
+            candidates,
+        )
+        branches = train_top1._candidate_margin_branches(
+            candidates,
+            {
+                "StockAdvice": (10, 11),
+                "StockOther": (10, 12),
+                "StockQuery": (10, 13),
+                "GeneralProduct": (20,),
+                "EcommerceProduct": (21,),
+                "ChitChat": (22,),
+                "NoAvailable": (23,),
+            },
+            eos_token_id=99,
+            config=config,
+        )
+
+        advice_to_query = next(
+            branch
+            for branch in branches[0]
+            if branch.competitor_name == "StockQuery"
+        )
+        product_to_ecommerce = next(
+            branch
+            for branch in branches[3]
+            if branch.competitor_name == "EcommerceProduct"
+        )
+        self.assertEqual(advice_to_query.divergence_offset, 1)
+        self.assertEqual(advice_to_query.target_token_id, 11)
+        self.assertEqual(advice_to_query.competitor_token_id, 13)
+        self.assertEqual(advice_to_query.priority, 3)
+        self.assertEqual(product_to_ecommerce.divergence_offset, 0)
+        self.assertEqual(product_to_ecommerce.priority, 3)
+
+    def test_margin_config_rejects_nonzero_diagonal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            payload = json.loads(
+                Path("configs/top1_margin_loss_v1.json").read_text(encoding="utf-8")
+            )
+            payload["priority_matrix"]["StockAdvice"]["StockAdvice"] = 1
+            path = Path(temporary) / "invalid-margin.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(Top1DataError, "diagonal"):
+                train_top1._load_margin_loss_config(
+                    path,
+                    tuple(payload["candidate_order"]),
+                )
+
+    def test_margin_collator_metadata_is_absent_when_disabled(self) -> None:
+        class FakeTorch:
+            long = "long"
+
+            @staticmethod
+            def tensor(values, dtype):
+                return {"values": values, "dtype": dtype}
+
+        feature = {
+            "input_ids": [5, 10, 99],
+            "attention_mask": [1, 1, 1],
+            "labels": [-100, 10, 99],
+        }
+        plain_batch = train_top1._collator(FakeTorch, 0)([feature])
+        margin_batch = train_top1._collator(
+            FakeTorch,
+            0,
+            margin_target_lookup={(10, 99): 2},
+        )([feature])
+
+        self.assertNotIn("margin_target_index", plain_batch)
+        self.assertEqual(margin_batch["margin_target_index"]["values"], [2])
+
+    def test_margin_trainer_is_only_selected_when_configured(self) -> None:
+        class FakeTrainer:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        transformers = SimpleNamespace(Trainer=FakeTrainer)
+        common = {
+            "transformers": transformers,
+            "torch": object(),
+            "model": object(),
+            "training_args": object(),
+            "train_dataset": object(),
+            "eval_dataset": None,
+            "data_collator": object(),
+            "tokenizer": object(),
+            "callback": object(),
+        }
+        plain = train_top1._trainer(
+            **common,
+            margin_loss_config=None,
+            margin_branches=None,
+        )
+        config = train_top1.MarginLossConfig(
+            loss_weight=0.2,
+            logit_margin=1.0,
+            priority_matrix={"A": {"A": 0, "B": 3}, "B": {"A": 2, "B": 0}},
+        )
+        enabled = train_top1._trainer(
+            **common,
+            margin_loss_config=config,
+            margin_branches={0: (), 1: ()},
+        )
+
+        self.assertIs(type(plain), FakeTrainer)
+        self.assertIsNot(type(enabled), FakeTrainer)
+        self.assertIsInstance(enabled, FakeTrainer)
+        self.assertIs(enabled.margin_loss_config, config)
 
     def test_lora_local_base_model_is_content_addressed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

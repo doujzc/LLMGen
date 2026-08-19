@@ -75,6 +75,20 @@ bash scripts/train_top1.sh
 
 将 `TOP1_MEMORIZATION_DATA` 显式设为空字符串可以运行无 memorization 的消融基线。
 
+默认只使用原来的直接 SFT loss。指定版本化的混淆矩阵配置可启用 candidate margin
+loss，建议使用不同的 experiment name 与 SFT 基线做对照：
+
+```bash
+TOP1_MARGIN_LOSS_CONFIG=configs/top1_margin_loss_v1.json \
+TOP1_EXPERIMENT_NAME=qwen3-1.7b-top1-margin-v1 \
+bash scripts/train_top1.sh
+```
+
+`TOP1_MARGIN_LOSS_CONFIG` 为空时不加载自定义 Trainer，训练仍走原生
+`transformers.Trainer` 的直接 SFT 路径。配置文件同时保存 loss 权重、目标 logit margin
+和有方向的 7×7 混淆优先级矩阵；当前 v1 使用 `loss_weight=0.2`、
+`logit_margin=1.0`。
+
 只有训练集时省略 `TOP1_VALIDATION_DATA`。LoRA 训练：
 
 ```bash
@@ -124,6 +138,10 @@ runs/top1/<experiment_name>/2026-08-18T10-23-26+0800-<git短SHA>/
    先执行配置数量的完整 optimizer steps；随后才进入主训练样本。
 8. 推理使用候选 token Trie 约束 `generate`，只允许生成一个合法候选名称和 EOS；
    decision policy 只负责把原始候选映射为可执行后端或 `NoAvailable`。
+9. 可选 margin loss 在正确候选与每个已配置混淆候选的首个 Trie 分叉处计算
+   `relu(logit_margin - (正确 token logit - 竞争 token logit))`，再按矩阵优先级加权平均；
+   总目标为 `SFT loss + loss_weight × margin loss`。它复用 SFT forward 的 logits，
+   不额外枚举七次候选，也不改变推理 prompt 或候选语法。
 
 两阶段共用同一个 Trainer、模型、优化器、候选 token、system prompt 和
 `prepare_router_prompt()`。memorization 样本数按有效全局 batch 对齐，阶段边界不会把
@@ -167,6 +185,7 @@ final/
     model_artifact.json            # 全部模型文件哈希与稳定 model_id
     candidate_registry.json
     decision_policy.json           # 候选到可执行后端或 NoAvailable 的显式映射
+    margin_loss_config.json        # 仅 margin run 存在；实际训练矩阵及超参数
     router_system_prompt.md
     router_manifest.json
   curves.json                      # train/eval loss、LR、grad norm 曲线数据
@@ -182,9 +201,10 @@ Git。
 loss、eval loss、learning rate、grad norm、Trainer 吞吐指标、进程内存、GPU
 allocated/reserved/peak memory 和非有限数告警。启用 memorization 时，主训练开始前
 `epoch=0`，随后按配置的 `TOP1_EPOCHS` 增长；`trainer_epoch` 仅表示整个组合课程的完成
-比例。数据 profile
-不复制原始文本，只记录候选分布、输入/目标 token 分位数、长度利用率、历史裁剪、当前
-请求裁剪、候选 token 路径长度和首 token 冲突。
+比例。margin run 还会在相同日志与 `final/curves.json` 中记录按混淆优先级加权的
+`margin_loss` 和 `margin_violation_rate`；验证阶段使用对应的 `eval_` 或 `final_` 前缀。
+数据 profile 不复制原始文本，只记录候选分布、输入/目标 token 分位数、长度利用率、
+历史裁剪、当前请求裁剪、候选 token 路径长度和首 token 冲突。
 
 ## 独立评测
 
@@ -280,6 +300,41 @@ Hub 模型固定到训练时 revision，本地模型复核完整目录内容哈�
 结果不保存对话正文，使用原数据行号回查；`metrics.json` 还给出最低置信度真实路由、
 最接近阈值和高置信错误的行号清单。
 
+## 只读调试界面
+
+调试界面是现有模型和实验产物的只读观察台，不启动训练或批量评测，也不修改数据、
+prompt、模型和 `runs/`。在 NVIDIA 服务器安装训练与调试依赖：
+
+```bash
+uv pip install --python .venv/bin/python -e '.[train,debug]'
+```
+
+然后启动：
+
+```bash
+uv run --no-sync python scripts/debug_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model
+```
+
+默认仅监听 `127.0.0.1:7860`，不会创建公开分享链接。在本机访问远端 GPU 服务时使用
+SSH 端口转发：
+
+```bash
+ssh -L 7860:127.0.0.1:7860 <nvidia-server>
+```
+
+打开本机 `http://127.0.0.1:7860`。三个页签分别用于：
+
+- Case 调试：单轮/多轮临时推理，分开显示原始候选和后端决策；按需运行历史消融与
+  七候选路径评分，并检查 checkpoint 内置 system prompt、最终模型输入和 token 裁剪。
+- Evaluation 浏览：读取现有 run，过滤错误、查看两套混淆矩阵、回查原始对话，并对比
+  同一模型的多次评测；只有数据 SHA256 一致时才进行逐 Case 对比。
+- Training 浏览：读取状态、summary、loss/LR/grad norm 曲线、manifest 和最近事件。
+
+模型采用懒加载，内存中只保留一个 checkpoint。关闭页面后，手工输入的 Case 不会保存；
+界面只在用户点击“手动刷新”时重新扫描实验目录。Mac 上若只安装 `[debug]`，可以浏览
+已经同步到本机的实验产物，但实时推理仍应在安装 `[train,debug]` 的 NVIDIA 服务器执行。
+
 ## 检查
 
 ```bash
@@ -287,4 +342,5 @@ uv run --no-sync python -m unittest discover -s tests -v
 bash -n scripts/train_top1.sh
 uv run --no-sync python -m compileall -q src scripts tests
 uv run --no-sync python scripts/evaluate_top1.py --help
+uv run --no-sync python scripts/debug_top1.py --help
 ```

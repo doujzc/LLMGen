@@ -13,6 +13,7 @@ fi
 
 # shellcheck source=/dev/null
 source "$TOP1_CONFIG"
+TOP1_MARGIN_LOSS_CONFIG="${TOP1_MARGIN_LOSS_CONFIG:-}"
 cd "$ROOT_DIR"
 
 if [[ -n "$TOP1_RESUME" && -z "$TOP1_OUTPUT_DIR" && -z "$TOP1_RUN_ID" ]]; then
@@ -61,6 +62,9 @@ fi
 if [[ -n "$TOP1_VALIDATION_DATA" ]]; then
   require_file "$TOP1_VALIDATION_DATA"
 fi
+if [[ -n "$TOP1_MARGIN_LOSS_CONFIG" ]]; then
+  require_file "$TOP1_MARGIN_LOSS_CONFIG"
+fi
 if [[ ! "$TOP1_NUM_GPUS" =~ ^[1-9][0-9]*$ ]]; then
   echo "TOP1_NUM_GPUS must be a positive integer" >&2
   exit 2
@@ -86,6 +90,9 @@ if [[ -n "$TOP1_MEMORIZATION_DATA" ]]; then
 fi
 if [[ -n "$TOP1_VALIDATION_DATA" ]]; then
   OPTIONAL_ARGS+=(--validation-data "$TOP1_VALIDATION_DATA")
+fi
+if [[ -n "$TOP1_MARGIN_LOSS_CONFIG" ]]; then
+  OPTIONAL_ARGS+=(--margin-loss-config "$TOP1_MARGIN_LOSS_CONFIG")
 fi
 if [[ -n "$TOP1_DEEPSPEED_CONFIG" && "$TOP1_DEEPSPEED_CONFIG" != "none" ]]; then
   require_file "$TOP1_DEEPSPEED_CONFIG"

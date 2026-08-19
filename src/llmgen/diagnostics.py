@@ -111,6 +111,8 @@ def build_curve_summary(history: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 {
                     **common,
                     "loss": row.get("loss"),
+                    "margin_loss": row.get("margin_loss"),
+                    "margin_violation_rate": row.get("margin_violation_rate"),
                     "learning_rate": row.get("learning_rate"),
                     "grad_norm": row.get("grad_norm"),
                 }
@@ -128,6 +130,16 @@ def build_curve_summary(history: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 {
                     **common,
                     "eval_loss": row.get(validation_key),
+                    "margin_loss": row.get(
+                        "eval_margin_loss"
+                        if validation_key == "eval_loss"
+                        else "final_margin_loss"
+                    ),
+                    "margin_violation_rate": row.get(
+                        "eval_margin_violation_rate"
+                        if validation_key == "eval_loss"
+                        else "final_margin_violation_rate"
+                    ),
                     "source": validation_key,
                 }
             )

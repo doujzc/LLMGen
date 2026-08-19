@@ -466,7 +466,9 @@ def _prepare_prompts(
             {
                 "row_index": row_index,
                 "target_candidate_name": target,
+                "prompt_text": prepared_prompt.text,
                 "prompt_ids": prompt_ids,
+                "fitted_messages": list(fitted),
                 "history_ablation_prompt_ids": ablated_ids,
                 "diagnostics": diagnostics,
             }
