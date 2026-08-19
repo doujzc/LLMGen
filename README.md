@@ -329,7 +329,8 @@ ssh -L 7860:127.0.0.1:7860 <nvidia-server>
   七候选路径评分，并检查 checkpoint 内置 system prompt、最终模型输入和 token 裁剪。
 - Evaluation 浏览：点击 run 直接加载详情，主视图聚焦后端总准确率、正负样本准确率、
   各后端 Label 准确率和后端混淆矩阵；Case 按后端正确性着色并支持简单多选过滤。
-  Case 明细不设条数上限；候选层、路由/OOS 和历史消融指标收在辅助诊断中。
+  Case 表格上方的“正确/错误”复选框会立即过滤，明细不设条数上限；候选层、
+  路由/OOS 和历史消融指标收在辅助诊断中。
   只有数据 SHA256 一致时才逐 Case 对比。
 - Training 浏览：读取状态、summary、loss/LR/grad norm 曲线、manifest 和最近事件。
 

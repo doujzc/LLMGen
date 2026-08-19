@@ -1078,6 +1078,33 @@ def build_app(
                 {},
             )
 
+    def filter_evaluation_cases(
+        run_dir: str,
+        backend_results: Sequence[str] | None,
+    ):
+        try:
+            detail = load_evaluation_run(
+                run_dir,
+                backend_correct=_backend_correct_filter(backend_results),
+            )
+            state = detail["dataset_status"].get("state")
+            return (
+                f"数据集回查：`{state}` · Case 共 "
+                f"**{detail['matching_rows']}** 条",
+                _evaluation_cases_frame(pd, detail["cases"]),
+                detail["cases"],
+                "",
+                {},
+            )
+        except (Exception, SystemExit) as exc:
+            return (
+                f"❌ `{type(exc).__name__}`：{exc}",
+                _evaluation_cases_frame(pd, []),
+                [],
+                "",
+                {},
+            )
+
     def select_case(cases: Sequence[Mapping[str, Any]], evt: gr.SelectData):
         if not cases or not isinstance(evt.row_value, list) or not evt.row_value:
             return "", {}
@@ -1322,17 +1349,10 @@ def build_app(
                     label="当前 Evaluation Run",
                     scale=5,
                 )
-                backend_result_filter = gr.Dropdown(
-                    choices=list(BACKEND_RESULT_CHOICES),
-                    value=list(BACKEND_RESULT_CHOICES),
-                    multiselect=True,
-                    label="Case 后端结果",
-                    scale=2,
-                )
                 load_evaluation_button = gr.Button(
-                    "加载 / 应用筛选",
+                    "加载 Run",
                     variant="primary",
-                    scale=2,
+                    scale=1,
                     min_width=170,
                 )
             evaluation_status = gr.Markdown()
@@ -1366,6 +1386,11 @@ def build_app(
                         candidate_confusion = gr.HTML()
 
                 with gr.Tab("Case 分析"):
+                    backend_result_filter = gr.CheckboxGroup(
+                        choices=list(BACKEND_RESULT_CHOICES),
+                        value=list(BACKEND_RESULT_CHOICES),
+                        label="表格筛选 · 后端结果",
+                    )
                     evaluation_cases = gr.Dataframe(
                         value=_evaluation_cases_frame(pd, []),
                         interactive=False,
@@ -1458,6 +1483,17 @@ def build_app(
                 select_case,
                 inputs=[evaluation_cases_state],
                 outputs=[selected_dialogue, selected_prediction],
+            )
+            backend_result_filter.change(
+                filter_evaluation_cases,
+                inputs=[evaluation_run, backend_result_filter],
+                outputs=[
+                    evaluation_status,
+                    evaluation_cases,
+                    evaluation_cases_state,
+                    selected_dialogue,
+                    selected_prediction,
+                ],
             )
             compare_button.click(
                 compare_runs,
