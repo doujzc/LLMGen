@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "dataset_version": "top1_short_queries_v1",
+  "construction": "reviewed_balanced_short_query_contrasts",
+  "policy": "short wording does not determine the route; classify the exact requested object by ordinary-retail eligibility",
+  "train": {
+    "rows": 48,
+    "pairs": 24,
+    "candidate_counts": {
+      "ProductEcommerce": 24,
+      "ProductGeneral": 24
+    },
+    "query_intent_counts": {
+      "brand_selection": 16,
+      "model_selection": 8,
+      "price": 2,
+      "promotion": 2,
+      "recommendation": 12,
+      "selection": 2,
+      "suitability": 6
+    },
+    "families": 24,
+    "max_query_characters": 11,
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_short_queries_v1.jsonl",
+    "sha256": "ac1406140bea4de0f179bb7e5d726f2077cc8065590707af2d647c06b03e6775"
+  },
+  "validation": {
+    "rows": 16,
+    "pairs": 8,
+    "candidate_counts": {
+      "ProductEcommerce": 8,
+      "ProductGeneral": 8
+    },
+    "query_intent_counts": {
+      "brand_selection": 4,
+      "model_selection": 4,
+      "price": 2,
+      "promotion": 2,
+      "recommendation": 2,
+      "suitability": 2
+    },
+    "families": 8,
+    "max_query_characters": 10,
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_short_queries_v1_validation.jsonl",
+    "sha256": "6dc1da5f063947f81f66d89c3bff0360ea1fb4927672808d58058ab1d84a861a",
+    "family_overlap_with_train": 0
+  }
+}

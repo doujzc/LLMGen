@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine reviewed base, controlled multi-turn, and retail-boundary data."""
+"""Combine all reviewed Top1 training datasets."""
 
 from __future__ import annotations
 
@@ -27,12 +27,14 @@ DEFAULT_AUGMENTATION_DATA = (
     "data_top1/generated/top1_controlled_multiturn_v1/train.jsonl"
 )
 DEFAULT_RETAIL_BOUNDARY_DATA = "data_top1/top1_retail_boundary_v1.jsonl"
+DEFAULT_SHORT_QUERY_DATA = "data_top1/top1_short_queries_v1.jsonl"
 DEFAULT_OUTPUT = "data_top1/top1_train_combined_v1.jsonl"
 DEFAULT_SUMMARY = "data_top1/top1_train_combined_v1_summary.json"
 EXPECTED_SOURCE_VERSIONS = (
     "top1_train_v1",
     "top1_controlled_multiturn_v1",
     "top1_retail_boundary_v1",
+    "top1_short_queries_v1",
 )
 
 
@@ -45,6 +47,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--retail-boundary-data",
         default=DEFAULT_RETAIL_BOUNDARY_DATA,
+    )
+    parser.add_argument(
+        "--short-query-data",
+        default=DEFAULT_SHORT_QUERY_DATA,
     )
     parser.add_argument(
         "--candidate-registry",
@@ -219,11 +225,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     base_path = Path(args.base_data).expanduser().resolve()
     augmentation_path = Path(args.augmentation_data).expanduser().resolve()
     retail_boundary_path = Path(args.retail_boundary_data).expanduser().resolve()
+    short_query_path = Path(args.short_query_data).expanduser().resolve()
     candidate_path = Path(args.candidate_registry).expanduser().resolve()
     output_path = Path(args.output).expanduser().resolve()
     summary_path = Path(args.summary).expanduser().resolve()
-    source_paths = {base_path, augmentation_path, retail_boundary_path}
-    if len(source_paths) != 3:
+    source_paths = {
+        base_path,
+        augmentation_path,
+        retail_boundary_path,
+        short_query_path,
+    }
+    if len(source_paths) != 4:
         raise Top1DataError("combined sources must be distinct")
     if output_path in source_paths:
         raise Top1DataError("combined output cannot overwrite a source dataset")
@@ -234,6 +246,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     base_rows = read_jsonl(base_path)
     augmentation_rows = read_jsonl(augmentation_path)
     retail_boundary_rows = read_jsonl(retail_boundary_path)
+    short_query_rows = read_jsonl(short_query_path)
     validate_training_rows(base_rows, candidate_names, source=base_path)
     validate_training_rows(
         augmentation_rows,
@@ -244,6 +257,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         retail_boundary_rows,
         candidate_names,
         source=retail_boundary_path,
+    )
+    validate_training_rows(
+        short_query_rows,
+        candidate_names,
+        source=short_query_path,
     )
     _validate_source_version(
         base_rows,
@@ -260,16 +278,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         expected=EXPECTED_SOURCE_VERSIONS[2],
         source=retail_boundary_path,
     )
+    _validate_source_version(
+        short_query_rows,
+        expected=EXPECTED_SOURCE_VERSIONS[3],
+        source=short_query_path,
+    )
     combined = combine_training_rows(
         (
             (str(base_path), base_rows),
             (str(augmentation_path), augmentation_rows),
             (str(retail_boundary_path), retail_boundary_rows),
+            (str(short_query_path), short_query_rows),
         )
     )
     report = validate_training_rows(combined, candidate_names, source=output_path)
     expected_rows = (
-        len(base_rows) + len(augmentation_rows) + len(retail_boundary_rows)
+        len(base_rows)
+        + len(augmentation_rows)
+        + len(retail_boundary_rows)
+        + len(short_query_rows)
     )
     if report["rows"] != expected_rows:
         raise Top1DataError("combined dataset row count mismatch")
@@ -281,6 +308,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             (base_path, base_rows),
             (augmentation_path, augmentation_rows),
             (retail_boundary_path, retail_boundary_rows),
+            (short_query_path, short_query_rows),
         ),
         output_path=output_path,
     )

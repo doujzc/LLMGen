@@ -114,18 +114,32 @@ uv run --no-sync python scripts/build_top1_retail_boundary_v1.py
 家族与训练集完全隔离，不会合入训练。相邻 summary 记录抽象轴、候选分布和两个 split 的
 SHA256。
 
+## 简短商品咨询数据
+
+`scripts/build_top1_short_queries_v1.py` 补充单轮、无平台词、无完整购买条件的自然短句，
+包括“运动鞋哪个牌子好？”“跑步鞋买哪双？”和“推荐一款通勤耳机。”等普通商品咨询。
+每个 `ProductEcommerce` 样本都有相同问法意图的 `ProductGeneral` 边界对照，覆盖整车、
+房屋、服务、软件和权利交易，避免模型仅凭“哪个牌子”“推荐”“多少钱”等表面表达路由。
+
+```bash
+uv run --no-sync python scripts/build_top1_short_queries_v1.py
+```
+
+训练集 `top1_short_queries_v1.jsonl` 包含 48 条、24 对；validation 包含 16 条、8 对，
+对象家族与训练集隔离。只有训练 split 会合入默认 combined 数据。
+
 ## 可直接训练的 combined v1
 
 `scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集、controlled
-multiturn 800 条增强集和 retail-boundary 192 条训练集。构建时拒绝重复 ID、完全重复
-对话、非法候选和源数据版本漂移，并记录三份输入及最终输出的 SHA256。边界 validation
-不参与合并。
+multiturn 800 条增强集、retail-boundary 192 条训练集和 short-query 48 条训练集。
+构建时拒绝重复 ID、完全重复对话、非法候选和源数据版本漂移，并记录四份输入及最终
+输出的 SHA256。两份 validation 都不参与合并。
 
 ```bash
 uv run --no-sync python scripts/build_top1_combined_v1.py
 ```
 
-输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 1,992 条。`configs/top1.env`
+输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 2,040 条。`configs/top1.env`
 已将它设为默认训练数据，因此构建后可直接启动：
 
 ```bash
