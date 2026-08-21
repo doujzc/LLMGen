@@ -18,6 +18,11 @@ data_top1/*
 !data_top1/top1_short_queries_v1.jsonl
 !data_top1/top1_short_queries_v1_validation.jsonl
 !data_top1/top1_short_queries_v1_summary.json
+!data_top1/top1_stock_prediction_v1.jsonl
+!data_top1/top1_stock_prediction_v1_validation.jsonl
+!data_top1/top1_stock_prediction_v1_summary.json
+!data_top1/top1_validation_unified_v1.jsonl
+!data_top1/top1_validation_unified_v1_summary.json
 !data_top1/top1_train_combined_v1.jsonl
 !data_top1/top1_train_combined_v1_summary.json
 !data_top1/generated/

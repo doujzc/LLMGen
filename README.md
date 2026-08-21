@@ -50,10 +50,11 @@ DeepSpeed 固定为 0.16.4。先安装 PyTorch 和构建工具，是为了让 De
 `StockAdvice`、`StockOther`、`ProductGeneral`、`ChitChat` 和 `NoAvailable` 都映射为
 后端 `NoAvailable`。代码不会根据候选名称或文本内容推断该映射。
 
-仓库不包含实际训练数据。把数据放到 `data_top1/`，或通过环境变量指向外部文件。
-默认还会读取 `data_top1/top1_labeldesc_paper_v1.jsonl`，先执行 description → label
-memorization。该公开 LabelDesc 文件已作为 `data_top1/` 中唯一的数据例外取消忽略；
-其它主训练、验证和评测数据仍不进入 Git。
+仓库包含经过复核、带版本和来源摘要的默认训练集与开发 validation；原始 LLM 响应、
+拒绝样本、缓存和运行产物仍不进入 Git。也可以把数据放到其它目录，并通过环境变量覆盖。
+默认先读取 `data_top1/top1_labeldesc_paper_v1.jsonl` 执行 description → label
+memorization，再训练 `data_top1/top1_train_combined_v1.jsonl`，并使用
+`data_top1/top1_validation_unified_v1.jsonl` 选择 checkpoint。
 
 ## 训练
 
@@ -89,7 +90,14 @@ bash scripts/train_top1.sh
 和有方向的 7×7 混淆优先级矩阵；当前 v1 使用 `loss_weight=0.2`、
 `logit_margin=1.0`。
 
-只有训练集时省略 `TOP1_VALIDATION_DATA`。LoRA 训练：
+默认 validation 启用后按 `eval_loss` 选择并恢复最佳 checkpoint。无 validation 的消融需
+显式传入空字符串：
+
+```bash
+TOP1_VALIDATION_DATA= bash scripts/train_top1.sh
+```
+
+LoRA 训练：
 
 ```bash
 TOP1_FINETUNE_MODE=lora \
@@ -222,6 +230,25 @@ uv run --no-sync python scripts/evaluate_top1.py \
 生成阶段会显示按数据行计数的进度条；每一行完成一次受约束候选生成（以及可选的
 history ablation）后推进一次。
 
+单张 GPU 放不下模型时，使用单进程模型分片；不要用 `torchrun`，否则每个进程都会加载
+完整模型并争用同一个 Evaluation Run。`balanced_low_0` 会尽量给 GPU 0 留出生成阶段的
+额外空间，`--max-memory` 应为激活和 KV cache 预留余量：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+uv run --no-sync python scripts/evaluate_top1.py \
+  --model-dir runs/top1/<experiment>/<run_id>/final/model \
+  --data /data/router/test.jsonl \
+  --device-map balanced_low_0 \
+  --max-memory 0=22GiB,1=22GiB,2=22GiB,3=22GiB,cpu=64GiB \
+  --batch-size 8
+```
+
+支持的分片策略为 `auto`、`balanced`、`balanced_low_0` 和 `sequential`。全参 bundle 会
+直接分片加载，LoRA bundle 会先按相同策略加载固定 base model，再挂载 adapter；分片模式
+下不能同时指定 `--device`。实际模块布局和输入 embedding 所在设备会写入
+`logs/model_placement.json`，请求的分片策略和显存限制则记录在 `eval_manifest.json`。
+
 过滤低置信度真实路由时，传入 `[0,1]` 范围内的阈值：
 
 ```bash
@@ -264,6 +291,7 @@ runs/evaluations/top1/<model_id前缀>/<evaluation_id>/
   status.json
   logs/events.jsonl
   logs/system.json
+  logs/model_placement.json        # 请求与实际模型分片、输入设备
   predictions.jsonl               # 无原始文本的逐样本候选分数与诊断
   metrics.json
   confusion_matrix.json           # 原始七分类混淆矩阵

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from llmgen.evaluation import (
     BackendDecisionPolicy,
@@ -14,7 +17,7 @@ from llmgen.evaluation import (
     load_backend_decision_policy,
     prediction_from_generation,
 )
-from llmgen.top1 import CandidateNameTokenTrie
+from llmgen.top1 import CandidateNameTokenTrie, Top1DataError
 from scripts import evaluate_top1
 
 
@@ -52,6 +55,126 @@ def _prediction(
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_multi_device_memory_limits_are_parsed_and_json_normalized(self) -> None:
+        parsed = evaluate_top1._parse_max_memory(
+            ("0=22GiB,1=22GiB", "cpu=64GiB"),
+        )
+
+        self.assertEqual(parsed, {0: "22GiB", 1: "22GiB", "cpu": "64GiB"})
+        self.assertEqual(
+            evaluate_top1._json_max_memory(parsed),
+            {"0": "22GiB", "1": "22GiB", "cpu": "64GiB"},
+        )
+        with self.assertRaisesRegex(Top1DataError, "duplicate max_memory device"):
+            evaluate_top1._parse_max_memory(("0=22GiB", "0=20GiB"))
+
+    def test_evaluation_rejects_torchrun_replication(self) -> None:
+        with mock.patch.dict(os.environ, {"WORLD_SIZE": "2"}):
+            with self.assertRaisesRegex(Top1DataError, "one process"):
+                evaluate_top1._validate_single_process()
+
+    def test_full_model_loading_forwards_accelerate_device_map(self) -> None:
+        class AutoModel:
+            call = None
+
+            @classmethod
+            def from_pretrained(cls, reference, **kwargs):
+                cls.call = (reference, kwargs)
+                return "loaded-model"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary)
+            loaded = evaluate_top1._load_model(
+                model_dir=model_dir,
+                transformers=SimpleNamespace(AutoModelForCausalLM=AutoModel),
+                dtype="bf16",
+                trust_remote_code=False,
+                router_contract={},
+                device_map="auto",
+                max_memory={0: "22GiB", 1: "22GiB"},
+            )
+
+        self.assertEqual(loaded, "loaded-model")
+        self.assertEqual(AutoModel.call[0], str(model_dir))
+        self.assertEqual(AutoModel.call[1]["device_map"], "auto")
+        self.assertEqual(
+            AutoModel.call[1]["max_memory"],
+            {0: "22GiB", 1: "22GiB"},
+        )
+        self.assertTrue(AutoModel.call[1]["low_cpu_mem_usage"])
+
+    def test_lora_loading_shards_base_and_adapter(self) -> None:
+        base_model = SimpleNamespace(hf_device_map={"model": 0})
+
+        class AutoModel:
+            call = None
+
+            @classmethod
+            def from_pretrained(cls, reference, **kwargs):
+                cls.call = (reference, kwargs)
+                return base_model
+
+        class PeftModel:
+            call = None
+
+            @classmethod
+            def from_pretrained(cls, model, reference, **kwargs):
+                cls.call = (model, reference, kwargs)
+                return "loaded-adapter"
+
+        with tempfile.TemporaryDirectory() as temporary:
+            model_dir = Path(temporary)
+            (model_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+            with mock.patch.dict(
+                sys.modules,
+                {"peft": SimpleNamespace(PeftModel=PeftModel)},
+            ):
+                loaded = evaluate_top1._load_model(
+                    model_dir=model_dir,
+                    transformers=SimpleNamespace(AutoModelForCausalLM=AutoModel),
+                    dtype="bf16",
+                    trust_remote_code=False,
+                    router_contract={
+                        "base_model_dependency": {
+                            "kind": "hub_revision",
+                            "reference": "base-model",
+                            "revision": "revision-1",
+                        }
+                    },
+                    device_map="balanced",
+                    max_memory={0: "20GiB", 1: "20GiB"},
+                )
+
+        self.assertEqual(loaded, "loaded-adapter")
+        self.assertEqual(AutoModel.call[0], "base-model")
+        self.assertEqual(AutoModel.call[1]["revision"], "revision-1")
+        self.assertEqual(AutoModel.call[1]["device_map"], "balanced")
+        self.assertIs(PeftModel.call[0], base_model)
+        self.assertEqual(PeftModel.call[2]["device_map"], "balanced")
+        self.assertEqual(
+            PeftModel.call[2]["max_memory"],
+            {0: "20GiB", 1: "20GiB"},
+        )
+
+    def test_dispatched_model_uses_embedding_device_and_reports_layout(self) -> None:
+        input_device = SimpleNamespace(type="cuda")
+        model = SimpleNamespace(
+            get_input_embeddings=lambda: SimpleNamespace(
+                weight=SimpleNamespace(device=input_device)
+            ),
+            hf_device_map={"model.embed_tokens": 0, "model.layers.0": 1},
+        )
+        torch = SimpleNamespace(device=lambda value: value)
+
+        self.assertIs(
+            evaluate_top1._dispatched_input_device(model, torch),
+            input_device,
+        )
+        self.assertEqual(
+            evaluate_top1._resolved_device_map(model),
+            {"model.embed_tokens": "cuda:0", "model.layers.0": "cuda:1"},
+        )
+
     def test_constrained_generation_returns_name_and_normalized_path_score(self) -> None:
         class Tensor:
             def __init__(self, values):

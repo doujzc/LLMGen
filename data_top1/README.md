@@ -1,7 +1,9 @@
 # Top1 training data
 
-实际数据不提交到仓库。默认文件名为 `train.jsonl`；验证集是可选的，可通过
-`TOP1_VALIDATION_DATA` 指定。
+经过复核且带来源与验证摘要的版本化训练数据和开发 validation 会随仓库保存；原始模型
+响应、拒绝样本、缓存和 `runs/` 产物不会提交。默认训练集是
+`top1_train_combined_v1.jsonl`，默认开发集是 `top1_validation_unified_v1.jsonl`；两者
+都可分别通过 `TOP1_TRAIN_DATA` 和 `TOP1_VALIDATION_DATA` 覆盖。
 
 每行格式：
 
@@ -19,8 +21,7 @@
 `## Turn T - Current Customer Utterance`；反斜杠和换行控制字符会进行单行转义。
 
 默认 memorization 数据为 `top1_labeldesc_paper_v1.jsonl`，来源文件是 PromptGen 的
-同名 42 行 LabelDesc 数据。它是 `data_top1/` 中唯一取消 `.gitignore` 的数据文件；
-其它训练数据仍需单独传输。训练会校验稳定 `id`、`source_type`、`description_type`、
+同名 42 行 LabelDesc 数据。训练会校验稳定 `id`、`source_type`、`description_type`、
 单条 user message、候选名及全候选覆盖。
 
 ## IntentChange augmentation
@@ -128,19 +129,63 @@ uv run --no-sync python scripts/build_top1_short_queries_v1.py
 训练集 `top1_short_queries_v1.jsonl` 包含 48 条、24 对；validation 包含 16 条、8 对，
 对象家族与训练集隔离。只有训练 split 会合入默认 combined 数据。
 
+## 股票预测短句数据
+
+`scripts/build_top1_stock_prediction_v1.py` 补充不带买卖或仓位建议的纯方向预测短句，
+例如“贵州茅台下周会不会涨？”和“深证成指下周会不会涨？”。每条未来预测
+`StockAdvice` 都与一个相同标的的已发生行情查询 `StockQuery` 配对，例如“贵州茅台
+今天涨了多少？”，防止模型仅凭“涨、跌、反弹”等表面词语分类。
+
+```bash
+uv run --no-sync python scripts/build_top1_stock_prediction_v1.py
+```
+
+训练集 `top1_stock_prediction_v1.jsonl` 包含 48 条、24 对；validation 包含 16 条、8 对，
+标的家族与训练集隔离。只有训练 split 会合入默认 combined 数据。
+
+## 统一开发 validation v1
+
+`scripts/build_top1_unified_validation_v1.py` 构建用于 checkpoint 选择的统一开发集。
+它包含 280 条，七个候选各 40 条；每类固定 20 条单轮、8 条同意图多轮和 12 条
+IntentChange。84 条 IntentChange 覆盖全部 42 个有向候选切换，每个组合 2 条，最后一轮
+直接提出新目标。
+
+统一集的主体来自 PromptGen 中与训练 split 场景家族隔离的 `dev` 和原 `test`（现记为
+`dev2`），另外只抽取 32 条专项边界样本，并补充 20 条人工复核的单轮
+`NoAvailable`。构建器固定当前七分类的显式 source-group 迁移，并检查候选/轮数配额、
+ID、规范化完整对话、末轮表达、来源 ID 和场景家族均不与 combined train 重叠；summary
+还报告近似文本候选，但不会据此自动删行或改标签。
+
+```bash
+uv run --no-sync python scripts/build_top1_unified_validation_v1.py
+```
+
+输出 `top1_validation_unified_v1.jsonl` 和相邻 summary。它是开发 validation，不是无偏
+blind test：PromptGen 的 `dev/dev2` 已用于历史开发。三份完整专项 validation 继续作为
+独立 regression/challenge suite，不让模板化边界样本主导统一 `eval_loss`；五份历史 audit
+已经被训练来源复用，也不会进入统一集。若某个 validation 行或家族被用于补训练，冻结并
+退役整个 v1，另发 v2，不能原地修改后继续报告 v1。
+
+`configs/top1.env` 默认启用该文件。显式空值可运行无 validation 消融：
+
+```bash
+TOP1_VALIDATION_DATA= bash scripts/train_top1.sh
+```
+
 ## 可直接训练的 combined v1
 
 `scripts/build_top1_combined_v1.py` 严格合并 reviewed 1,000 条基础集、controlled
-multiturn 800 条增强集、retail-boundary 192 条训练集和 short-query 48 条训练集。
-构建时拒绝重复 ID、完全重复对话、非法候选和源数据版本漂移，并记录四份输入及最终
-输出的 SHA256。两份 validation 都不参与合并。
+multiturn 800 条增强集、retail-boundary 192 条训练集、short-query 48 条训练集和
+stock-prediction 48 条训练集。构建时拒绝重复 ID、完全重复对话、非法候选和源数据
+版本漂移，并记录五份输入及最终输出的 SHA256。统一 validation 与三份完整专项
+validation 都不会参与合并。
 
 ```bash
 uv run --no-sync python scripts/build_top1_combined_v1.py
 ```
 
-输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 2,040 条。`configs/top1.env`
-已将它设为默认训练数据，因此构建后可直接启动：
+输出 `top1_train_combined_v1.jsonl` 和相邻 summary，共 2,088 条。`configs/top1.env`
+已将它和统一开发 validation 分别设为默认训练/验证数据，因此构建后可直接启动：
 
 ```bash
 bash scripts/train_top1.sh

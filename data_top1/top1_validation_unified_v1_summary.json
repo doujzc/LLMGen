@@ -1,0 +1,369 @@
+{
+  "schema_version": 1,
+  "dataset_version": "top1_validation_unified_v1",
+  "purpose": "development_validation_for_checkpoint_selection",
+  "blind_test": false,
+  "blind_test_note": "PromptGen dev and former test/dev2 were previously used for development; this artifact must not be reported as an unbiased final test.",
+  "seed": 20260821,
+  "rows": 280,
+  "candidate_counts": {
+    "ChitChat": 40,
+    "NoAvailable": 40,
+    "ProductEcommerce": 40,
+    "ProductGeneral": 40,
+    "StockAdvice": 40,
+    "StockOther": 40,
+    "StockQuery": 40
+  },
+  "turn_counts_by_candidate": {
+    "StockAdvice": {
+      "single": 20,
+      "multi": 20
+    },
+    "StockOther": {
+      "single": 20,
+      "multi": 20
+    },
+    "StockQuery": {
+      "single": 20,
+      "multi": 20
+    },
+    "ProductGeneral": {
+      "single": 20,
+      "multi": 20
+    },
+    "ProductEcommerce": {
+      "single": 20,
+      "multi": 20
+    },
+    "ChitChat": {
+      "single": 20,
+      "multi": 20
+    },
+    "NoAvailable": {
+      "single": 20,
+      "multi": 20
+    }
+  },
+  "source_type_counts": {
+    "controlled_heldout_intent_change": 84,
+    "promptgen_xiaoyi_dev2_holdout": 83,
+    "promptgen_xiaoyi_dev_holdout": 61,
+    "reviewed_authored_validation": 20,
+    "reviewed_specialty_validation_slice": 32
+  },
+  "phenomenon_counts": {
+    "boundary_contrast": 32,
+    "contextual_multiturn": 56,
+    "intent_change": 84,
+    "single_core": 108
+  },
+  "difficulty_counts": {
+    "easy": 54,
+    "hard": 144,
+    "medium": 82
+  },
+  "context_requirement_counts": {
+    "independent": 140,
+    "override": 84,
+    "supportive": 56
+  },
+  "intent_change_pair_counts": {
+    "ChitChat->NoAvailable": 2,
+    "ChitChat->ProductEcommerce": 2,
+    "ChitChat->ProductGeneral": 2,
+    "ChitChat->StockAdvice": 2,
+    "ChitChat->StockOther": 2,
+    "ChitChat->StockQuery": 2,
+    "NoAvailable->ChitChat": 2,
+    "NoAvailable->ProductEcommerce": 2,
+    "NoAvailable->ProductGeneral": 2,
+    "NoAvailable->StockAdvice": 2,
+    "NoAvailable->StockOther": 2,
+    "NoAvailable->StockQuery": 2,
+    "ProductEcommerce->ChitChat": 2,
+    "ProductEcommerce->NoAvailable": 2,
+    "ProductEcommerce->ProductGeneral": 2,
+    "ProductEcommerce->StockAdvice": 2,
+    "ProductEcommerce->StockOther": 2,
+    "ProductEcommerce->StockQuery": 2,
+    "ProductGeneral->ChitChat": 2,
+    "ProductGeneral->NoAvailable": 2,
+    "ProductGeneral->ProductEcommerce": 2,
+    "ProductGeneral->StockAdvice": 2,
+    "ProductGeneral->StockOther": 2,
+    "ProductGeneral->StockQuery": 2,
+    "StockAdvice->ChitChat": 2,
+    "StockAdvice->NoAvailable": 2,
+    "StockAdvice->ProductEcommerce": 2,
+    "StockAdvice->ProductGeneral": 2,
+    "StockAdvice->StockOther": 2,
+    "StockAdvice->StockQuery": 2,
+    "StockOther->ChitChat": 2,
+    "StockOther->NoAvailable": 2,
+    "StockOther->ProductEcommerce": 2,
+    "StockOther->ProductGeneral": 2,
+    "StockOther->StockAdvice": 2,
+    "StockOther->StockQuery": 2,
+    "StockQuery->ChitChat": 2,
+    "StockQuery->NoAvailable": 2,
+    "StockQuery->ProductEcommerce": 2,
+    "StockQuery->ProductGeneral": 2,
+    "StockQuery->StockAdvice": 2,
+    "StockQuery->StockOther": 2
+  },
+  "source_candidate_migration": {
+    "ecommerce_product_recommendation": "ProductEcommerce",
+    "no_route_chitchat": "ChitChat",
+    "no_route_multi_product": "ProductEcommerce",
+    "no_route_no_available": "NoAvailable",
+    "no_route_no_request": "NoAvailable",
+    "no_route_non_retail": "ProductGeneral",
+    "no_route_other_finance": "StockOther",
+    "no_route_product_information": "ProductGeneral",
+    "no_route_product_other": "ProductGeneral",
+    "no_route_stock_advice": "StockAdvice",
+    "no_route_stock_other": "StockQuery",
+    "no_route_stock_research": "StockOther",
+    "stock_market_information": "StockQuery"
+  },
+  "migration_review_notes": {
+    "no_route_multi_product": "Both ordinary retail goods require fresh shopping results under the current multi-product policy.",
+    "no_route_no_available": "The held-out families are unresolved references or general assistant tasks outside the six domain routes.",
+    "no_route_no_request": "The held-out families end without an actionable stock, product, or chitchat request.",
+    "no_route_stock_other": "The held-out families cover securities software or brokerage service queries, which the current StockQuery definition includes."
+  },
+  "validation_contract": {
+    "rows_per_candidate": 40,
+    "single_turn_per_candidate": 20,
+    "contextual_multi_turn_per_candidate": 8,
+    "intent_change_per_directed_pair": 2,
+    "legacy_specialty_rows": 32,
+    "legacy_specialty_role": "bounded_slice_not_dominant_loss",
+    "freeze_policy": "If any row or family is used to repair training, retire v1 and publish a new validation version instead of editing in place."
+  },
+  "leakage_checks": {
+    "rows": 280,
+    "multi_turn_rows": 140,
+    "candidate_counts": {
+      "StockAdvice": 40,
+      "StockOther": 40,
+      "StockQuery": 40,
+      "ProductGeneral": 40,
+      "ProductEcommerce": 40,
+      "ChitChat": 40,
+      "NoAvailable": 40
+    },
+    "unique_ids": 280,
+    "unique_conversations": 280,
+    "unique_current_utterances": 280,
+    "single_turn_rows": 140,
+    "intent_change_rows": 84,
+    "intent_change_directed_pairs": 42,
+    "train_id_overlap": 0,
+    "train_conversation_overlap": 0,
+    "train_current_utterance_overlap": 0,
+    "train_source_id_overlap": 0,
+    "train_source_family_overlap": 0
+  },
+  "near_duplicate_audit": {
+    "method": "difflib_sequence_matcher_on_nfkc_casefold_no_whitespace_punctuation",
+    "threshold_counts": {
+      "0.80": 4,
+      "0.85": 2,
+      "0.90": 0,
+      "0.95": 0
+    },
+    "top_matches": [
+      {
+        "validation_id": "top1_validation_unified_v1_source_xiaoyi_v1_oos_02364",
+        "validation_candidate": "StockOther",
+        "nearest_train_id": "top1_train_v1_base_xiaoyi_v1_oos_00157",
+        "nearest_train_candidate": "StockOther",
+        "similarity": 0.871795
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_intent_change_chitchat_to_stock_other_01",
+        "validation_candidate": "StockOther",
+        "nearest_train_id": "top1_train_v1_base_xiaoyi_v1_oos_00182",
+        "nearest_train_candidate": "StockOther",
+        "similarity": 0.857143
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_source_xiaoyi_v1_oos_02083",
+        "validation_candidate": "NoAvailable",
+        "nearest_train_id": "top1_train_v1_intent_change_ecommerce_product_to_no_available_007",
+        "nearest_train_candidate": "NoAvailable",
+        "similarity": 0.8
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_source_xiaoyi_v1_oos_02085",
+        "validation_candidate": "NoAvailable",
+        "nearest_train_id": "top1_train_v1_intent_change_stock_advice_to_no_available_006",
+        "nearest_train_candidate": "NoAvailable",
+        "similarity": 0.8
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_custom_project_vs_household_product_02_01_retail",
+        "validation_candidate": "ProductEcommerce",
+        "nearest_train_id": "top1_retail_boundary_v1_train_custom_project_vs_household_product_02_01_retail",
+        "nearest_train_candidate": "ProductEcommerce",
+        "similarity": 0.787879
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_custom_project_vs_household_product_02_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_custom_project_vs_household_product_02_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.777778
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_registered_asset_vs_retail_replica_02_01_retail",
+        "validation_candidate": "ProductEcommerce",
+        "nearest_train_id": "top1_retail_boundary_v1_train_registered_asset_vs_retail_replica_05_01_retail",
+        "nearest_train_candidate": "ProductEcommerce",
+        "similarity": 0.777778
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_authored_no_available_single_018",
+        "validation_candidate": "NoAvailable",
+        "nearest_train_id": "top1_train_v1_base_xiaoyi_v1_oos_00542",
+        "nearest_train_candidate": "NoAvailable",
+        "similarity": 0.758621
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_intent_change_stock_query_to_stock_other_02",
+        "validation_candidate": "StockOther",
+        "nearest_train_id": "top1_train_v1_base_xiaoyi_v1_oos_00171",
+        "nearest_train_candidate": "StockOther",
+        "similarity": 0.75
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_custom_project_vs_household_product_01_01_retail",
+        "validation_candidate": "ProductEcommerce",
+        "nearest_train_id": "top1_retail_boundary_v1_train_custom_project_vs_household_product_02_01_retail",
+        "nearest_train_candidate": "ProductEcommerce",
+        "similarity": 0.75
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_registered_asset_vs_retail_replica_02_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_registered_asset_vs_retail_replica_05_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.75
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_short_queries_v1_validation_003_general",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_short_queries_v1_train_014_general",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.75
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_authored_no_available_single_004",
+        "validation_candidate": "NoAvailable",
+        "nearest_train_id": "top1_train_v1_intent_change_general_product_to_no_available_005",
+        "nearest_train_candidate": "NoAvailable",
+        "similarity": 0.733333
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_source_xiaoyi_v1_oos_02344",
+        "validation_candidate": "StockOther",
+        "nearest_train_id": "top1_train_v1_base_xiaoyi_v1_oos_00180",
+        "nearest_train_candidate": "StockOther",
+        "similarity": 0.722222
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_custom_project_vs_household_product_01_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_custom_project_vs_household_product_02_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.722222
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_rights_license_vs_retail_copy_01_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_rights_license_vs_retail_copy_02_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.722222
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_service_vs_retail_tool_01_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_service_vs_retail_tool_05_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.722222
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_retail_boundary_v1_validation_service_vs_retail_tool_02_01_unsupported",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_retail_boundary_v1_train_service_vs_retail_tool_05_01_unsupported",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.722222
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_short_queries_v1_validation_001_general",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_short_queries_v1_train_002_retail",
+        "nearest_train_candidate": "ProductEcommerce",
+        "similarity": 0.714286
+      },
+      {
+        "validation_id": "top1_validation_unified_v1_specialty_top1_short_queries_v1_validation_002_general",
+        "validation_candidate": "ProductGeneral",
+        "nearest_train_id": "top1_short_queries_v1_train_010_general",
+        "nearest_train_candidate": "ProductGeneral",
+        "similarity": 0.714286
+      }
+    ],
+    "policy": "diagnostic_only_no_automatic_filtering_or_labeling"
+  },
+  "inputs": [
+    {
+      "name": "promptgen_xiaoyi",
+      "path": "../PromptGen/data/xiaoyi_intent_v1.jsonl",
+      "rows": 5000,
+      "sha256": "8b46dccc67bdbdbc9dd4e3ab975560290852e4f397c34b6914a9d82bd2540584"
+    },
+    {
+      "name": "retail_boundary_validation",
+      "path": "data_top1/top1_retail_boundary_v1_validation.jsonl",
+      "rows": 64,
+      "sha256": "9a89626e40974deb56f8119868f3044e3fd3ab071d3af254082dcaa0696adf77"
+    },
+    {
+      "name": "short_query_validation",
+      "path": "data_top1/top1_short_queries_v1_validation.jsonl",
+      "rows": 16,
+      "sha256": "6dc1da5f063947f81f66d89c3bff0360ea1fb4927672808d58058ab1d84a861a"
+    },
+    {
+      "name": "stock_prediction_validation",
+      "path": "data_top1/top1_stock_prediction_v1_validation.jsonl",
+      "rows": 16,
+      "sha256": "fef51b2d2e6bfaab05365fe1cba1e1e1d685c3f91446b58a9914e80a2e2e447c"
+    },
+    {
+      "name": "combined_training",
+      "path": "data_top1/top1_train_combined_v1.jsonl",
+      "rows": 2088,
+      "sha256": "bd2dcf1e854a802fc06c0485753fc95978c22547b446d687e19a32da5d3a9164"
+    },
+    {
+      "name": "candidate_registry",
+      "path": "configs/top1_candidates.json",
+      "rows": 0,
+      "sha256": "4c6f0c799d550f9a9cf97362b2bac39a459786ae67de88a2c891ae6bf55e1bef"
+    },
+    {
+      "name": "current_labeldesc_taxonomy",
+      "path": "data_top1/top1_labeldesc_paper_v1.jsonl",
+      "rows": 42,
+      "sha256": "cc6a1042f1d5a3b37ed887a50979210668ab7204ebc4cfe0264ffaaee01e6e9f"
+    }
+  ],
+  "output": {
+    "path": "data_top1/top1_validation_unified_v1.jsonl",
+    "sha256": "7c6779dc0dbaae93d6039b7d643738308aa54483722bd5eba46e255609fcaa22"
+  }
+}

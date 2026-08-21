@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "dataset_version": "top1_stock_prediction_v1",
+  "construction": "reviewed_stock_temporal_minimal_contrasts",
+  "policy": "future price direction, level, rebound, or breakout requires a forecast and is StockAdvice; already observed price or return is a factual StockQuery",
+  "train": {
+    "rows": 48,
+    "pairs": 24,
+    "candidate_counts": {
+      "StockAdvice": 24,
+      "StockQuery": 24
+    },
+    "forecast_type_counts": {
+      "continuation": 8,
+      "direction": 22,
+      "new_high": 4,
+      "pullback": 6,
+      "rebound": 6,
+      "target_price": 2
+    },
+    "future_horizon_counts": {
+      "next_month": 4,
+      "next_week": 12,
+      "tomorrow": 7,
+      "year_end": 1
+    },
+    "families": 24,
+    "max_query_characters": 13,
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_stock_prediction_v1.jsonl",
+    "sha256": "1fecd689384b30b4e5e253f71c27fed0b7a4c085538906ff60f2e3e65d482968"
+  },
+  "validation": {
+    "rows": 16,
+    "pairs": 8,
+    "candidate_counts": {
+      "StockAdvice": 8,
+      "StockQuery": 8
+    },
+    "forecast_type_counts": {
+      "continuation": 2,
+      "direction": 8,
+      "new_high": 2,
+      "rebound": 4
+    },
+    "future_horizon_counts": {
+      "next_month": 2,
+      "next_week": 4,
+      "tomorrow": 2
+    },
+    "families": 8,
+    "max_query_characters": 13,
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_stock_prediction_v1_validation.jsonl",
+    "sha256": "fef51b2d2e6bfaab05365fe1cba1e1e1d685c3f91446b58a9914e80a2e2e447c",
+    "family_overlap_with_train": 0
+  }
+}

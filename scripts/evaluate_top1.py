@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import math
+import os
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -52,6 +53,7 @@ from llmgen.top1 import (
 
 
 DECODING_MODES = ("greedy", "beam_search")
+DEVICE_MAP_MODES = ("auto", "balanced", "balanced_low_0", "sequential")
 
 
 def _parse_route_threshold(value: str) -> float:
@@ -88,6 +90,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-rows", type=int)
     parser.add_argument("--precision", choices=("auto", "bf16", "fp16", "fp32"), default="auto")
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--device-map",
+        choices=DEVICE_MAP_MODES,
+        help=(
+            "Shard model layers across available devices with Transformers/Accelerate. "
+            "Omit to retain single-device evaluation."
+        ),
+    )
+    parser.add_argument(
+        "--max-memory",
+        action="append",
+        default=[],
+        metavar="DEVICE=LIMIT[,DEVICE=LIMIT...]",
+        help=(
+            "Optional per-device memory limits used with --device-map, for example "
+            "0=22GiB,1=22GiB,cpu=64GiB. May be repeated."
+        ),
+    )
     parser.add_argument("--history-ablation", action="store_true")
     parser.add_argument(
         "--trust-remote-code",
@@ -95,6 +115,57 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
     )
     return parser.parse_args(argv)
+
+
+def _parse_max_memory(values: Sequence[str]) -> dict[int | str, str]:
+    """Parse Accelerate max-memory entries without depending on Accelerate."""
+
+    parsed: dict[int | str, str] = {}
+    for option in values:
+        for raw_entry in option.split(","):
+            entry = raw_entry.strip()
+            device_text, separator, limit_text = entry.partition("=")
+            device_text = device_text.strip()
+            limit_text = limit_text.strip()
+            if not separator or not device_text or not limit_text:
+                raise Top1DataError(
+                    "max_memory entries must use DEVICE=LIMIT, for example 0=22GiB"
+                )
+            if device_text.isdecimal():
+                device: int | str = int(device_text)
+            elif device_text == "cpu":
+                device = device_text
+            else:
+                raise Top1DataError(
+                    "max_memory device must be a non-negative GPU index or 'cpu'"
+                )
+            if device in parsed:
+                raise Top1DataError(f"duplicate max_memory device: {device_text}")
+            parsed[device] = limit_text
+    return parsed
+
+
+def _json_max_memory(max_memory: Mapping[int | str, str]) -> dict[str, str] | None:
+    """Normalize max-memory keys for durable JSON metadata."""
+
+    if not max_memory:
+        return None
+    return {str(device): limit for device, limit in max_memory.items()}
+
+
+def _validate_single_process() -> None:
+    """Reject torchrun-style replication; model sharding uses one writer process."""
+
+    raw_world_size = os.environ.get("WORLD_SIZE", "1")
+    try:
+        world_size = int(raw_world_size)
+    except ValueError as exc:
+        raise Top1DataError("WORLD_SIZE must be an integer") from exc
+    if world_size != 1:
+        raise Top1DataError(
+            "evaluation requires one process; expose multiple GPUs with "
+            "CUDA_VISIBLE_DEVICES and use --device-map instead of torchrun"
+        )
 
 
 def _safe_component(value: str, *, label: str) -> str:
@@ -310,11 +381,20 @@ def _load_model(
     dtype: Any,
     trust_remote_code: bool,
     router_contract: Mapping[str, Any],
+    device_map: str | None,
+    max_memory: Mapping[int | str, str],
 ) -> Any:
     model_kwargs = {
         "trust_remote_code": trust_remote_code,
         "torch_dtype": dtype,
     }
+    if device_map is not None:
+        model_kwargs.update(
+            device_map=device_map,
+            low_cpu_mem_usage=True,
+        )
+        if max_memory:
+            model_kwargs["max_memory"] = dict(max_memory)
     if (model_dir / "adapter_config.json").is_file():
         try:
             from peft import PeftModel
@@ -328,10 +408,18 @@ def _load_model(
             dependency["reference"],
             **base_kwargs,
         )
+        adapter_kwargs: dict[str, Any] = {
+            "is_trainable": False,
+            "low_cpu_mem_usage": device_map is not None,
+        }
+        if device_map is not None:
+            adapter_kwargs["device_map"] = device_map
+            if max_memory:
+                adapter_kwargs["max_memory"] = dict(max_memory)
         return PeftModel.from_pretrained(
             base_model,
             str(model_dir),
-            is_trainable=False,
+            **adapter_kwargs,
         )
     parameters = inspect.signature(
         transformers.AutoModelForCausalLM.from_pretrained
@@ -345,6 +433,50 @@ def _load_model(
         str(model_dir),
         **model_kwargs,
     )
+
+
+def _dispatched_input_device(model: Any, torch: Any) -> Any:
+    """Return the device hosting input embeddings for a dispatched model."""
+
+    get_embeddings = getattr(model, "get_input_embeddings", None)
+    embeddings = get_embeddings() if callable(get_embeddings) else None
+    weight = getattr(embeddings, "weight", None)
+    raw_device = getattr(weight, "device", None)
+    if raw_device is None:
+        raise Top1DataError(
+            "device-mapped model does not expose its input embedding device"
+        )
+    device = torch.device(raw_device)
+    if device.type == "meta":
+        raise Top1DataError(
+            "input embeddings were offloaded to a meta device; increase GPU/CPU "
+            "max_memory so embeddings remain resident"
+        )
+    return device
+
+
+def _resolved_device_map(model: Any) -> dict[str, str] | None:
+    """Find and JSON-normalize Accelerate's resolved module placement."""
+
+    pending = [model]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop(0)
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+        mapping = getattr(current, "hf_device_map", None)
+        if isinstance(mapping, Mapping):
+            normalized = {}
+            for module, device in mapping.items():
+                value = f"cuda:{device}" if isinstance(device, int) else str(device)
+                normalized[str(module)] = value
+            return dict(sorted(normalized.items()))
+        pending.extend(
+            getattr(current, attribute, None)
+            for attribute in ("base_model", "model")
+        )
+    return None
 
 
 def _verify_base_model_dependency(
@@ -612,12 +744,18 @@ def _generate_prepared(
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    _validate_single_process()
+    max_memory = _parse_max_memory(args.max_memory)
     if (args.max_length is not None and args.max_length <= 0) or args.batch_size <= 0:
         raise Top1DataError("max_length and batch_size must be positive")
     if args.max_rows is not None and args.max_rows <= 0:
         raise Top1DataError("max_rows must be positive when specified")
     if args.decoding_mode == "beam_search" and args.num_beams < 2:
         raise Top1DataError("beam_search requires num_beams >= 2")
+    if max_memory and args.device_map is None:
+        raise Top1DataError("max_memory requires --device-map")
+    if args.device_map is not None and args.device != "auto":
+        raise Top1DataError("--device cannot be combined with --device-map")
     model_dir = Path(args.model_dir).expanduser().resolve()
     data_path = Path(args.data).expanduser().resolve()
     if not data_path.is_file():
@@ -727,6 +865,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "batch_size": args.batch_size,
             "precision": args.precision,
             "device": args.device,
+            "device_map": args.device_map,
+            "max_memory": _json_max_memory(max_memory),
             "trust_remote_code": args.trust_remote_code,
         },
         "code": {
@@ -770,7 +910,29 @@ def main(argv: Sequence[str] | None = None) -> None:
             dtype=dtype,
             trust_remote_code=args.trust_remote_code,
             router_contract=router_contract,
-        ).to(device)
+            device_map=args.device_map,
+            max_memory=max_memory,
+        )
+        if args.device_map is None:
+            model = model.to(device)
+            input_device = device
+            resolved_device_map = None
+        else:
+            input_device = _dispatched_input_device(model, torch)
+            resolved_device_map = _resolved_device_map(model)
+            if resolved_device_map is None:
+                raise Top1DataError(
+                    "model loading did not expose an Accelerate device map"
+                )
+        model_placement = {
+            "requested_device": args.device,
+            "requested_device_map": args.device_map,
+            "max_memory": _json_max_memory(max_memory),
+            "input_device": str(input_device),
+            "resolved_device_map": resolved_device_map,
+        }
+        write_json(run_dir / "logs" / "model_placement.json", model_placement)
+        store.event("model_loaded", placement=model_placement)
         model.eval()
         rows = read_jsonl(data_path)
         if args.max_rows is not None:
@@ -806,7 +968,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     trie=trie,
                     torch=torch,
                     transformers=transformers,
-                    device=device,
+                    device=input_device,
                     decoding_mode=args.decoding_mode,
                     num_beams=args.num_beams,
                     route_threshold=args.route_threshold,
@@ -820,7 +982,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         trie=trie,
                         torch=torch,
                         transformers=transformers,
-                        device=device,
+                        device=input_device,
                         decoding_mode=args.decoding_mode,
                         num_beams=args.num_beams,
                         route_threshold=args.route_threshold,
@@ -896,6 +1058,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             "routing_policy": metrics["routing_policy"],
             "available_oos": backend_metrics["available_oos"],
             "resolved_precision": resolved_precision,
+            "model_placement": model_placement,
             "completed_at": utc_now(),
         }
         write_json(run_dir / "summary.json", summary)
