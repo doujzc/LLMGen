@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import io
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -20,7 +22,8 @@ import service_910b
 
 def _write_router_bundle(directory: Path) -> None:
     (directory / "config.json").write_text(
-        json.dumps({"architectures": ["Qwen3ForCausalLM"]}) + "\n",
+        json.dumps({"architectures": ["Qwen3_5ForConditionalGeneration"]})
+        + "\n",
         encoding="utf-8",
     )
     (directory / "model.safetensors").write_bytes(b"fake-full-weights")
@@ -89,7 +92,6 @@ def _service_environment(directory: Path) -> dict[str, str]:
         "MAX_CODE_PATHS": "2",
         "SERVED_MODEL_NAME": "router-910b-test",
         "GENERATION_DTYPE": "float16",
-        "VLLM_TENSOR_PARALLEL_SIZE": "1",
         "VLLM_MAX_MODEL_LEN": "64",
         "VLLM_MAX_NUM_SEQS": "3",
         "VLLM_TRUST_REMOTE_CODE": "0",
@@ -366,9 +368,434 @@ class SelfContainedService910BTest(unittest.TestCase):
             json.loads(completed.stdout.strip()),
             ["天气查询", "空气质量"],
         )
+        self.assertIn(service_910b._LOG_MARKER, completed.stderr)
+        self.assertIn("event=service.load_complete", completed.stderr)
+        self.assertIn("event=service.calc_complete", completed.stderr)
+
+    def test_debug_logs_have_marker_trace_id_and_hidden_text(self) -> None:
+        sensitive_query = "SENSITIVE-QUERY-SHOULD-STAY-HIDDEN"
+        sensitive_result = "SENSITIVE-SKILL-SHOULD-STAY-HIDDEN"
+        environment = {
+            "MOCK_MODE": "1",
+            "MOCK_RESPONSES_JSON": json.dumps(
+                {sensitive_query: [sensitive_result]}
+            ),
+            "SERVICE_910B_LOG_LEVEL": "DEBUG",
+            "TOP_K": "1",
+        }
+        runtime = service_910b.RetriverTest()
+
+        with patch.dict(os.environ, environment, clear=True), self.assertLogs(
+            service_910b.logger, level="DEBUG"
+        ) as captured:
+            runtime.load()
+            result = runtime.calc(
+                {"data": {"query": sensitive_query, "top_k": 1}}
+            )
+            runtime.close()
+
+        self.assertEqual(json.loads(result), [sensitive_result])
+        messages = [record.getMessage() for record in captured.records]
+        self.assertTrue(messages)
+        self.assertTrue(
+            all(message.startswith(service_910b._LOG_MARKER) for message in messages)
+        )
+        combined = "\n".join(messages)
+        self.assertNotIn(sensitive_query, combined)
+        self.assertNotIn(sensitive_result, combined)
+        for event in (
+            "event=service.load_begin",
+            "event=service.calc_begin",
+            "event=search.begin",
+            "event=service.calc_complete",
+            "event=service.close_complete",
+        ):
+            self.assertIn(event, combined)
+        calc_begin = next(
+            message
+            for message in messages
+            if "event=service.calc_begin" in message
+        )
+        request_id = next(
+            field.partition("=")[2]
+            for field in calc_begin.split()
+            if field.startswith("request_id=")
+        )
+        self.assertGreaterEqual(
+            sum(f"request_id={request_id}" in message for message in messages),
+            4,
+        )
+
+    def test_debug_metadata_accepts_non_string_request_keys(self) -> None:
+        environment = {
+            "MOCK_MODE": "1",
+            "MOCK_RESPONSES_JSON": json.dumps({"hello": ["Skill A"]}),
+            "SERVICE_910B_LOG_LEVEL": "INFO",
+            "TOP_K": "1",
+        }
+        runtime = service_910b.RetriverTest()
+
+        with patch.dict(os.environ, environment, clear=True):
+            try:
+                self.assertEqual(
+                    json.loads(
+                        runtime.calc(
+                            {"data": {"query": "hello", 1: "ignored"}}
+                        )
+                    ),
+                    ["Skill A"],
+                )
+            finally:
+                runtime.close()
+
+    def test_marker_covers_traceback_lines_and_preserves_structured_exception(
+        self,
+    ) -> None:
+        stream = io.StringIO()
+
+        class CapturingHandler(logging.StreamHandler):
+            def __init__(self) -> None:
+                super().__init__(stream)
+                self.records: list[logging.LogRecord] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                self.records.append(record)
+                super().emit(record)
+
+        handler = CapturingHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        original_level = service_910b.logger.level
+        original_handlers = list(service_910b.logger.handlers)
+        original_propagate = service_910b.logger.propagate
+        try:
+            service_910b.logger.handlers = [handler]
+            service_910b.logger.setLevel(logging.ERROR)
+            service_910b.logger.propagate = False
+            with patch.dict(
+                os.environ,
+                {"SERVICE_910B_LOG_TRACEBACKS": "1"},
+                clear=True,
+            ):
+                try:
+                    raise RuntimeError("fake marked traceback")
+                except RuntimeError:
+                    service_910b.logger.exception("event=test.traceback")
+        finally:
+            service_910b.logger.handlers = original_handlers
+            service_910b.logger.setLevel(original_level)
+            service_910b.logger.propagate = original_propagate
+
+        lines = [line for line in stream.getvalue().splitlines() if line]
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(
+            all(line.startswith(service_910b._LOG_MARKER) for line in lines)
+        )
+        self.assertEqual(len(handler.records), 1)
+        self.assertIsNotNone(handler.records[0].exc_info)
+
+    def test_log_sanitizer_handles_cycles_nested_secrets_and_newlines(self) -> None:
+        cycle: dict[str, object] = {}
+        cycle["self"] = cycle
+        payload = {
+            "api_key": "TOP-SECRET-API-KEY",
+            "query": "PRIVATE QUERY",
+            "nested": [
+                {
+                    "client_secret_value": "TOP-SECRET-CLIENT-VALUE",
+                    "note": "first line\nFORGED LOG LINE",
+                }
+            ],
+            "cycle": cycle,
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            sanitized = service_910b._safe_log_value("payload", payload)
+        rendered = repr(sanitized)
+
+        self.assertNotIn("TOP-SECRET", rendered)
+        self.assertNotIn("PRIVATE QUERY", rendered)
+        self.assertNotIn("\nFORGED LOG LINE", rendered)
+        self.assertIn("<redacted>", rendered)
+        self.assertIn("<cycle type=", rendered)
+
+    def test_traceback_is_private_by_default(self) -> None:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        original_level = service_910b.logger.level
+        original_handlers = list(service_910b.logger.handlers)
+        original_propagate = service_910b.logger.propagate
+        try:
+            service_910b.logger.handlers = [handler]
+            service_910b.logger.setLevel(logging.ERROR)
+            service_910b.logger.propagate = False
+            with patch.dict(os.environ, {}, clear=True):
+                try:
+                    raise RuntimeError("SENSITIVE-QUERY-IN-TRACEBACK")
+                except RuntimeError:
+                    service_910b.logger.exception("event=test.private_traceback")
+        finally:
+            service_910b.logger.handlers = original_handlers
+            service_910b.logger.setLevel(original_level)
+            service_910b.logger.propagate = original_propagate
+
+        output = stream.getvalue()
+        self.assertIn(service_910b._LOG_MARKER, output)
+        self.assertIn("event=test.private_traceback", output)
+        self.assertNotIn("SENSITIVE-QUERY-IN-TRACEBACK", output)
+        self.assertNotIn("Traceback", output)
+
+    def test_token_ids_are_hidden_without_explicit_opt_in(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                service_910b._token_ids_log_value([40, 41]),
+                "<hidden count=2>",
+            )
+        with patch.dict(
+            os.environ, {"SERVICE_910B_LOG_TOKEN_IDS": "1"}, clear=True
+        ):
+            self.assertEqual(
+                service_910b._token_ids_log_value([40, 41]), [40, 41]
+            )
+
+    def test_directory_debug_sample_is_best_effort(self) -> None:
+        class EnumerationDenied:
+            @staticmethod
+            def iterdir() -> object:
+                raise PermissionError("directory enumeration denied")
+
+        sample = service_910b._directory_entries_log_value(EnumerationDenied())
+        self.assertIn("diagnostic-error PermissionError", str(sample))
+
+    def test_context_limit_diagnostics_ignore_explosive_engine_properties(self) -> None:
+        class ExplosiveEngine:
+            @property
+            def llm_engine(self) -> object:
+                raise RuntimeError("diagnostic llm_engine property was read")
+
+            @property
+            def engine(self) -> object:
+                raise RuntimeError("diagnostic engine property was read")
+
+        runtime = SimpleNamespace(
+            engine=ExplosiveEngine(),
+            engine_kwargs={},
+            runtime_id="diagnostic-context-test",
+        )
+        self.assertIsNone(service_910b._custom_engine_max_model_len(runtime))
+
+    def test_marker_filter_does_not_mutate_shared_parent_logger(self) -> None:
+        parent = logging.getLogger("web_demo")
+        original_child_level = service_910b.logger.level
+        self.addCleanup(service_910b.logger.setLevel, original_child_level)
+        parent_state = (
+            parent.level,
+            list(parent.handlers),
+            list(parent.filters),
+            parent.propagate,
+            parent.disabled,
+        )
+        with patch.dict(
+            os.environ, {"SERVICE_910B_LOG_LEVEL": "DEBUG"}, clear=True
+        ):
+            service_910b._configure_service_logging()
+        parent_record = logging.LogRecord(
+            name=parent.name,
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="event=parent.unrelated",
+            args=(),
+            exc_info=None,
+        )
+        child_record = logging.LogRecord(
+            name=service_910b.logger.name,
+            level=logging.INFO,
+            pathname=__file__,
+            lineno=1,
+            msg="event=child.service",
+            args=(),
+            exc_info=None,
+        )
+
+        for log_filter in service_910b.logger.filters:
+            log_filter.filter(child_record)
+
+        self.assertEqual(parent_record.getMessage(), "event=parent.unrelated")
+        self.assertTrue(
+            child_record.getMessage().startswith(service_910b._LOG_MARKER)
+        )
+        self.assertEqual(
+            (
+                parent.level,
+                list(parent.handlers),
+                list(parent.filters),
+                parent.propagate,
+                parent.disabled,
+            ),
+            parent_state,
+        )
 
 
 class CustomVllm910BServiceTest(unittest.TestCase):
+    def test_dense_qwen35_2b_defaults_use_one_npu(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+
+            with patch.dict(os.environ, {}, clear=True):
+                service_defaults = service_910b._vllm_engine_arg_defaults(
+                    model_path=directory
+                )
+                (directory / "config.json").write_text(
+                    json.dumps({}), encoding="utf-8"
+                )
+                fallback_defaults = service_910b._vllm_engine_arg_defaults(
+                    model_path=directory
+                )
+                direct_loader_defaults = (
+                    service_910b._build_custom_engine_kwargs(
+                        model_path=str(directory),
+                        tokenizer_path=str(directory),
+                        dtype="bfloat16",
+                        trust_remote_code=True,
+                        engine_role=object(),
+                        options={},
+                    )
+                )
+
+        for engine_kwargs in (
+            service_defaults,
+            fallback_defaults,
+            direct_loader_defaults,
+        ):
+            self.assertEqual(
+                engine_kwargs["architectures"],
+                "Qwen3_5ForConditionalGeneration_OnlyLLM",
+            )
+            for key in (
+                "pipeline_parallel_size",
+                "tensor_parallel_size",
+                "data_parallel_size",
+                "context_parallel_size",
+                "decode_pipeline_parallel_size",
+                "decode_tensor_parallel_size",
+                "decode_data_parallel_size",
+                "decode_context_parallel_size",
+            ):
+                self.assertEqual(engine_kwargs[key], 1, key)
+            self.assertFalse(engine_kwargs["enable_expert_parallel"])
+            self.assertFalse(engine_kwargs["decode_enable_expert_parallel"])
+
+    def test_dense_profile_preserves_explicit_architecture_and_tp_override(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            (directory / "config.json").write_text(
+                json.dumps({"architectures": ["DenseOverrideArchitecture"]}),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"VLLM_TENSOR_PARALLEL_SIZE": "2"},
+                clear=True,
+            ):
+                defaults = service_910b._vllm_engine_arg_defaults(
+                    model_path=directory
+                )
+
+        self.assertEqual(
+            defaults["architectures"], "DenseOverrideArchitecture"
+        )
+        self.assertEqual(defaults["tensor_parallel_size"], 2)
+        self.assertEqual(defaults["decode_tensor_parallel_size"], 2)
+
+    def test_info_logging_does_not_read_diagnostic_tokenizer_properties(
+        self,
+    ) -> None:
+        state = _FakeDependencyState()
+        fake_modules = _fake_dependency_modules(state)
+
+        class DiagnosticExplodesTokenizer:
+            @property
+            def vocab_size(self) -> int:
+                raise RuntimeError("diagnostic vocab_size property was read")
+
+            @property
+            def chat_template(self) -> str:
+                raise RuntimeError("diagnostic chat_template property was read")
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            environment = {
+                "SERVICE_910B_LOG_LEVEL": "INFO",
+                "VLLM_HEALTH_CHECK_TIMEOUT": "1",
+            }
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, fake_modules),
+                patch.object(
+                    service_910b,
+                    "_load_chat_template_tokenizer",
+                    return_value=DiagnosticExplodesTokenizer(),
+                ),
+            ):
+                runtime = service_910b.load_vllm_model(
+                    model_path=raw_directory,
+                    tokenizer_path=raw_directory,
+                    vllm_kwargs={"health_check_timeout": 1},
+                )
+                runtime.close()
+
+        self.assertEqual(
+            state.events,
+            [
+                "load_model",
+                "start_background_loop",
+                "is_health",
+                "shutdown_background_loop",
+                "llm_engine.shutdown",
+            ],
+        )
+
+    def test_info_logging_does_not_inspect_nonfinal_generation_frames(self) -> None:
+        class DiagnosticFrame:
+            @property
+            def outputs(self) -> object:
+                raise RuntimeError("diagnostic outputs property was read")
+
+        final_frame = SimpleNamespace(outputs=[SimpleNamespace(token_ids=[1, 0])])
+
+        class FakeEngine:
+            @staticmethod
+            def generate(**kwargs: object) -> object:
+                del kwargs
+
+                async def frames() -> object:
+                    yield DiagnosticFrame()
+                    yield final_frame
+
+                return frames()
+
+        original_level = service_910b.logger.level
+        try:
+            service_910b.logger.setLevel(logging.INFO)
+            result = asyncio.run(
+                service_910b._generate_on_910b_loop(
+                    engine=FakeEngine(),
+                    prompt="prompt",
+                    prompt_token_ids=[40, 41],
+                    sampling_params=object(),
+                    request_id="diagnostic-frame-test",
+                )
+            )
+        finally:
+            service_910b.logger.setLevel(original_level)
+
+        self.assertIs(result, final_frame)
+
     def test_json_options_cannot_replace_owned_model_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)
@@ -411,6 +838,7 @@ class CustomVllm910BServiceTest(unittest.TestCase):
             with (
                 patch.dict(os.environ, environment, clear=True),
                 patch.dict(sys.modules, fake_modules),
+                self.assertLogs(service_910b.logger, level="DEBUG") as debug_logs,
             ):
                 runtime.load()
                 runtime.load()
@@ -456,7 +884,8 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                         engine_kwargs["model_vision"], "facebook/opt-125m"
                     )
                     self.assertEqual(
-                        engine_kwargs["architectures"], "Qwen3ForCausalLM"
+                        engine_kwargs["architectures"],
+                        "Qwen3_5ForConditionalGeneration_OnlyLLM",
                     )
                     self.assertEqual(engine_kwargs["dtype"], "float16")
                     self.assertIs(
@@ -465,6 +894,19 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                     self.assertEqual(engine_kwargs["tensor_parallel_size"], 1)
                     self.assertEqual(
                         engine_kwargs["decode_tensor_parallel_size"], 1
+                    )
+                    for key in (
+                        "pipeline_parallel_size",
+                        "data_parallel_size",
+                        "context_parallel_size",
+                        "decode_pipeline_parallel_size",
+                        "decode_data_parallel_size",
+                        "decode_context_parallel_size",
+                    ):
+                        self.assertEqual(engine_kwargs[key], 1, key)
+                    self.assertFalse(engine_kwargs["enable_expert_parallel"])
+                    self.assertFalse(
+                        engine_kwargs["decode_enable_expert_parallel"]
                     )
                     self.assertEqual(engine_kwargs["max_model_len"], 64)
                     self.assertEqual(engine_kwargs["max_num_seqs"], 3)
@@ -559,6 +1001,41 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                 finally:
                     runtime.close()
                     runtime.close()
+
+            debug_messages = [
+                record.getMessage() for record in debug_logs.records
+            ]
+            self.assertTrue(
+                all(
+                    message.startswith(service_910b._LOG_MARKER)
+                    for message in debug_messages
+                )
+            )
+            debug_output = "\n".join(debug_messages)
+            for event in (
+                "event=runtime.dependencies_loaded",
+                "event=engine.load_model_begin",
+                "event=engine.health_poll_complete",
+                "event=engine.generate_frame",
+                "event=search.paths_decoded",
+                "event=runtime.close_complete",
+            ):
+                self.assertIn(event, debug_output)
+            self.assertIn("token_ids=<hidden count=2>", debug_output)
+            self.assertNotIn("[40, 41]", debug_output)
+            calc_begin = next(
+                message
+                for message in debug_messages
+                if "event=service.calc_begin" in message
+            )
+            logged_request_id = next(
+                field.partition("=")[2]
+                for field in calc_begin.split()
+                if field.startswith("request_id=")
+            )
+            self.assertEqual(
+                str(generate_call["request_id"]), logged_request_id
+            )
 
         self.assertIsNotNone(owned_runtime)
         self.assertTrue(owned_runtime._closed)

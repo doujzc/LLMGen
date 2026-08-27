@@ -14,14 +14,29 @@ Hugging Face model/tokenizer files, ``skill_decode_map.json``,
 generation mirror ``skillhub`` develop commit ``486ef18``: the reference 910B
 flow uses the custom in-process ``AsyncLLMEngine``, explicitly loads the
 model, starts its background loop, waits for engine health, and submits the
-full custom asynchronous ``generate`` request.  Candidate decoding remains
-the LLMGen token-ID Trie algorithm so this service has the same input/output
-semantics as ``service.py``.
+full custom asynchronous ``generate`` request.  Its model-specific defaults
+are adapted for dense Qwen3.5-2B on one NPU while preserving that lifecycle
+and request protocol.  Candidate decoding remains the LLMGen token-ID Trie
+algorithm so this service has the same input/output semantics as
+``service.py``.
 
 For local contract tests, set ``MOCK_MODE=1``.  This skips model and candidate
 artifact loading.  ``MOCK_RESPONSES_JSON`` may be either one result list used
 for every query or an object mapping exact queries (plus optional ``"*"``
 fallback) to result lists.
+
+For development diagnostics, set ``SERVICE_910B_LOG_LEVEL=DEBUG``.  Debug
+events include request/load correlation IDs, stage timings, engine settings,
+token counts, constrained-decoding state, async-loop lifecycle, and cleanup
+results.  Structured query and prompt fields stay hidden unless
+``SERVICE_910B_LOG_TEXT=1``; previews are bounded by
+``SERVICE_910B_LOG_PREVIEW_CHARS``.  Per-token Trie traces can be toggled with
+``SERVICE_910B_TRACE_TRIE=1``.  Prompt token IDs and marked traceback lines
+require ``SERVICE_910B_LOG_TOKEN_IDS=1`` and
+``SERVICE_910B_LOG_TRACEBACKS=1`` respectively.  Tracebacks are intended for
+development because third-party exception messages can contain request text.
+The script preserves the host's logging pipeline; use a non-blocking handler
+for verbose tracing because handler latency counts toward request/startup time.
 """
 
 from __future__ import annotations
@@ -41,12 +56,55 @@ from typing import Any, Dict, Iterable, Mapping, Sequence
 import uuid
 
 
-logger = logging.getLogger("web_demo")
+_LOG_MARKER = "[[LLMGEN-910B]]"
 
-_VLLM_TENSOR_PARALLEL_SIZE = 2
+
+class _ServiceLogMarker(logging.Filter):
+    """Prefix every record so service logs remain grepable in shared output."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = str(record.msg)
+        if not message.startswith(_LOG_MARKER):
+            record.msg = f"{_LOG_MARKER} {message}"
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                _safe_log_value(f"arg_{index}", value)
+                for index, value in enumerate(record.args)
+            )
+        elif isinstance(record.args, Mapping):
+            record.args = {
+                _safe_log_string(key): _safe_log_value(key, value)
+                for key, value in record.args.items()
+            }
+        if record.exc_info:
+            if _log_flag("SERVICE_910B_LOG_TRACEBACKS", False):
+                traceback_text = logging.Formatter().formatException(record.exc_info)
+                record.exc_text = "\n".join(
+                    f"{_LOG_MARKER} {line}"
+                    for line in traceback_text.splitlines()
+                )
+            else:
+                record.exc_text = None
+                # Tracebacks are opt-in because third-party exception messages
+                # may contain request text.  When disabled, prevent a downstream
+                # formatter from regenerating one.  When enabled, retain
+                # exc_info for structured JSON/Sentry-style handlers; standard
+                # text formatters reuse the marked exc_text above.
+                record.exc_info = None
+        return True
+
+
+logger = logging.getLogger("web_demo.service_910b")
+if not any(isinstance(item, _ServiceLogMarker) for item in logger.filters):
+    logger.addFilter(_ServiceLogMarker())
+
+_VLLM_TENSOR_PARALLEL_SIZE = 1
 _VLLM_DTYPE = "bfloat16"
 _VLLM_HEALTH_CHECK_INTERVAL = 1.0
-_VLLM_910B_ARCHITECTURE = "Qwen3_5MoeForConditionalGeneration_OnlyLLM"
+_VLLM_910B_ARCHITECTURE = "Qwen3_5ForConditionalGeneration_OnlyLLM"
+_QWEN35_DENSE_BUNDLE_ARCHITECTURES = frozenset(
+    {"Qwen3_5ForConditionalGeneration"}
+)
 _DEFAULT_QUERY = "查天气"
 _DEFAULT_SYSTEM_PROMPT = (
     "Select every Agent Skill needed for the user request in execution order. "
@@ -58,6 +116,17 @@ _VIRTUAL_TOKENS_FILENAME = "virtual_tokens.txt"
 _ROUTER_MANIFEST_FILENAME = "router_manifest.json"
 _DECODE_MAP_SCHEMA_VERSION = 1
 _DEFAULT_MOCK_RESPONSES = ("Mock Weather Skill", "Mock Map Skill")
+_DEFAULT_LOG_PREVIEW_CHARS = 320
+_DEFAULT_LOG_SEQUENCE_ITEMS = 16
+_SENSITIVE_LOG_KEY_PARTS = (
+    "api_key",
+    "authorization",
+    "cookie",
+    "credential",
+    "password",
+    "secret",
+    "token",
+)
 
 # These defaults are intentionally kept in sync with the SkillHub 910B
 # deployment flow.  Each value can be overridden by VLLM_<NAME> (or <NAME>)
@@ -162,6 +231,312 @@ class ServiceConfigurationError(RuntimeError):
     """Raised when deployment artifacts or environment settings disagree."""
 
 
+def _configure_service_logging() -> None:
+    """Apply the optional service-local log level without touching root logging."""
+
+    raw_level = os.environ.get("SERVICE_910B_LOG_LEVEL", "").strip()
+    if raw_level:
+        if raw_level.isdigit():
+            level: Any = int(raw_level)
+        else:
+            level = getattr(logging, raw_level.upper(), None)
+        if not isinstance(level, int):
+            logger.warning(
+                "event=logging.invalid_level value=%r; inheriting configured level",
+                raw_level,
+            )
+        else:
+            logger.setLevel(level)
+    logger.debug(
+        "event=logging.configured logger=%s effective_level=%s text_enabled=%s "
+        "token_ids_enabled=%s tracebacks_enabled=%s trie_trace_enabled=%s "
+        "preview_chars=%s sequence_items=%s marker=%s",
+        logger.name,
+        logging.getLevelName(logger.getEffectiveLevel()),
+        _log_flag("SERVICE_910B_LOG_TEXT", False),
+        _log_flag("SERVICE_910B_LOG_TOKEN_IDS", False),
+        _log_flag("SERVICE_910B_LOG_TRACEBACKS", False),
+        _log_flag("SERVICE_910B_TRACE_TRIE", False),
+        _log_preview_chars(),
+        _log_sequence_items(),
+        _LOG_MARKER,
+    )
+
+
+def _log_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _log_positive_int(name: str, default: int, *, minimum: int = 1) -> int:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return max(minimum, int(value))
+    except ValueError:
+        logger.warning(
+            "event=logging.invalid_integer name=%s value=%r default=%s",
+            name,
+            value,
+            default,
+        )
+        return default
+
+
+def _log_preview_chars() -> int:
+    return _log_positive_int(
+        "SERVICE_910B_LOG_PREVIEW_CHARS",
+        _DEFAULT_LOG_PREVIEW_CHARS,
+        minimum=32,
+    )
+
+
+def _log_sequence_items() -> int:
+    return _log_positive_int(
+        "SERVICE_910B_LOG_SEQUENCE_ITEMS",
+        _DEFAULT_LOG_SEQUENCE_ITEMS,
+    )
+
+
+def _text_log_value(value: object) -> str:
+    text = str(value)
+    if not _log_flag("SERVICE_910B_LOG_TEXT", False):
+        return f"<hidden chars={len(text)}>"
+    escaped = text.replace("\\", "\\\\").replace("\r", "\\r").replace("\n", "\\n")
+    limit = _log_preview_chars()
+    if len(escaped) <= limit:
+        return escaped
+    return f"{escaped[:limit]}...<truncated chars={len(escaped) - limit}>"
+
+
+def _sequence_log_value(values: Sequence[Any] | Iterable[Any]) -> object:
+    limit = _log_sequence_items()
+    if isinstance(values, Sequence) and not isinstance(
+        values, (str, bytes, bytearray)
+    ):
+        count = len(values)
+        if count <= limit:
+            return list(values)
+        head_count = max(1, limit // 2)
+        tail_count = max(1, limit - head_count)
+        return {
+            "count": count,
+            "head": list(values[:head_count]),
+            "tail": list(values[-tail_count:]),
+        }
+    sequence = list(values)
+    if len(sequence) <= limit:
+        return sequence
+    head_count = max(1, limit // 2)
+    tail_count = max(1, limit - head_count)
+    return {
+        "count": len(sequence),
+        "head": sequence[:head_count],
+        "tail": sequence[-tail_count:],
+    }
+
+
+def _token_ids_log_value(values: Sequence[Any] | Iterable[Any]) -> object:
+    if isinstance(values, Sequence) and not isinstance(
+        values, (str, bytes, bytearray)
+    ):
+        count: int | None = len(values)
+    else:
+        count = None
+    if not _log_flag("SERVICE_910B_LOG_TOKEN_IDS", False):
+        return f"<hidden count={count if count is not None else 'unknown'}>"
+    return _sequence_log_value(values)
+
+
+def _safe_log_string(value: Any) -> str:
+    try:
+        return str(value)
+    except Exception as exc:
+        return f"<unprintable type={_type_name(value)} error={type(exc).__name__}>"
+
+
+def _safe_log_value(name: object, value: Any) -> Any:
+    return _safe_log_value_inner(name, value, depth=0, seen=set())
+
+
+def _safe_log_value_inner(
+    name: object,
+    value: Any,
+    *,
+    depth: int,
+    seen: set[int],
+) -> Any:
+    try:
+        normalized_name = _safe_log_string(name).lower().replace("-", "_")
+        components = {part for part in normalized_name.split("_") if part}
+        sensitive = (
+            bool(components.intersection(_SENSITIVE_LOG_KEY_PARTS))
+            or {"api", "key"} <= components
+            or "authorization" in normalized_name
+            or (
+                not _log_flag("SERVICE_910B_LOG_TEXT", False)
+                and bool(components.intersection({"prompt", "prompts", "query"}))
+            )
+        )
+        if sensitive:
+            return "<redacted>"
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if depth >= 4:
+            return f"<max-depth type={_type_name(value)}>"
+
+        is_container = isinstance(
+            value, (Mapping, list, tuple, set, frozenset)
+        )
+        object_id = id(value)
+        if is_container:
+            if object_id in seen:
+                return f"<cycle type={_type_name(value)}>"
+            seen.add(object_id)
+        try:
+            if isinstance(value, Mapping):
+                result: dict[str, Any] = {}
+                limit = _log_sequence_items_quiet()
+                for index, (key, nested_value) in enumerate(value.items()):
+                    if index >= limit:
+                        result["<truncated>"] = f"remaining={len(value) - limit}"
+                        break
+                    safe_key = _safe_log_string(key)
+                    result[safe_key] = _safe_log_value_inner(
+                        safe_key,
+                        nested_value,
+                        depth=depth + 1,
+                        seen=seen,
+                    )
+                return result
+            if isinstance(value, (list, tuple, set, frozenset)):
+                sequence = list(value)
+                limit = _log_sequence_items_quiet()
+                sampled = sequence[:limit]
+                result = [
+                    _safe_log_value_inner(
+                        name,
+                        item,
+                        depth=depth + 1,
+                        seen=seen,
+                    )
+                    for item in sampled
+                ]
+                if len(sequence) > limit:
+                    result.append(f"<truncated remaining={len(sequence) - limit}>")
+                return result
+            text = _safe_log_string(value)
+            sanitized = (
+                text.replace("\\", "\\\\")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+            )
+            limit = _log_preview_chars_quiet()
+            if len(sanitized) > limit:
+                return f"{sanitized[:limit]}...<truncated>"
+            return sanitized
+        finally:
+            if is_container:
+                seen.discard(object_id)
+    except Exception as exc:
+        return f"<log-sanitize-error error={type(exc).__name__}>"
+
+
+def _log_preview_chars_quiet() -> int:
+    value = os.environ.get("SERVICE_910B_LOG_PREVIEW_CHARS")
+    if value is None or not value.strip():
+        return _DEFAULT_LOG_PREVIEW_CHARS
+    try:
+        return max(32, int(value))
+    except ValueError:
+        return _DEFAULT_LOG_PREVIEW_CHARS
+
+
+def _log_sequence_items_quiet() -> int:
+    """Read the log sampling limit without recursively logging from a filter."""
+
+    value = os.environ.get("SERVICE_910B_LOG_SEQUENCE_ITEMS")
+    if value is None or not value.strip():
+        return _DEFAULT_LOG_SEQUENCE_ITEMS
+    try:
+        return max(1, int(value))
+    except ValueError:
+        return _DEFAULT_LOG_SEQUENCE_ITEMS
+
+
+def _safe_getattr(value: Any, name: str, default: Any = None) -> Any:
+    try:
+        return getattr(value, name, default)
+    except Exception as exc:
+        return f"<attribute-error name={name} error={type(exc).__name__}>"
+
+
+def _directory_entries_log_value(path: Path) -> object:
+    """Return a bounded, best-effort directory sample for DEBUG diagnostics."""
+
+    limit = _log_sequence_items_quiet()
+    entries: list[str] = []
+    try:
+        for index, entry in enumerate(path.iterdir()):
+            if index >= limit:
+                entries.append("<truncated>")
+                break
+            entries.append(entry.name)
+    except OSError as exc:
+        return f"<diagnostic-error {type(exc).__name__}>"
+    return sorted(entries)
+
+
+def _engine_log_summary(options: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostic_keys = (
+        "architectures",
+        "dtype",
+        "load_format",
+        "trust_remote_code",
+        "max_model_len",
+        "pipeline_parallel_size",
+        "tensor_parallel_size",
+        "data_parallel_size",
+        "context_parallel_size",
+        "decode_pipeline_parallel_size",
+        "decode_tensor_parallel_size",
+        "decode_data_parallel_size",
+        "decode_context_parallel_size",
+        "enable_expert_parallel",
+        "decode_enable_expert_parallel",
+        "gpu_memory_utilization",
+        "max_num_batched_tokens",
+        "max_num_seqs",
+        "block_size",
+        "scheduler_budget_len",
+        "prefix_sharing_type",
+        "prefix_sharing_kwargs",
+        "enable_datasystem",
+        "enable_chunked_prefill",
+        "enable_batching_prefill",
+        "disable_log_stats",
+        "disable_log_requests",
+        "tokenizer_group_mode",
+        "tokenizer_group_workers",
+        "health_check_interval",
+        "health_check_timeout",
+        "request_model",
+    )
+    return {
+        key: _safe_log_value(key, options[key])
+        for key in diagnostic_keys
+        if key in options
+    }
+
+
+def _type_name(value: Any) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
 class MultiPathTokenTrie:
     """Grammar for ``path (separator path)* EOS`` constrained decoding."""
 
@@ -198,6 +573,19 @@ class MultiPathTokenTrie:
         self.eos_token_id = int(eos_token_id)
         self.separator_token_ids = separator
         self.max_paths = min(int(max_paths), len(self.paths))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=trie.initialized paths=%s levels=%s requested_max_paths=%s "
+                "effective_max_paths=%s eos_token_id=%s separator_token_ids=%s "
+                "sample_paths=%s",
+                len(self.paths),
+                self.num_levels,
+                max_paths,
+                self.max_paths,
+                _token_ids_log_value([self.eos_token_id]),
+                _token_ids_log_value(self.separator_token_ids),
+                _token_ids_log_value(sorted(self.paths)),
+            )
 
     def _state(
         self, generated: Sequence[int]
@@ -260,9 +648,27 @@ class MultiPathTokenTrie:
             return ()
         return tuple(sorted({path[len(prefix)] for path in candidates}))
 
-    def parse_complete(self, generated: Sequence[int]) -> tuple[tuple[int, ...], ...]:
+    def parse_complete(
+        self,
+        generated: Sequence[int],
+        *,
+        request_id: str | None = None,
+    ) -> tuple[tuple[int, ...], ...]:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=trie.parse.begin request_id=%s generated_count=%s generated=%s",
+                request_id,
+                len(generated),
+                _token_ids_log_value(generated),
+            )
         state = self._state(generated)
         if state is None:
+            logger.error(
+                "event=trie.parse.invalid request_id=%s generated_count=%s generated=%s",
+                request_id,
+                len(generated),
+                _token_ids_log_value(generated),
+            )
             raise RuntimeError("vLLM generated an invalid code sequence")
         completed, prefix, mode, _ = state
         if (
@@ -271,7 +677,23 @@ class MultiPathTokenTrie:
             or prefix
             or mode != "boundary"
         ):
+            logger.error(
+                "event=trie.parse.incomplete request_id=%s completed=%s prefix=%s "
+                "mode=%s max_paths=%s",
+                request_id,
+                _token_ids_log_value(completed),
+                _token_ids_log_value(prefix),
+                mode,
+                self.max_paths,
+            )
             raise RuntimeError("vLLM generation did not end at a code-path boundary")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=trie.parse.complete request_id=%s path_count=%s paths=%s",
+                request_id,
+                len(completed),
+                _token_ids_log_value(completed),
+            )
         return completed
 
 
@@ -287,12 +709,34 @@ class TrieLogitsProcessor:
 
     def __call__(self, output_token_ids: list[int], scores: Any) -> Any:
         allowed = self.trie.allowed_next(output_token_ids)
+        if logger.isEnabledFor(logging.DEBUG) and _log_flag(
+            "SERVICE_910B_TRACE_TRIE", False
+        ):
+            logger.debug(
+                "event=trie.mask.step generated_count=%s generated=%s allowed_count=%s "
+                "allowed=%s score_shape=%s",
+                len(output_token_ids),
+                _token_ids_log_value(output_token_ids),
+                len(allowed),
+                _token_ids_log_value(allowed),
+                getattr(scores, "shape", None),
+            )
         if not allowed:
+            logger.error(
+                "event=trie.mask.invalid_prefix generated_count=%s generated=%s",
+                len(output_token_ids),
+                _token_ids_log_value(output_token_ids),
+            )
             raise RuntimeError(
                 f"generation reached an invalid code prefix: {output_token_ids!r}"
             )
         vocabulary_size = int(scores.shape[-1])
         if any(token_id >= vocabulary_size for token_id in allowed):
+            logger.error(
+                "event=trie.mask.out_of_vocabulary vocabulary_size=%s allowed=%s",
+                vocabulary_size,
+                _token_ids_log_value(allowed),
+            )
             raise RuntimeError("candidate path contains a token outside model vocabulary")
         masked = scores.new_full(scores.shape, -float("inf"))
         indices = list(allowed)
@@ -316,8 +760,15 @@ class RouterManifestSettings:
 
 
 def _load_candidate_bundle(directory: Path) -> CandidateBundle:
+    started = perf_counter()
     decode_path = directory / _DECODE_MAP_FILENAME
     token_path = directory / _VIRTUAL_TOKENS_FILENAME
+    logger.debug(
+        "event=candidate.load.begin directory=%s decode_path=%s token_path=%s",
+        directory,
+        decode_path,
+        token_path,
+    )
     if not decode_path.is_file() or not token_path.is_file():
         raise ServiceConfigurationError(
             f"candidate state {directory} must contain {_DECODE_MAP_FILENAME} "
@@ -461,19 +912,37 @@ def _load_candidate_bundle(directory: Path) -> CandidateBundle:
     normalized_skills = {
         str(skill_id): dict(metadata) for skill_id, metadata in skills.items()
     }
-    return CandidateBundle(
+    bundle = CandidateBundle(
         decode_map=decode_map,
         virtual_tokens=file_tokens,
         skills=normalized_skills,
         token_paths=token_paths,
         num_levels=raw_levels,
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=candidate.load.complete elapsed_ms=%.3f schema_version=%s skills=%s "
+            "paths=%s levels=%s virtual_tokens=%s supervision_phase=%s "
+            "sample_path_member_counts=%s",
+            (perf_counter() - started) * 1000.0,
+            decode_map.get("schema_version"),
+            len(bundle.skills),
+            len(bundle.token_paths),
+            bundle.num_levels,
+            len(bundle.virtual_tokens),
+            supervision.get("phase") if isinstance(supervision, Mapping) else None,
+            _token_ids_log_value(
+                [(path, len(members)) for path, members in bundle.token_paths.items()]
+            ),
+        )
+    return bundle
 
 
 class _AsyncLoopRunner:
     """Run the custom vLLM async engine on its dedicated SkillHub-style loop."""
 
     def __init__(self) -> None:
+        self.runner_id = uuid.uuid4().hex[:12]
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._run,
@@ -481,42 +950,184 @@ class _AsyncLoopRunner:
             daemon=True,
         )
         self._closed = False
+        logger.debug(
+            "event=async_loop.create runner_id=%s loop_id=%s thread_name=%s",
+            self.runner_id,
+            id(self._loop),
+            self._thread.name,
+        )
         self._thread.start()
+        logger.debug(
+            "event=async_loop.thread_started runner_id=%s thread_alive=%s "
+            "thread_ident=%s",
+            self.runner_id,
+            self._thread.is_alive(),
+            self._thread.ident,
+        )
 
-    def submit(self, coroutine: Any, *, timeout: float | None = None) -> Any:
+    def submit(
+        self,
+        coroutine: Any,
+        *,
+        timeout: float | None = None,
+        operation: str = "coroutine",
+        request_id: str | None = None,
+    ) -> Any:
         if self._closed:
             close_coroutine = getattr(coroutine, "close", None)
             if callable(close_coroutine):
                 close_coroutine()
+            logger.error(
+                "event=async_loop.submit_rejected runner_id=%s operation=%s "
+                "request_id=%s reason=closed",
+                self.runner_id,
+                operation,
+                request_id,
+            )
             raise RuntimeError("custom vLLM async loop is closed")
+        started = perf_counter()
+        logger.debug(
+            "event=async_loop.submit runner_id=%s operation=%s request_id=%s "
+            "timeout_seconds=%s loop_running=%s thread_alive=%s",
+            self.runner_id,
+            operation,
+            request_id,
+            timeout,
+            self._loop.is_running(),
+            self._thread.is_alive(),
+        )
         future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
         try:
-            return future.result(timeout=timeout)
-        except FutureTimeoutError:
-            future.cancel()
+            result = future.result(timeout=timeout)
+            logger.debug(
+                "event=async_loop.submit_complete runner_id=%s operation=%s "
+                "request_id=%s elapsed_ms=%.3f result_type=%s future_done=%s",
+                self.runner_id,
+                operation,
+                request_id,
+                (perf_counter() - started) * 1000.0,
+                _type_name(result),
+                future.done(),
+            )
+            return result
+        except FutureTimeoutError as exc:
+            # On Python 3.11+, concurrent.futures.TimeoutError aliases the
+            # built-in TimeoutError.  A completed coroutine can therefore
+            # raise the same type itself; only classify this as a submit wait
+            # timeout when a finite wait expired and the future is unfinished.
+            if timeout is None or future.done():
+                logger.debug(
+                    "event=async_loop.submit_failed runner_id=%s operation=%s "
+                    "request_id=%s elapsed_ms=%.3f error_type=%s "
+                    "future_done=%s timeout_seconds=%s",
+                    self.runner_id,
+                    operation,
+                    request_id,
+                    (perf_counter() - started) * 1000.0,
+                    type(exc).__name__,
+                    future.done(),
+                    timeout,
+                    exc_info=True,
+                )
+                raise
+            cancel_requested = future.cancel()
+            logger.warning(
+                "event=async_loop.submit_timeout runner_id=%s operation=%s "
+                "request_id=%s elapsed_ms=%.3f timeout_seconds=%s "
+                "cancel_requested=%s future_done=%s",
+                self.runner_id,
+                operation,
+                request_id,
+                (perf_counter() - started) * 1000.0,
+                timeout,
+                cancel_requested,
+                future.done(),
+            )
+            raise
+        except Exception as exc:
+            logger.debug(
+                "event=async_loop.submit_failed runner_id=%s operation=%s "
+                "request_id=%s elapsed_ms=%.3f error_type=%s",
+                self.runner_id,
+                operation,
+                request_id,
+                (perf_counter() - started) * 1000.0,
+                type(exc).__name__,
+                exc_info=True,
+            )
             raise
 
     def close(self) -> None:
         if self._closed:
+            logger.debug(
+                "event=async_loop.close_skipped runner_id=%s reason=already_closed",
+                self.runner_id,
+            )
             return
+        started = perf_counter()
+        logger.debug(
+            "event=async_loop.close_begin runner_id=%s loop_running=%s "
+            "loop_closed=%s thread_alive=%s thread_ident=%s",
+            self.runner_id,
+            self._loop.is_running(),
+            self._loop.is_closed(),
+            self._thread.is_alive(),
+            self._thread.ident,
+        )
         self._closed = True
         if not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5.0)
         if self._thread.is_alive():
-            logger.warning("custom vLLM async loop did not stop within 5 seconds")
+            logger.warning(
+                "event=async_loop.close_timeout runner_id=%s elapsed_ms=%.3f "
+                "thread_ident=%s",
+                self.runner_id,
+                (perf_counter() - started) * 1000.0,
+                self._thread.ident,
+            )
+        else:
+            logger.debug(
+                "event=async_loop.close_complete runner_id=%s elapsed_ms=%.3f "
+                "loop_closed=%s",
+                self.runner_id,
+                (perf_counter() - started) * 1000.0,
+                self._loop.is_closed(),
+            )
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
+        logger.debug(
+            "event=async_loop.run_begin runner_id=%s thread_ident=%s",
+            self.runner_id,
+            threading.get_ident(),
+        )
         self._loop.run_forever()
         pending = asyncio.all_tasks(self._loop)
+        logger.debug(
+            "event=async_loop.run_stopping runner_id=%s pending_tasks=%s",
+            self.runner_id,
+            len(pending),
+        )
         for task in pending:
             task.cancel()
         if pending:
-            self._loop.run_until_complete(
+            results = self._loop.run_until_complete(
                 asyncio.gather(*pending, return_exceptions=True)
             )
+            logger.debug(
+                "event=async_loop.pending_cancelled runner_id=%s pending_tasks=%s "
+                "exception_results=%s",
+                self.runner_id,
+                len(pending),
+                sum(isinstance(result, BaseException) for result in results),
+            )
         self._loop.close()
+        logger.debug(
+            "event=async_loop.run_complete runner_id=%s thread_ident=%s",
+            self.runner_id,
+            threading.get_ident(),
+        )
 
 
 class LocalVLLM910BRuntime:
@@ -532,6 +1143,7 @@ class LocalVLLM910BRuntime:
         request_timeout: float | None,
         engine_kwargs: Mapping[str, Any],
     ) -> None:
+        self.runtime_id = uuid.uuid4().hex[:12]
         self.engine = engine
         self.tokenizer = tokenizer
         self.sampling_params_cls = sampling_params_cls
@@ -540,6 +1152,23 @@ class LocalVLLM910BRuntime:
         self.engine_kwargs = dict(engine_kwargs)
         self._close_lock = threading.Lock()
         self._closed = False
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=runtime.created runtime_id=%s runner_id=%s engine_type=%s "
+                "tokenizer_type=%s sampling_params_type=%s request_timeout=%s "
+                "engine_summary=%s",
+                self.runtime_id,
+                self.loop_runner.runner_id,
+                _type_name(self.engine),
+                _type_name(self.tokenizer),
+                _safe_getattr(
+                    self.sampling_params_cls,
+                    "__qualname__",
+                    _type_name(self.sampling_params_cls),
+                ),
+                self.request_timeout,
+                _engine_log_summary(self.engine_kwargs),
+            )
 
     def generate(
         self,
@@ -547,23 +1176,81 @@ class LocalVLLM910BRuntime:
         prompt: str,
         prompt_token_ids: Sequence[int],
         sampling_params: Any,
+        request_id: str | None = None,
     ) -> Any:
         if self._closed:
             raise RuntimeError("custom vLLM 910B runtime is closed")
-        return self.loop_runner.submit(
-            _generate_on_910b_loop(
-                engine=self.engine,
-                prompt=prompt,
-                prompt_token_ids=prompt_token_ids,
-                sampling_params=sampling_params,
-            ),
-            timeout=self.request_timeout,
+        resolved_request_id = request_id or str(uuid.uuid4())
+        started = perf_counter()
+        if logger.isEnabledFor(logging.DEBUG):
+            processors = _safe_getattr(sampling_params, "logits_processors", ())
+            try:
+                processor_count: Any = len(processors or ())
+            except Exception as exc:
+                processor_count = f"<length-error {type(exc).__name__}>"
+            logger.debug(
+                "event=runtime.generate_begin runtime_id=%s request_id=%s "
+                "prompt_chars=%s prompt_tokens=%s timeout_seconds=%s "
+                "sampling_max_tokens=%s sampling_min_tokens=%s processor_count=%s",
+                self.runtime_id,
+                resolved_request_id,
+                len(prompt),
+                len(prompt_token_ids),
+                self.request_timeout,
+                _safe_getattr(sampling_params, "max_tokens"),
+                _safe_getattr(sampling_params, "min_tokens"),
+                processor_count,
+            )
+        try:
+            result = self.loop_runner.submit(
+                _generate_on_910b_loop(
+                    engine=self.engine,
+                    prompt=prompt,
+                    prompt_token_ids=prompt_token_ids,
+                    sampling_params=sampling_params,
+                    request_id=resolved_request_id,
+                ),
+                timeout=self.request_timeout,
+                operation="generate",
+                request_id=resolved_request_id,
+            )
+        except Exception as exc:
+            logger.debug(
+                "event=runtime.generate_failed runtime_id=%s request_id=%s "
+                "elapsed_ms=%.3f error_type=%s",
+                self.runtime_id,
+                resolved_request_id,
+                (perf_counter() - started) * 1000.0,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            raise
+        logger.debug(
+            "event=runtime.generate_complete runtime_id=%s request_id=%s "
+            "elapsed_ms=%.3f output_type=%s",
+            self.runtime_id,
+            resolved_request_id,
+            (perf_counter() - started) * 1000.0,
+            _type_name(result),
         )
+        return result
 
     def close(self) -> None:
         with self._close_lock:
             if self._closed:
+                logger.debug(
+                    "event=runtime.close_skipped runtime_id=%s reason=already_closed",
+                    self.runtime_id,
+                )
                 return
+            started = perf_counter()
+            logger.debug(
+                "event=runtime.close_begin runtime_id=%s runner_id=%s "
+                "engine_type=%s",
+                self.runtime_id,
+                self.loop_runner.runner_id,
+                _type_name(self.engine),
+            )
             try:
                 operations = (
                     (
@@ -581,22 +1268,49 @@ class LocalVLLM910BRuntime:
                 )
                 for label, operation in operations:
                     if not callable(operation):
+                        logger.debug(
+                            "event=runtime.close_operation_skipped runtime_id=%s "
+                            "operation=%s reason=not_callable",
+                            self.runtime_id,
+                            label,
+                        )
                         continue
+                    operation_started = perf_counter()
                     try:
                         operation()
                     except Exception:
                         logger.exception(
-                            "failed to run custom vLLM 910B %s", label
+                            "event=runtime.close_operation_failed runtime_id=%s "
+                            "operation=%s",
+                            self.runtime_id,
+                            label,
+                        )
+                    else:
+                        logger.debug(
+                            "event=runtime.close_operation_complete runtime_id=%s "
+                            "operation=%s elapsed_ms=%.3f",
+                            self.runtime_id,
+                            label,
+                            (perf_counter() - operation_started) * 1000.0,
                         )
             finally:
                 self.loop_runner.close()
                 self._closed = True
+                logger.debug(
+                    "event=runtime.close_complete runtime_id=%s elapsed_ms=%.3f "
+                    "loop_closed=%s",
+                    self.runtime_id,
+                    (perf_counter() - started) * 1000.0,
+                    self.loop_runner._loop.is_closed(),
+                )
 
 
 class RetriverTest:
     """Long-lived LLMGen retrieval service backed by custom 910B vLLM."""
 
     def __init__(self) -> None:
+        _configure_service_logging()
+        self.instance_id = uuid.uuid4().hex[:12]
         self.llm: Any | None = None
         self.tokenizer: Any | None = None
         self.sampling_params: Any | None = None
@@ -618,15 +1332,55 @@ class RetriverTest:
         self._load_lock = threading.RLock()
         self._inference_lock = threading.Lock()
         self._loaded = False
+        logger.debug(
+            "event=service.created instance_id=%s backend=%s thread_name=%s "
+            "thread_ident=%s",
+            self.instance_id,
+            self.backend,
+            threading.current_thread().name,
+            threading.get_ident(),
+        )
 
     def load(self) -> None:
+        _configure_service_logging()
+        load_id = uuid.uuid4().hex[:12]
+        lock_wait_started = perf_counter()
+        logger.debug(
+            "event=service.load_lock_wait instance_id=%s load_id=%s loaded=%s "
+            "backend=%s thread_name=%s thread_ident=%s",
+            self.instance_id,
+            load_id,
+            self._loaded,
+            self.backend,
+            threading.current_thread().name,
+            threading.get_ident(),
+        )
         with self._load_lock:
+            logger.debug(
+                "event=service.load_lock_acquired instance_id=%s load_id=%s "
+                "wait_ms=%.3f",
+                self.instance_id,
+                load_id,
+                (perf_counter() - lock_wait_started) * 1000.0,
+            )
             if self._loaded:
-                logger.info("LLMGen retrieval service load skipped; already loaded")
+                logger.debug(
+                    "event=service.load_skipped instance_id=%s load_id=%s "
+                    "reason=already_loaded backend=%s",
+                    self.instance_id,
+                    load_id,
+                    self.backend,
+                )
                 return
 
             started = perf_counter()
-            logger.info("LLMGen retrieval service load started")
+            stage = "configuration"
+            logger.info(
+                "event=service.load_begin instance_id=%s load_id=%s backend=%s",
+                self.instance_id,
+                load_id,
+                self.backend,
+            )
             current_dir = Path(__file__).resolve().parent
             self.default_top_k = _env_int("TOP_K", 2)
             self.max_code_paths = _env_int(
@@ -636,8 +1390,29 @@ class RetriverTest:
                 raise ServiceConfigurationError("TOP_K must be positive")
             if self.max_code_paths < 1:
                 raise ServiceConfigurationError("MAX_CODE_PATHS must be positive")
+            mock_mode = _env_bool("MOCK_MODE", False)
+            logger.debug(
+                "event=service.load_configuration instance_id=%s load_id=%s "
+                "current_dir=%s top_k=%s max_code_paths=%s mock_mode=%s "
+                "served_model_override=%s system_prompt_override=%s "
+                "candidate_override=%s tokenizer_override=%s",
+                self.instance_id,
+                load_id,
+                current_dir,
+                self.default_top_k,
+                self.max_code_paths,
+                mock_mode,
+                bool(os.environ.get("SERVED_MODEL_NAME", "").strip()),
+                bool(os.environ.get("SYSTEM_PROMPT", "").strip()),
+                bool(
+                    os.environ.get("CANDIDATE_STATE_PATH", "").strip()
+                    or os.environ.get("SKILL_INDEX_PATH", "").strip()
+                ),
+                bool(os.environ.get("TOKENIZER_PATH", "").strip()),
+            )
 
-            if _env_bool("MOCK_MODE", False):
+            if mock_mode:
+                stage = "mock_configuration"
                 self.backend = "mock"
                 self.mock_responses = _load_mock_responses()
                 self.model_path = _env_first_text(
@@ -656,14 +1431,29 @@ class RetriverTest:
                 )
                 self._loaded = True
                 logger.info(
-                    "LLMGen retrieval service loaded mock backend elapsed_ms=%.3f "
-                    "queries=%s top_k=%s",
+                    "event=service.load_complete instance_id=%s load_id=%s "
+                    "backend=mock elapsed_ms=%.3f queries=%s top_k=%s",
+                    self.instance_id,
+                    load_id,
                     (perf_counter() - started) * 1000.0,
                     len(self.mock_responses),
                     self.default_top_k,
                 )
+                logger.debug(
+                    "event=service.mock_configuration instance_id=%s load_id=%s "
+                    "served_model=%s response_queries=%s has_fallback=%s "
+                    "system_prompt=%s",
+                    self.instance_id,
+                    load_id,
+                    self.served_model_name,
+                    len(self.mock_responses),
+                    "*" in self.mock_responses,
+                    _text_log_value(self.system_prompt),
+                )
                 return
 
+            stage = "resolve_paths"
+            resolve_started = perf_counter()
             model_dir = _resolve_model_directory(current_dir)
             tokenizer_dir = Path(
                 _env_first_text(("TOKENIZER_PATH",), str(model_dir))
@@ -681,44 +1471,135 @@ class RetriverTest:
             self.served_model_name = _env_text(
                 "SERVED_MODEL_NAME", model_dir.name or str(model_dir)
             )
+            logger.debug(
+                "event=service.paths_resolved instance_id=%s load_id=%s "
+                "elapsed_ms=%.3f model=%s tokenizer=%s candidate=%s "
+                "served_model=%s",
+                self.instance_id,
+                load_id,
+                (perf_counter() - resolve_started) * 1000.0,
+                model_dir,
+                tokenizer_dir,
+                candidate_dir,
+                self.served_model_name,
+            )
             for label, path in (
                 ("model", model_dir),
                 ("tokenizer", tokenizer_dir),
                 ("candidate state", candidate_dir),
             ):
+                logger.debug(
+                    "event=service.path_check instance_id=%s load_id=%s label=%s "
+                    "path=%s exists=%s is_directory=%s",
+                    self.instance_id,
+                    load_id,
+                    label,
+                    path,
+                    path.exists(),
+                    path.is_dir(),
+                )
                 if not path.is_dir():
+                    logger.error(
+                        "event=service.path_invalid instance_id=%s load_id=%s "
+                        "label=%s path=%s",
+                        self.instance_id,
+                        load_id,
+                        label,
+                        path,
+                    )
                     raise ServiceConfigurationError(
                         f"{label} directory does not exist: {path}"
                     )
+            stage = "validate_model_bundle"
+            validation_started = perf_counter()
             _validate_full_model_bundle(model_dir)
+            logger.debug(
+                "event=service.model_bundle_validated instance_id=%s load_id=%s "
+                "elapsed_ms=%.3f",
+                self.instance_id,
+                load_id,
+                (perf_counter() - validation_started) * 1000.0,
+            )
 
             try:
+                stage = "load_candidate_bundle"
                 self.bundle = _load_candidate_bundle(candidate_dir)
+                logger.debug(
+                    "event=service.candidate_ready instance_id=%s load_id=%s "
+                    "skills=%s paths=%s levels=%s virtual_tokens=%s",
+                    self.instance_id,
+                    load_id,
+                    len(self.bundle.skills),
+                    len(self.bundle.token_paths),
+                    self.bundle.num_levels,
+                    len(self.bundle.virtual_tokens),
+                )
+                stage = "load_router_manifest"
                 manifest_settings = _load_router_settings(model_dir)
                 self.system_prompt = _env_text(
                     "SYSTEM_PROMPT", manifest_settings.system_prompt
                 )
+                logger.debug(
+                    "event=service.manifest_ready instance_id=%s load_id=%s "
+                    "trained_max_length=%s system_prompt_chars=%s "
+                    "system_prompt=%s override=%s",
+                    self.instance_id,
+                    load_id,
+                    manifest_settings.max_length,
+                    len(self.system_prompt),
+                    _text_log_value(self.system_prompt),
+                    bool(os.environ.get("SYSTEM_PROMPT", "").strip()),
+                )
 
+                stage = "build_engine_options"
                 engine_options = _build_vllm_kwargs(model_path=model_dir)
                 # Match SkillHub's VLLMClientConfig adapter: the service-level
                 # dtype and request model are applied after generic JSON args.
                 engine_options["request_model"] = self.served_model_name
                 engine_options["dtype"] = _vllm_dtype()
                 logger.info(
-                    "loading custom vLLM 910B model=%s tokenizer=%s "
-                    "candidates=%s kwargs=%s",
-                    model_dir,
-                    tokenizer_dir,
-                    candidate_dir,
-                    engine_options,
+                    "event=service.engine_load_begin instance_id=%s load_id=%s "
+                    "served_model=%s architecture=%s dtype=%s tp=%s pp=%s dp=%s",
+                    self.instance_id,
+                    load_id,
+                    self.served_model_name,
+                    engine_options.get("architectures"),
+                    engine_options.get("dtype"),
+                    engine_options.get("tensor_parallel_size"),
+                    engine_options.get("pipeline_parallel_size"),
+                    engine_options.get("data_parallel_size"),
                 )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "event=service.engine_options instance_id=%s load_id=%s "
+                        "option_count=%s option_keys=%s summary=%s",
+                        self.instance_id,
+                        load_id,
+                        len(engine_options),
+                        sorted(engine_options),
+                        _engine_log_summary(engine_options),
+                    )
+                stage = "load_vllm_runtime"
+                engine_load_started = perf_counter()
                 self.llm = load_vllm_model(
                     model_path=model_dir,
                     tokenizer_path=tokenizer_dir,
                     vllm_kwargs=engine_options,
                 )
                 self.tokenizer = self.llm.tokenizer
+                logger.debug(
+                    "event=service.engine_ready instance_id=%s load_id=%s "
+                    "elapsed_ms=%.3f runtime_id=%s engine_type=%s tokenizer_type=%s",
+                    self.instance_id,
+                    load_id,
+                    (perf_counter() - engine_load_started) * 1000.0,
+                    self.llm.runtime_id,
+                    _type_name(self.llm.engine),
+                    _type_name(self.tokenizer),
+                )
 
+                stage = "build_token_trie"
+                trie_started = perf_counter()
                 token_ids = _code_token_id_map(
                     self.tokenizer, self.bundle.virtual_tokens
                 )
@@ -739,6 +1620,24 @@ class RetriverTest:
                     raise ServiceConfigurationError(
                         "Router tokenizer encodes the path separator as empty"
                     )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "event=service.tokenizer_contract instance_id=%s load_id=%s "
+                        "tokenizer_type=%s eos_token_id=%s virtual_token_count=%s "
+                        "virtual_token_ids=%s separator_token_ids=%s "
+                        "has_chat_template=%s",
+                        self.instance_id,
+                        load_id,
+                        _type_name(self.tokenizer),
+                        _token_ids_log_value([eos_token_id]),
+                        len(token_ids),
+                        _token_ids_log_value(sorted(token_ids.values())),
+                        _token_ids_log_value(separator_ids),
+                        _safe_getattr(
+                            self.tokenizer, "chat_template", None
+                        )
+                        is not None,
+                    )
 
                 self.path_skill_ids = {
                     tuple(token_ids[token] for token in path): members
@@ -750,17 +1649,40 @@ class RetriverTest:
                     separator_token_ids=separator_ids,
                     max_paths=self.max_code_paths,
                 )
+                logger.debug(
+                    "event=service.trie_ready instance_id=%s load_id=%s "
+                    "elapsed_ms=%.3f token_paths=%s effective_max_paths=%s",
+                    self.instance_id,
+                    load_id,
+                    (perf_counter() - trie_started) * 1000.0,
+                    len(self.path_skill_ids),
+                    self.trie.max_paths,
+                )
                 output_budget = (
                     self.trie.max_paths * self.bundle.num_levels
                     + (self.trie.max_paths - 1) * len(separator_ids)
                     + 1
                 )
                 engine_max_length = _custom_engine_max_model_len(self.llm)
+                stage = "resolve_context_limits"
                 self.max_input_length = _resolve_max_input_length(
                     trained_max_length=manifest_settings.max_length,
                     engine_max_length=engine_max_length,
                     output_budget=output_budget,
                 )
+                logger.debug(
+                    "event=service.context_limits instance_id=%s load_id=%s "
+                    "trained_max_length=%s engine_max_length=%s output_budget=%s "
+                    "max_input_length=%s explicit_max_input=%s",
+                    self.instance_id,
+                    load_id,
+                    manifest_settings.max_length,
+                    engine_max_length,
+                    output_budget,
+                    self.max_input_length,
+                    os.environ.get("MAX_INPUT_LENGTH"),
+                )
+                stage = "build_sampling_params"
                 self.sampling_params = _build_910b_sampling_params(
                     self.llm.sampling_params_cls,
                     output_budget=output_budget,
@@ -770,65 +1692,226 @@ class RetriverTest:
                 self.backend = "vllm_910b"
                 self._loaded = True
                 logger.info(
-                    "LLMGen retrieval service loaded elapsed_ms=%.3f "
-                    "skills=%s paths=%s levels=%s max_input_length=%s",
+                    "event=service.load_complete instance_id=%s load_id=%s "
+                    "backend=vllm_910b elapsed_ms=%.3f skills=%s paths=%s "
+                    "levels=%s max_input_length=%s output_budget=%s",
+                    self.instance_id,
+                    load_id,
                     (perf_counter() - started) * 1000.0,
                     len(self.bundle.skills),
                     len(self.path_skill_ids),
                     self.bundle.num_levels,
                     self.max_input_length,
+                    output_budget,
                 )
-            except Exception:
+            except BaseException as exc:
+                cleanup_started = perf_counter()
+                cleanup_error: BaseException | None = None
+                try:
+                    self._cleanup_after_failed_load(
+                        load_id=load_id,
+                        failed_stage=stage,
+                    )
+                except BaseException as cleanup_exc:
+                    cleanup_error = cleanup_exc
                 logger.exception(
-                    "LLMGen retrieval service load failed elapsed_ms=%.3f",
+                    "event=service.load_failed instance_id=%s load_id=%s stage=%s "
+                    "elapsed_ms=%.3f cleanup_ms=%.3f error_type=%s",
+                    self.instance_id,
+                    load_id,
+                    stage,
                     (perf_counter() - started) * 1000.0,
+                    (perf_counter() - cleanup_started) * 1000.0,
+                    type(exc).__name__,
                 )
-                self._cleanup_after_failed_load()
+                if cleanup_error is not None:
+                    logger.error(
+                        "event=service.load_cleanup_failed instance_id=%s "
+                        "load_id=%s failed_stage=%s cleanup_error_type=%s",
+                        self.instance_id,
+                        load_id,
+                        stage,
+                        type(cleanup_error).__name__,
+                    )
                 raise
 
     def calc(self, req_data: Mapping[str, Any] | None) -> str:
+        _configure_service_logging()
+        request_id = str(uuid.uuid4())
+        total_started = perf_counter()
         container = req_data if isinstance(req_data, Mapping) else {}
         data = container.get("data", {})
         request = dict(data) if isinstance(data, Mapping) else {}
         query = str(request.get("query", _DEFAULT_QUERY)).strip()
-        if not query:
-            logger.info("service calc skipped because query is empty")
-            return json.dumps([], ensure_ascii=False)
-        with self._load_lock:
-            if not self._loaded:
-                self.load()
-
-            requested_top_k = _coerce_optional_int(request.get("top_k"))
-            if requested_top_k is None:
-                requested_top_k = _coerce_optional_int(request.get("topk"))
-            resolved_top_k = (
-                self.default_top_k
-                if requested_top_k is None
-                else max(1, requested_top_k)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=service.calc_begin instance_id=%s request_id=%s loaded=%s "
+                "backend=%s request_type=%s data_type=%s request_keys=%s "
+                "query_chars=%s query=%s top_k_raw=%s topk_raw=%s",
+                self.instance_id,
+                request_id,
+                self._loaded,
+                self.backend,
+                _type_name(req_data),
+                _type_name(data),
+                sorted(_safe_log_string(key) for key in request),
+                len(query),
+                _text_log_value(query),
+                _safe_log_value("top_k", request.get("top_k")),
+                _safe_log_value("topk", request.get("topk")),
             )
-            if resolved_top_k > self.default_top_k:
-                logger.warning(
-                    "requested top_k=%s exceeds initialized top_k=%s; "
-                    "returning at most initialized results",
+        if not query:
+            logger.debug(
+                "event=service.calc_complete instance_id=%s request_id=%s "
+                "status=empty_query elapsed_ms=%.3f results=0",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+            )
+            return json.dumps([], ensure_ascii=False)
+        phase = "load_lock"
+        load_lock_started = perf_counter()
+        try:
+            logger.debug(
+                "event=service.calc_load_lock_wait instance_id=%s request_id=%s",
+                self.instance_id,
+                request_id,
+            )
+            with self._load_lock:
+                load_lock_wait_ms = (perf_counter() - load_lock_started) * 1000.0
+                logger.debug(
+                    "event=service.calc_load_lock_acquired instance_id=%s "
+                    "request_id=%s wait_ms=%.3f loaded=%s",
+                    self.instance_id,
+                    request_id,
+                    load_lock_wait_ms,
+                    self._loaded,
+                )
+                if not self._loaded:
+                    phase = "automatic_load"
+                    logger.debug(
+                        "event=service.calc_auto_load instance_id=%s request_id=%s",
+                        self.instance_id,
+                        request_id,
+                    )
+                    self.load()
+
+                phase = "resolve_top_k"
+                requested_top_k = _coerce_optional_int(request.get("top_k"))
+                top_k_source = "top_k"
+                if requested_top_k is None:
+                    requested_top_k = _coerce_optional_int(request.get("topk"))
+                    top_k_source = "topk" if requested_top_k is not None else "default"
+                resolved_top_k = (
+                    self.default_top_k
+                    if requested_top_k is None
+                    else max(1, requested_top_k)
+                )
+                clamped = resolved_top_k > self.default_top_k
+                if clamped:
+                    logger.warning(
+                        "event=service.calc_top_k_clamped instance_id=%s request_id=%s "
+                        "requested=%s initialized=%s",
+                        self.instance_id,
+                        request_id,
+                        resolved_top_k,
+                        self.default_top_k,
+                    )
+                    resolved_top_k = self.default_top_k
+                logger.debug(
+                    "event=service.calc_route instance_id=%s request_id=%s "
+                    "top_k_source=%s requested_top_k=%s resolved_top_k=%s "
+                    "default_top_k=%s clamped=%s backend=%s",
+                    self.instance_id,
+                    request_id,
+                    top_k_source,
+                    requested_top_k,
                     resolved_top_k,
                     self.default_top_k,
+                    clamped,
+                    self.backend,
                 )
-                resolved_top_k = self.default_top_k
 
-            started = perf_counter()
-            with self._inference_lock:
-                names = self._search_names(query)
-        logger.info(
-            "service calc complete elapsed_ms=%.3f query_chars=%s results=%s",
-            (perf_counter() - started) * 1000.0,
-            len(query),
-            min(len(names), resolved_top_k),
-        )
-        return json.dumps(names[:resolved_top_k], ensure_ascii=False)
+                phase = "inference_lock"
+                inference_wait_started = perf_counter()
+                logger.debug(
+                    "event=service.calc_inference_lock_wait instance_id=%s "
+                    "request_id=%s",
+                    self.instance_id,
+                    request_id,
+                )
+                with self._inference_lock:
+                    inference_wait_ms = (
+                        perf_counter() - inference_wait_started
+                    ) * 1000.0
+                    logger.debug(
+                        "event=service.calc_inference_lock_acquired instance_id=%s "
+                        "request_id=%s wait_ms=%.3f",
+                        self.instance_id,
+                        request_id,
+                        inference_wait_ms,
+                    )
+                    phase = "inference"
+                    inference_started = perf_counter()
+                    names = self._search_names(query, request_id=request_id)
+                    inference_ms = (perf_counter() - inference_started) * 1000.0
+            selected_names = names[:resolved_top_k]
+            logger.info(
+                "event=service.calc_complete instance_id=%s request_id=%s "
+                "status=ok elapsed_ms=%.3f inference_ms=%.3f load_lock_wait_ms=%.3f "
+                "inference_lock_wait_ms=%.3f query_chars=%s decoded_results=%s "
+                "returned_results=%s",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+                inference_ms,
+                load_lock_wait_ms,
+                inference_wait_ms,
+                len(query),
+                len(names),
+                len(selected_names),
+            )
+            return json.dumps(selected_names, ensure_ascii=False)
+        except Exception as exc:
+            logger.exception(
+                "event=service.calc_failed instance_id=%s request_id=%s phase=%s "
+                "elapsed_ms=%.3f error_type=%s",
+                self.instance_id,
+                request_id,
+                phase,
+                (perf_counter() - total_started) * 1000.0,
+                type(exc).__name__,
+            )
+            raise
 
     def close(self) -> None:
+        close_id = uuid.uuid4().hex[:12]
+        started = perf_counter()
+        logger.debug(
+            "event=service.close_begin instance_id=%s close_id=%s loaded=%s "
+            "backend=%s has_runtime=%s",
+            self.instance_id,
+            close_id,
+            self._loaded,
+            self.backend,
+            self.llm is not None,
+        )
         with self._load_lock:
+            logger.debug(
+                "event=service.close_load_lock_acquired instance_id=%s close_id=%s "
+                "elapsed_ms=%.3f",
+                self.instance_id,
+                close_id,
+                (perf_counter() - started) * 1000.0,
+            )
             with self._inference_lock:
+                logger.debug(
+                    "event=service.close_inference_lock_acquired instance_id=%s "
+                    "close_id=%s elapsed_ms=%.3f",
+                    self.instance_id,
+                    close_id,
+                    (perf_counter() - started) * 1000.0,
+                )
                 _shutdown_vllm(self.llm)
                 self.llm = None
                 self.tokenizer = None
@@ -841,14 +1924,45 @@ class RetriverTest:
                 self.system_prompt = _DEFAULT_SYSTEM_PROMPT
                 self._loaded = False
             gc.collect()
+        logger.info(
+            "event=service.close_complete instance_id=%s close_id=%s "
+            "elapsed_ms=%.3f loaded=%s runtime_present=%s",
+            self.instance_id,
+            close_id,
+            (perf_counter() - started) * 1000.0,
+            self._loaded,
+            self.llm is not None,
+        )
 
-    def _search_names(self, query: str) -> list[str]:
+    def _search_names(self, query: str, *, request_id: str | None = None) -> list[str]:
+        resolved_request_id = request_id or str(uuid.uuid4())
+        started = perf_counter()
+        logger.debug(
+            "event=search.begin instance_id=%s request_id=%s backend=%s "
+            "query_chars=%s query=%s",
+            self.instance_id,
+            resolved_request_id,
+            self.backend,
+            len(query),
+            _text_log_value(query),
+        )
         if self.backend == "mock":
             if not self._loaded:
                 raise RuntimeError("LLMGen mock retrieval service is not loaded")
-            return list(
+            exact_match = query in self.mock_responses
+            results = list(
                 self.mock_responses.get(query, self.mock_responses.get("*", ()))
             )
+            logger.debug(
+                "event=search.mock_complete instance_id=%s request_id=%s "
+                "elapsed_ms=%.3f exact_match=%s result_count=%s",
+                self.instance_id,
+                resolved_request_id,
+                (perf_counter() - started) * 1000.0,
+                exact_match,
+                len(results),
+            )
+            return results
         if (
             self.llm is None
             or self.tokenizer is None
@@ -856,65 +1970,211 @@ class RetriverTest:
             or self.bundle is None
             or self.trie is None
         ):
+            logger.error(
+                "event=search.runtime_missing instance_id=%s request_id=%s "
+                "has_runtime=%s has_tokenizer=%s has_sampling_params=%s "
+                "has_bundle=%s has_trie=%s loaded=%s",
+                self.instance_id,
+                resolved_request_id,
+                self.llm is not None,
+                self.tokenizer is not None,
+                self.sampling_params is not None,
+                self.bundle is not None,
+                self.trie is not None,
+                self._loaded,
+            )
             raise RuntimeError("LLMGen retrieval service is not loaded")
+        render_started = perf_counter()
         prompt = _render_router_prompt(
             self.tokenizer,
             query,
             self.system_prompt,
         )
+        logger.debug(
+            "event=search.prompt_rendered instance_id=%s request_id=%s "
+            "elapsed_ms=%.3f prompt_chars=%s prompt=%s system_prompt_chars=%s",
+            self.instance_id,
+            resolved_request_id,
+            (perf_counter() - render_started) * 1000.0,
+            len(prompt),
+            _text_log_value(prompt),
+            len(self.system_prompt),
+        )
+        tokenize_started = perf_counter()
         prompt_ids = [
             int(value)
             for value in self.tokenizer.encode(prompt, add_special_tokens=False)
         ]
         if not prompt_ids:
             raise RuntimeError("Router tokenizer encoded the prompt as empty")
+        original_prompt_tokens = len(prompt_ids)
+        truncated = False
         if len(prompt_ids) > self.max_input_length:
+            truncated = True
             # Match the repository inference path: keep the prompt prefix.
             prompt_ids = prompt_ids[: self.max_input_length]
             decode = getattr(self.tokenizer, "decode", None)
             if callable(decode):
+                decode_started = perf_counter()
                 try:
                     prompt = str(
                         decode(prompt_ids, skip_special_tokens=False)
                     )
                 except TypeError:
+                    logger.debug(
+                        "event=search.prompt_decode_retry instance_id=%s "
+                        "request_id=%s reason=skip_special_tokens_not_supported",
+                        self.instance_id,
+                        resolved_request_id,
+                        exc_info=True,
+                    )
                     prompt = str(decode(prompt_ids))
+                logger.debug(
+                    "event=search.prompt_decoded_after_truncation instance_id=%s "
+                    "request_id=%s elapsed_ms=%.3f prompt_chars=%s prompt=%s",
+                    self.instance_id,
+                    resolved_request_id,
+                    (perf_counter() - decode_started) * 1000.0,
+                    len(prompt),
+                    _text_log_value(prompt),
+                )
+            else:
+                logger.warning(
+                    "event=search.prompt_truncated_without_decode instance_id=%s "
+                    "request_id=%s original_prompt_chars=%s original_tokens=%s "
+                    "kept_tokens=%s",
+                    self.instance_id,
+                    resolved_request_id,
+                    len(prompt),
+                    original_prompt_tokens,
+                    len(prompt_ids),
+                )
+        logger.debug(
+            "event=search.prompt_tokenized instance_id=%s request_id=%s "
+            "elapsed_ms=%.3f original_tokens=%s submitted_tokens=%s "
+            "max_input_length=%s truncated=%s token_ids=%s",
+            self.instance_id,
+            resolved_request_id,
+            (perf_counter() - tokenize_started) * 1000.0,
+            original_prompt_tokens,
+            len(prompt_ids),
+            self.max_input_length,
+            truncated,
+            _token_ids_log_value(prompt_ids),
+        )
 
+        generation_started = perf_counter()
         request_output = self.llm.generate(
             prompt=prompt,
             prompt_token_ids=prompt_ids,
             sampling_params=self.sampling_params,
+            request_id=resolved_request_id,
         )
-        completion = _first_completion_output(request_output)
-        if _output_field(completion, "finish_reason") == "length":
+        logger.debug(
+            "event=search.generation_returned instance_id=%s request_id=%s "
+            "elapsed_ms=%.3f output_type=%s",
+            self.instance_id,
+            resolved_request_id,
+            (perf_counter() - generation_started) * 1000.0,
+            _type_name(request_output),
+        )
+        completion = _first_completion_output(
+            request_output, request_id=resolved_request_id
+        )
+        finish_reason = _output_field(completion, "finish_reason")
+        if finish_reason == "length":
             raise RuntimeError("constrained vLLM generation exhausted its token budget")
         raw_token_ids = _output_field(completion, "token_ids")
         if raw_token_ids is None:
             raise RuntimeError("custom vLLM 910B completion has no token IDs")
         generated = [int(value) for value in raw_token_ids]
+        logger.debug(
+            "event=search.decode_begin instance_id=%s request_id=%s "
+            "finish_reason=%s generated_count=%s generated=%s",
+            self.instance_id,
+            resolved_request_id,
+            finish_reason,
+            len(generated),
+            _token_ids_log_value(generated),
+        )
         try:
             eos_position = generated.index(self.trie.eos_token_id)
         except ValueError as exc:
             raise RuntimeError("constrained vLLM generation did not emit EOS") from exc
+        trailing_count = len(generated) - eos_position - 1
+        if trailing_count:
+            logger.warning(
+                "event=search.tokens_after_eos instance_id=%s request_id=%s "
+                "eos_position=%s trailing_count=%s trailing_tokens=%s",
+                self.instance_id,
+                resolved_request_id,
+                eos_position,
+                trailing_count,
+                _token_ids_log_value(generated[eos_position + 1 :]),
+            )
         generated = generated[:eos_position]
-        paths = self.trie.parse_complete(generated)
+        paths = self.trie.parse_complete(
+            generated, request_id=resolved_request_id
+        )
+        logger.debug(
+            "event=search.paths_decoded instance_id=%s request_id=%s "
+            "eos_position=%s path_count=%s paths=%s",
+            self.instance_id,
+            resolved_request_id,
+            eos_position,
+            len(paths),
+            _token_ids_log_value(paths),
+        )
 
         skill_ids: list[str] = []
         seen: set[str] = set()
         for path in paths:
             members = self.path_skill_ids.get(path)
             if members is None:
+                logger.error(
+                    "event=search.path_missing instance_id=%s request_id=%s path=%s",
+                    self.instance_id,
+                    resolved_request_id,
+                    _token_ids_log_value(path),
+                )
                 raise RuntimeError("generated path is absent from the candidate state")
             for skill_id in members:
                 if skill_id not in seen:
                     skill_ids.append(skill_id)
                     seen.add(skill_id)
-        return [
+        names = [
             str(self.bundle.skills[skill_id].get("name") or skill_id)
             for skill_id in skill_ids
         ]
+        logger.debug(
+            "event=search.complete instance_id=%s request_id=%s elapsed_ms=%.3f "
+            "path_count=%s skill_id_count=%s result_count=%s",
+            self.instance_id,
+            resolved_request_id,
+            (perf_counter() - started) * 1000.0,
+            len(paths),
+            len(skill_ids),
+            len(names),
+        )
+        return names
 
-    def _cleanup_after_failed_load(self) -> None:
+    def _cleanup_after_failed_load(
+        self,
+        *,
+        load_id: str | None = None,
+        failed_stage: str | None = None,
+    ) -> None:
+        started = perf_counter()
+        logger.debug(
+            "event=service.load_cleanup_begin instance_id=%s load_id=%s "
+            "failed_stage=%s has_runtime=%s has_tokenizer=%s has_bundle=%s",
+            self.instance_id,
+            load_id,
+            failed_stage,
+            self.llm is not None,
+            self.tokenizer is not None,
+            self.bundle is not None,
+        )
         _shutdown_vllm(self.llm)
         self.llm = None
         self.tokenizer = None
@@ -927,6 +2187,16 @@ class RetriverTest:
         self.system_prompt = _DEFAULT_SYSTEM_PROMPT
         self._loaded = False
         gc.collect()
+        logger.debug(
+            "event=service.load_cleanup_complete instance_id=%s load_id=%s "
+            "failed_stage=%s elapsed_ms=%.3f loaded=%s runtime_present=%s",
+            self.instance_id,
+            load_id,
+            failed_stage,
+            (perf_counter() - started) * 1000.0,
+            self._loaded,
+            self.llm is not None,
+        )
 
 
 # A correctly-spelled alias for integrations that do not depend on the
@@ -937,8 +2207,13 @@ SkillRouterService = RetriverTest
 def _deployment_parent(current_dir: Path) -> Path:
     model_object_id = os.environ.get("MODEL_OBJECT_ID")
     model_sfs = os.environ.get("MODEL_SFS")
-    logger.info("model_object_id: %s", model_object_id)
-    logger.info("model_sfs_path: %s", model_sfs)
+    logger.debug(
+        "event=deployment.resolve_parent current_dir=%s model_object_id_present=%s "
+        "model_sfs_present=%s",
+        current_dir,
+        bool(model_object_id),
+        bool(model_sfs),
+    )
     if model_object_id or model_sfs:
         if not model_object_id or not model_sfs:
             raise ServiceConfigurationError(
@@ -951,8 +2226,18 @@ def _deployment_parent(current_dir: Path) -> Path:
         base_path = payload.get("sfsBasePath") if isinstance(payload, Mapping) else None
         if not isinstance(base_path, str) or not base_path.strip():
             raise ServiceConfigurationError("MODEL_SFS has no non-empty sfsBasePath")
-        return (Path(base_path) / model_object_id).expanduser().resolve()
-    return current_dir.parent.resolve()
+        resolved = (Path(base_path) / model_object_id).expanduser().resolve()
+        logger.debug(
+            "event=deployment.parent_resolved source=sfs parent=%s",
+            resolved,
+        )
+        return resolved
+    resolved = current_dir.parent.resolve()
+    logger.debug(
+        "event=deployment.parent_resolved source=service_parent parent=%s",
+        resolved,
+    )
+    return resolved
 
 
 def _resolve_model_directory(current_dir: Path) -> Path:
@@ -961,34 +2246,62 @@ def _resolve_model_directory(current_dir: Path) -> Path:
     if os.environ.get("MODEL_OBJECT_ID") or os.environ.get("MODEL_SFS"):
         # Preserve the reference service contract: the hosting system's SFS
         # location is authoritative when it is supplied.
-        return platform_model_dir.expanduser().resolve()
-    return Path(
+        resolved = platform_model_dir.expanduser().resolve()
+        logger.debug(
+            "event=deployment.model_resolved source=sfs model=%s",
+            resolved,
+        )
+        return resolved
+    resolved = Path(
         _env_first_text(("MODEL_PATH", "MODEL_DIR"), str(platform_model_dir))
     ).expanduser().resolve()
+    logger.debug(
+        "event=deployment.model_resolved source=%s model=%s",
+        "environment"
+        if os.environ.get("MODEL_PATH") or os.environ.get("MODEL_DIR")
+        else "default",
+        resolved,
+    )
+    return resolved
 
 
 def _validate_full_model_bundle(model_dir: Path) -> None:
     """Require the consolidated Hugging Face files that vLLM can load."""
 
+    started = perf_counter()
     config_path = model_dir / "config.json"
     indexed_weights = (
         "model.safetensors.index.json",
         "pytorch_model.bin.index.json",
     )
     single_weights = ("model.safetensors", "pytorch_model.bin")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=model_bundle.validate_begin model=%s config_exists=%s "
+            "directory_entries=%s",
+            model_dir,
+            config_path.is_file(),
+            _directory_entries_log_value(model_dir),
+        )
 
     has_full_weights = False
+    selected_weights: list[tuple[str, int]] = []
     for index_name in indexed_weights:
         index_path = model_dir / index_name
         if index_path.is_file():
-            _validate_model_weight_index(model_dir, index_path)
+            selected_weights = _validate_model_weight_index(model_dir, index_path)
             has_full_weights = True
             break
     if not has_full_weights:
-        has_full_weights = any(
-            (model_dir / name).is_file() and (model_dir / name).stat().st_size > 0
-            for name in single_weights
-        )
+        for name in single_weights:
+            weight_path = model_dir / name
+            if not weight_path.is_file():
+                continue
+            weight_size = weight_path.stat().st_size
+            if weight_size > 0:
+                selected_weights = [(name, weight_size)]
+                has_full_weights = True
+                break
 
     if not has_full_weights:
         if (model_dir / "adapter_config.json").is_file():
@@ -1004,10 +2317,28 @@ def _validate_full_model_bundle(model_dir: Path) -> None:
         raise ServiceConfigurationError(
             f"full Router model is missing Hugging Face config: {config_path}"
         )
-    _read_json_object(config_path)
+    config = _read_json_object(config_path)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=model_bundle.validate_complete model=%s elapsed_ms=%.3f "
+            "weight_files=%s total_weight_bytes=%s config_keys=%s model_type=%s "
+            "architectures=%s vocab_size=%s max_position_embeddings=%s",
+            model_dir,
+            (perf_counter() - started) * 1000.0,
+            [name for name, _ in selected_weights],
+            sum(size for _, size in selected_weights),
+            sorted(config),
+            config.get("model_type"),
+            config.get("architectures"),
+            config.get("vocab_size"),
+            config.get("max_position_embeddings"),
+        )
 
 
-def _validate_model_weight_index(model_dir: Path, index_path: Path) -> None:
+def _validate_model_weight_index(
+    model_dir: Path, index_path: Path
+) -> list[tuple[str, int]]:
+    started = perf_counter()
     payload = _read_json_object(index_path)
     weight_map = payload.get("weight_map")
     if not isinstance(weight_map, Mapping) or not weight_map:
@@ -1022,22 +2353,40 @@ def _validate_model_weight_index(model_dir: Path, index_path: Path) -> None:
                 f"model weight index contains an invalid shard: {index_path}"
             )
         shard_names.add(raw_name)
-    for raw_name in shard_names:
+    validated_shards: list[tuple[str, int]] = []
+    for raw_name in sorted(shard_names):
         shard = (model_dir / raw_name).resolve()
-        if (
-            shard.parent != model_root
-            or not shard.is_file()
-            or shard.stat().st_size < 1
-        ):
+        if shard.parent != model_root or not shard.is_file():
             raise ServiceConfigurationError(
                 "model weight index references a missing, empty, or unsafe shard: "
                 f"{raw_name}"
             )
+        shard_size = shard.stat().st_size
+        if shard_size < 1:
+            raise ServiceConfigurationError(
+                "model weight index references a missing, empty, or unsafe shard: "
+                f"{raw_name}"
+            )
+        validated_shards.append((raw_name, shard_size))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=model_bundle.index_validated index=%s elapsed_ms=%.3f "
+            "weight_entries=%s shards=%s total_bytes=%s shard_names=%s",
+            index_path,
+            (perf_counter() - started) * 1000.0,
+            len(weight_map),
+            len(validated_shards),
+            sum(size for _, size in validated_shards),
+            _sequence_log_value([name for name, _ in validated_shards]),
+        )
+    return validated_shards
 
 
 def _build_vllm_kwargs(*, model_path: Path) -> Dict[str, Any]:
     """Build SkillHub-style custom-engine options for the owned Router bundle."""
 
+    started = perf_counter()
+    logger.debug("event=engine_options.build_begin model=%s", model_path)
     kwargs: Dict[str, Any] = {}
     for key, default in _vllm_engine_arg_defaults(model_path=model_path).items():
         kwargs[key] = _env_engine_arg(key, default)
@@ -1065,15 +2414,40 @@ def _build_vllm_kwargs(*, model_path: Path) -> Dict[str, Any]:
                 "VLLM_KWARGS_JSON cannot override: "
                 + ", ".join(sorted(reserved))
             )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=engine_options.json_overrides keys=%s safe_values=%s",
+                sorted(extra),
+                {
+                    key: _safe_log_value(key, value)
+                    for key, value in extra.items()
+                },
+            )
         kwargs.update(extra)
+    if not bool(kwargs.get("disable_log_requests", True)):
+        logger.warning(
+            "event=engine_options.request_logging_enabled max_log_len=%s "
+            "message=custom_vllm_may_log_user_prompts",
+            kwargs.get("max_log_len"),
+        )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=engine_options.build_complete elapsed_ms=%.3f option_count=%s "
+            "option_keys=%s summary=%s",
+            (perf_counter() - started) * 1000.0,
+            len(kwargs),
+            sorted(kwargs),
+            _engine_log_summary(kwargs),
+        )
     return kwargs
 
 
 def _vllm_engine_arg_defaults(*, model_path: Path) -> Dict[str, Any]:
     defaults = dict(_VLLM_ENGINE_ARG_DEFAULTS)
-    # SkillHub hard-codes its Qwen3.5-MoE architecture.  LLMGen normally
-    # exports Qwen3ForCausalLM, so keep the verified value as the fallback but
-    # use the actual exported model architecture when config.json provides it.
+    # SkillHub's original profile hard-codes a Qwen3.5-MoE-only architecture.
+    # This service targets dense Qwen3.5-2B instead: translate the official
+    # bundle class to the custom runtime's text-only class, preserve explicit
+    # alternative classes, and use the dense text-only class as the fallback.
     defaults["architectures"] = _model_architecture(
         model_path, fallback=_VLLM_910B_ARCHITECTURE
     )
@@ -1085,6 +2459,14 @@ def _vllm_engine_arg_defaults(*, model_path: Path) -> Dict[str, Any]:
     defaults["tensor_parallel_size"] = tensor_parallel_size
     defaults["decode_tensor_parallel_size"] = tensor_parallel_size
     defaults["prefix_sharing_type"] = "auto"
+    logger.debug(
+        "event=engine_options.defaults architecture=%s tensor_parallel_size=%s "
+        "decode_tensor_parallel_size=%s defaults=%s",
+        defaults["architectures"],
+        defaults["tensor_parallel_size"],
+        defaults["decode_tensor_parallel_size"],
+        len(defaults),
+    )
     return defaults
 
 
@@ -1092,12 +2474,41 @@ def _model_architecture(model_path: Path, *, fallback: str) -> str:
     config = _read_json_object(model_path / "config.json")
     raw_architectures = config.get("architectures")
     if isinstance(raw_architectures, str) and raw_architectures.strip():
-        return raw_architectures.strip()
+        selected = raw_architectures.strip()
+        logger.debug(
+            "event=model_architecture.resolved source=config_string architecture=%s",
+            selected,
+        )
+        return _custom_910b_architecture(selected)
     if isinstance(raw_architectures, list):
         for value in raw_architectures:
             if isinstance(value, str) and value.strip():
-                return value.strip()
+                selected = value.strip()
+                logger.debug(
+                    "event=model_architecture.resolved source=config_list "
+                    "architecture=%s",
+                    selected,
+                )
+                return _custom_910b_architecture(selected)
+    logger.warning(
+        "event=model_architecture.fallback architecture=%s config_value_type=%s",
+        fallback,
+        _type_name(raw_architectures),
+    )
     return fallback
+
+
+def _custom_910b_architecture(exported_architecture: str) -> str:
+    """Translate the official dense bundle class to SkillHub's text-only class."""
+
+    if exported_architecture in _QWEN35_DENSE_BUNDLE_ARCHITECTURES:
+        logger.debug(
+            "event=model_architecture.adapted exported=%s runtime=%s",
+            exported_architecture,
+            _VLLM_910B_ARCHITECTURE,
+        )
+        return _VLLM_910B_ARCHITECTURE
+    return exported_architecture
 
 
 def _env_engine_arg(
@@ -1106,7 +2517,17 @@ def _env_engine_arg(
     for env_name in _engine_arg_env_names(name, aliases=aliases):
         value = os.environ.get(env_name)
         if value is not None and str(value).strip():
-            return _parse_env_value(value, default)
+            parsed = _parse_env_value(value, default)
+            logger.debug(
+                "event=engine_options.environment_override option=%s env_name=%s "
+                "default_type=%s parsed_type=%s value=%s",
+                name,
+                env_name,
+                _type_name(default),
+                _type_name(parsed),
+                _safe_log_value(name, parsed),
+            )
+            return parsed
     return default
 
 
@@ -1160,19 +2581,45 @@ def load_vllm_model(
     caller.  ``RetriverTest.load()`` calls this same function.
     """
 
+    _configure_service_logging()
+    runtime_load_id = uuid.uuid4().hex[:12]
+    started = perf_counter()
+    phase = "resolve_arguments"
     resolved_model_path = str(Path(model_path).expanduser().resolve())
     resolved_tokenizer_path = str(Path(tokenizer_path).expanduser().resolve())
     options = dict(vllm_kwargs or {})
+    logger.info(
+        "event=runtime.load_begin runtime_load_id=%s model_name=%s "
+        "tokenizer_name=%s option_count=%s",
+        runtime_load_id,
+        Path(resolved_model_path).name,
+        Path(resolved_tokenizer_path).name,
+        len(options),
+    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.load_arguments runtime_load_id=%s model=%s tokenizer=%s "
+            "option_keys=%s summary=%s",
+            runtime_load_id,
+            resolved_model_path,
+            resolved_tokenizer_path,
+            sorted(options),
+            _engine_log_summary(options),
+        )
     reserved = {"model", "tokenizer", "engine_role"}.intersection(options)
     if reserved:
         raise ServiceConfigurationError(
             "vllm_kwargs cannot override: " + ", ".join(sorted(reserved))
         )
-    options.pop("request_model", None)
-    options.pop("model_name", None)
+    removed_service_options = {
+        key: options.pop(key)
+        for key in ("request_model", "model_name")
+        if key in options
+    }
     # SkillHub accepts device in its public config but uses it only for logs;
     # it is not part of the custom AsyncEngineArgs payload.
-    options.pop("device", None)
+    if "device" in options:
+        removed_service_options["device"] = options.pop("device")
     trust_remote_code = bool(options.pop("trust_remote_code", True))
     health_check_timeout = _pop_float_optional(
         options, "health_check_timeout"
@@ -1181,17 +2628,67 @@ def load_vllm_model(
         0.1, float(options.pop("health_check_interval", 1.0))
     )
     dtype = str(options.pop("dtype", _vllm_dtype()) or _VLLM_DTYPE)
+    request_timeout = _env_float_optional("PROGRESSIVE_REQUEST_TIMEOUT")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.load_normalized_options runtime_load_id=%s dtype=%s "
+            "trust_remote_code=%s health_check_timeout=%s "
+            "health_check_interval=%s request_timeout=%s removed_service_options=%s "
+            "engine_option_keys=%s",
+            runtime_load_id,
+            dtype,
+            trust_remote_code,
+            health_check_timeout,
+            health_check_interval,
+            request_timeout,
+            {
+                key: _safe_log_value(key, value)
+                for key, value in removed_service_options.items()
+            },
+            sorted(options),
+        )
+    phase = "import_runtime"
+    import_started = perf_counter()
     try:
+        import vllm
         from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
         from vllm.global_consts import EngineRole
     except ImportError as exc:
         raise RuntimeError(
             "service_910b requires the custom vLLM package used by SkillHub"
         ) from exc
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.dependencies_loaded runtime_load_id=%s elapsed_ms=%.3f "
+            "vllm_version=%s async_engine_args=%s async_engine=%s sampling_params=%s "
+            "engine_role_type=%s",
+            runtime_load_id,
+            (perf_counter() - import_started) * 1000.0,
+            _safe_getattr(vllm, "__version__", "<unknown>"),
+            _safe_getattr(AsyncEngineArgs, "__qualname__", _type_name(AsyncEngineArgs)),
+            _safe_getattr(AsyncLLMEngine, "__qualname__", _type_name(AsyncLLMEngine)),
+            _safe_getattr(SamplingParams, "__qualname__", _type_name(SamplingParams)),
+            _type_name(EngineRole.M),
+        )
+    phase = "load_tokenizer"
+    tokenizer_started = perf_counter()
     tokenizer = _load_chat_template_tokenizer(
         tokenizer_path=resolved_tokenizer_path,
         trust_remote_code=trust_remote_code,
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.tokenizer_ready runtime_load_id=%s elapsed_ms=%.3f "
+            "tokenizer_type=%s eos_token_id=%s vocab_size=%s "
+            "has_chat_template=%s",
+            runtime_load_id,
+            (perf_counter() - tokenizer_started) * 1000.0,
+            _type_name(tokenizer),
+            _token_ids_log_value([_safe_getattr(tokenizer, "eos_token_id")]),
+            _safe_getattr(tokenizer, "vocab_size"),
+            _safe_getattr(tokenizer, "chat_template", None) is not None,
+        )
+    phase = "build_engine_kwargs"
     engine_kwargs = _build_custom_engine_kwargs(
         model_path=resolved_model_path,
         tokenizer_path=resolved_tokenizer_path,
@@ -1200,29 +2697,60 @@ def load_vllm_model(
         engine_role=EngineRole.M,
         options=options,
     )
-    logger.info(
-        "initializing custom local vLLM 910B engine model=%s tokenizer=%s "
-        "dtype=%s kwargs=%s",
-        resolved_model_path,
-        resolved_tokenizer_path,
-        dtype,
-        sorted(engine_kwargs),
-    )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.engine_kwargs runtime_load_id=%s dtype=%s "
+            "option_count=%s option_keys=%s summary=%s",
+            runtime_load_id,
+            dtype,
+            len(engine_kwargs),
+            sorted(engine_kwargs),
+            _engine_log_summary(engine_kwargs),
+        )
+    phase = "build_engine_args"
+    engine_args_started = perf_counter()
     accepted_engine_kwargs = _filter_callable_kwargs(
         AsyncEngineArgs, engine_kwargs
     )
     engine_args = build_engine_args(AsyncEngineArgs, **engine_kwargs)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=runtime.engine_args_ready runtime_load_id=%s elapsed_ms=%.3f "
+            "accepted=%s skipped=%s engine_args_type=%s",
+            runtime_load_id,
+            (perf_counter() - engine_args_started) * 1000.0,
+            len(accepted_engine_kwargs),
+            sorted(set(engine_kwargs).difference(accepted_engine_kwargs)),
+            _type_name(engine_args),
+        )
+    phase = "construct_engine"
+    engine_construct_started = perf_counter()
     engine = AsyncLLMEngine.from_engine_args(engine_args)
+    logger.info(
+        "event=runtime.engine_constructed runtime_load_id=%s elapsed_ms=%.3f "
+        "engine_type=%s architecture=%s dtype=%s tp=%s pp=%s dp=%s",
+        runtime_load_id,
+        (perf_counter() - engine_construct_started) * 1000.0,
+        _type_name(engine),
+        engine_kwargs.get("architectures"),
+        dtype,
+        engine_kwargs.get("tensor_parallel_size"),
+        engine_kwargs.get("pipeline_parallel_size"),
+        engine_kwargs.get("data_parallel_size"),
+    )
+    phase = "create_async_loop"
     loop_runner = _AsyncLoopRunner()
     runtime = LocalVLLM910BRuntime(
         engine=engine,
         tokenizer=tokenizer,
         sampling_params_cls=SamplingParams,
         loop_runner=loop_runner,
-        request_timeout=_env_float_optional("PROGRESSIVE_REQUEST_TIMEOUT"),
+        request_timeout=request_timeout,
         engine_kwargs=accepted_engine_kwargs,
     )
     try:
+        phase = "start_engine"
+        startup_started = perf_counter()
         loop_runner.submit(
             _start_custom_engine(
                 engine=engine,
@@ -1234,9 +2762,44 @@ def load_vllm_model(
             # engine.load_model() and could otherwise let the engine start
             # after failure cleanup has already run.
             timeout=None,
+            operation="engine_startup",
+            request_id=runtime_load_id,
         )
-    except BaseException:
-        runtime.close()
+        logger.info(
+            "event=runtime.load_complete runtime_load_id=%s runtime_id=%s "
+            "elapsed_ms=%.3f startup_ms=%.3f resolved_max_model_len=%s",
+            runtime_load_id,
+            runtime.runtime_id,
+            (perf_counter() - started) * 1000.0,
+            (perf_counter() - startup_started) * 1000.0,
+            _custom_engine_max_model_len(runtime),
+        )
+    except BaseException as exc:
+        cleanup_started = perf_counter()
+        cleanup_error: BaseException | None = None
+        try:
+            runtime.close()
+        except BaseException as cleanup_exc:
+            cleanup_error = cleanup_exc
+        logger.exception(
+            "event=runtime.load_failed runtime_load_id=%s runtime_id=%s phase=%s "
+            "elapsed_ms=%.3f cleanup_ms=%.3f error_type=%s",
+            runtime_load_id,
+            runtime.runtime_id,
+            phase,
+            (perf_counter() - started) * 1000.0,
+            (perf_counter() - cleanup_started) * 1000.0,
+            type(exc).__name__,
+        )
+        if cleanup_error is not None:
+            logger.error(
+                "event=runtime.load_cleanup_failed runtime_load_id=%s "
+                "runtime_id=%s phase=%s cleanup_error_type=%s",
+                runtime_load_id,
+                runtime.runtime_id,
+                phase,
+                type(cleanup_error).__name__,
+            )
         raise
     return runtime
 
@@ -1270,7 +2833,7 @@ def _build_custom_engine_kwargs(
         "rope_scaling_type": None,
         "rope_scaling_factor": 1.0,
         "pipeline_parallel_size": 1,
-        "tensor_parallel_size": 2,
+        "tensor_parallel_size": _VLLM_TENSOR_PARALLEL_SIZE,
         "data_parallel_size": 1,
         "context_parallel_size": 1,
         "pipeline_parallel_layer_partitions": "",
@@ -1278,7 +2841,7 @@ def _build_custom_engine_kwargs(
         "enable_expert_parallel": False,
         "decode_enable_expert_parallel": False,
         "decode_pipeline_parallel_size": 1,
-        "decode_tensor_parallel_size": 2,
+        "decode_tensor_parallel_size": _VLLM_TENSOR_PARALLEL_SIZE,
         "decode_data_parallel_size": 1,
         "decode_context_parallel_size": 1,
         "block_size": 128,
@@ -1355,19 +2918,65 @@ def _build_custom_engine_kwargs(
         "detokenizer_group_workers": 1,
     }
     kwargs.update(dict(options or {}))
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=engine_kwargs.custom_built model_name=%s tokenizer_name=%s "
+            "dtype=%s trust_remote_code=%s role_type=%s option_count=%s "
+            "override_keys=%s summary=%s",
+            Path(model_path).name,
+            Path(tokenizer_path).name,
+            resolved_dtype,
+            trust_remote_code,
+            _type_name(engine_role),
+            len(kwargs),
+            sorted(options),
+            _engine_log_summary(kwargs),
+        )
     return kwargs
 
 
 def build_engine_args(async_engine_args_cls: Any, **kwargs: Any) -> Any:
+    started = perf_counter()
     filtered = _filter_callable_kwargs(async_engine_args_cls, kwargs)
     skipped = sorted(set(kwargs).difference(filtered))
     if skipped:
         logger.warning(
-            "current custom vLLM AsyncEngineArgs does not support options; "
-            "skipped=%s",
+            "event=engine_args.options_skipped class=%s skipped=%s",
+            _safe_getattr(
+                async_engine_args_cls,
+                "__qualname__",
+                _type_name(async_engine_args_cls),
+            ),
             skipped,
         )
-    return async_engine_args_cls(**filtered)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=engine_args.construct_begin class=%s provided=%s accepted=%s "
+            "skipped=%s summary=%s",
+            _safe_getattr(
+                async_engine_args_cls,
+                "__qualname__",
+                _type_name(async_engine_args_cls),
+            ),
+            len(kwargs),
+            len(filtered),
+            skipped,
+            _engine_log_summary(filtered),
+        )
+    result = async_engine_args_cls(**filtered)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=engine_args.construct_complete class=%s elapsed_ms=%.3f "
+            "result_type=%s",
+            _safe_getattr(
+                async_engine_args_cls,
+                "__qualname__",
+                _type_name(async_engine_args_cls),
+            ),
+            (perf_counter() - started) * 1000.0,
+            _type_name(result),
+        )
+    return result
 
 
 def _filter_callable_kwargs(
@@ -1376,28 +2985,89 @@ def _filter_callable_kwargs(
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=callable_kwargs.signature_unavailable callable=%s provided=%s",
+                _safe_getattr(
+                    callable_obj, "__qualname__", _type_name(callable_obj)
+                ),
+                len(kwargs),
+            )
         return dict(kwargs)
     if any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     ):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=callable_kwargs.accepts_var_keyword callable=%s provided=%s",
+                _safe_getattr(
+                    callable_obj, "__qualname__", _type_name(callable_obj)
+                ),
+                len(kwargs),
+            )
         return dict(kwargs)
     supported = set(signature.parameters)
-    return {key: value for key, value in kwargs.items() if key in supported}
+    filtered = {key: value for key, value in kwargs.items() if key in supported}
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=callable_kwargs.filtered callable=%s provided=%s accepted=%s "
+            "skipped=%s",
+            _safe_getattr(
+                callable_obj, "__qualname__", _type_name(callable_obj)
+            ),
+            len(kwargs),
+            len(filtered),
+            sorted(set(kwargs).difference(filtered)),
+        )
+    return filtered
 
 
 def _load_chat_template_tokenizer(
     *, tokenizer_path: str, trust_remote_code: bool
 ) -> Any:
+    started = perf_counter()
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=tokenizer.load_begin tokenizer=%s trust_remote_code=%s",
+            tokenizer_path,
+            trust_remote_code,
+        )
     try:
+        import transformers
         from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
             "service_910b requires transformers to load the Router tokenizer"
         ) from exc
-    return AutoTokenizer.from_pretrained(
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=tokenizer.dependency version=%s auto_tokenizer=%s",
+            _safe_getattr(transformers, "__version__", "<unknown>"),
+            _safe_getattr(
+                AutoTokenizer,
+                "__qualname__",
+                _type_name(AutoTokenizer),
+            ),
+        )
+    tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_path, trust_remote_code=bool(trust_remote_code)
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=tokenizer.load_complete tokenizer=%s elapsed_ms=%.3f "
+            "tokenizer_type=%s vocab_size=%s eos_token_id=%s bos_token_id=%s "
+            "pad_token_id=%s chat_template_state=%s",
+            tokenizer_path,
+            (perf_counter() - started) * 1000.0,
+            _type_name(tokenizer),
+            _safe_getattr(tokenizer, "vocab_size"),
+            _token_ids_log_value([_safe_getattr(tokenizer, "eos_token_id")]),
+            _token_ids_log_value([_safe_getattr(tokenizer, "bos_token_id")]),
+            _token_ids_log_value([_safe_getattr(tokenizer, "pad_token_id")]),
+            _safe_getattr(tokenizer, "chat_template", None) is not None,
+        )
+    return tokenizer
 
 
 async def _start_custom_engine(
@@ -1407,6 +3077,19 @@ async def _start_custom_engine(
     health_check_timeout: float | None,
 ) -> None:
     started = perf_counter()
+    attempt = 0
+
+    def emit(log_method: Any, message: str, *args: Any) -> None:
+        log_method(message, *args)
+
+    emit(
+        logger.info,
+        "event=engine.startup_begin engine_type=%s health_timeout=%s "
+        "health_interval=%s",
+        _type_name(engine),
+        health_check_timeout,
+        health_check_interval,
+    )
 
     def remaining_seconds() -> float | None:
         if health_check_timeout is None:
@@ -1423,17 +3106,69 @@ async def _start_custom_engine(
 
     load_model = getattr(getattr(engine, "engine", None), "load_model", None)
     if callable(load_model):
+        phase_started = perf_counter()
+        emit(
+            logger.info,
+            "event=engine.load_model_begin engine_type=%s",
+            _type_name(engine),
+        )
         load_model()
+        emit(
+            logger.info,
+            "event=engine.load_model_complete elapsed_ms=%.3f total_elapsed_ms=%.3f",
+            (perf_counter() - phase_started) * 1000.0,
+            (perf_counter() - started) * 1000.0,
+        )
+    else:
+        emit(
+            logger.warning,
+            "event=engine.load_model_skipped engine_type=%s reason=not_callable",
+            _type_name(engine),
+        )
     require_time_remaining("while loading model")
     start_background_loop = getattr(engine, "start_background_loop", None)
     if callable(start_background_loop):
+        phase_started = perf_counter()
+        emit(
+            logger.debug,
+            "event=engine.background_loop_begin total_elapsed_ms=%.3f",
+            (perf_counter() - started) * 1000.0,
+        )
         start_background_loop()
+        emit(
+            logger.info,
+            "event=engine.background_loop_started elapsed_ms=%.3f "
+            "total_elapsed_ms=%.3f",
+            (perf_counter() - phase_started) * 1000.0,
+            (perf_counter() - started) * 1000.0,
+        )
+    else:
+        emit(
+            logger.warning,
+            "event=engine.background_loop_skipped reason=not_callable"
+        )
     require_time_remaining("while starting the background loop")
     is_health = getattr(engine, "is_health", None)
     if not callable(is_health):
+        emit(
+            logger.warning,
+            "event=engine.health_check_skipped reason=not_callable "
+            "startup_elapsed_ms=%.3f",
+            (perf_counter() - started) * 1000.0,
+        )
         return
     while True:
+        attempt += 1
         remaining = require_time_remaining("during health check")
+        poll_started = perf_counter()
+        emit(
+            logger.debug,
+            "event=engine.health_poll_begin attempt=%s elapsed_ms=%.3f "
+            "remaining_seconds=%s",
+            attempt,
+            (poll_started - started) * 1000.0,
+            remaining,
+        )
         try:
             healthy = (
                 await is_health()
@@ -1441,16 +3176,48 @@ async def _start_custom_engine(
                 else await asyncio.wait_for(is_health(), timeout=remaining)
             )
         except asyncio.TimeoutError as exc:
+            emit(
+                logger.error,
+                "event=engine.health_poll_timeout attempt=%s poll_ms=%.3f "
+                "total_elapsed_ms=%.3f timeout_seconds=%s",
+                attempt,
+                (perf_counter() - poll_started) * 1000.0,
+                (perf_counter() - started) * 1000.0,
+                health_check_timeout,
+            )
             raise TimeoutError(
                 "custom vLLM engine startup timed out during health check"
             ) from exc
         require_time_remaining("during health check")
+        emit(
+            logger.debug,
+            "event=engine.health_poll_complete attempt=%s healthy=%s "
+            "poll_ms=%.3f total_elapsed_ms=%.3f",
+            attempt,
+            bool(healthy),
+            (perf_counter() - poll_started) * 1000.0,
+            (perf_counter() - started) * 1000.0,
+        )
         if healthy:
+            emit(
+                logger.info,
+                "event=engine.startup_complete attempts=%s elapsed_ms=%.3f",
+                attempt,
+                (perf_counter() - started) * 1000.0,
+            )
             return
         sleep_seconds = max(0.1, float(health_check_interval))
         remaining = require_time_remaining("during health check")
         if remaining is not None:
             sleep_seconds = min(sleep_seconds, remaining)
+        emit(
+            logger.debug,
+            "event=engine.health_poll_sleep attempt=%s sleep_seconds=%.3f "
+            "remaining_seconds=%s",
+            attempt,
+            sleep_seconds,
+            remaining,
+        )
         await asyncio.sleep(sleep_seconds)
 
 
@@ -1460,11 +3227,24 @@ async def _generate_on_910b_loop(
     prompt: str,
     prompt_token_ids: Sequence[int],
     sampling_params: Any,
+    request_id: str,
 ) -> Any:
+    started = perf_counter()
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=engine.generate_begin request_id=%s engine_type=%s prompt_chars=%s "
+            "prompt_tokens=%s prompt=%s token_ids=%s",
+            request_id,
+            _type_name(engine),
+            len(prompt),
+            len(prompt_token_ids),
+            _text_log_value(prompt),
+            _token_ids_log_value(prompt_token_ids),
+        )
     results_generator = engine.generate(
         prompt=prompt,
         sampling_params=sampling_params,
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
         prompt_token_ids=[int(token_id) for token_id in prompt_token_ids],
         tag=None,
         arrival_time=None,
@@ -1472,11 +3252,78 @@ async def _generate_on_910b_loop(
         scheduler_result=None,
         is_stream=False,
     )
+    logger.debug(
+        "event=engine.generate_iterator request_id=%s iterator_type=%s "
+        "create_elapsed_ms=%.3f",
+        request_id,
+        _type_name(results_generator),
+        (perf_counter() - started) * 1000.0,
+    )
     final_output = None
-    async for request_output in results_generator:
-        final_output = request_output
+    frame_count = 0
+    first_frame_ms: float | None = None
+    try:
+        async for request_output in results_generator:
+            frame_count += 1
+            if first_frame_ms is None:
+                first_frame_ms = (perf_counter() - started) * 1000.0
+            final_output = request_output
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    outputs = _output_field(request_output, "outputs")
+                    output_count = (
+                        len(outputs)
+                        if isinstance(outputs, Sequence)
+                        and not isinstance(outputs, (str, bytes, bytearray))
+                        else None
+                    )
+                except Exception as exc:
+                    output_count = f"<diagnostic-error {type(exc).__name__}>"
+                logger.debug(
+                    "event=engine.generate_frame request_id=%s frame=%s "
+                    "elapsed_ms=%.3f output_count=%s output_type=%s",
+                    request_id,
+                    frame_count,
+                    (perf_counter() - started) * 1000.0,
+                    output_count,
+                    _type_name(request_output),
+                )
+    except asyncio.CancelledError:
+        logger.warning(
+            "event=engine.generate_cancelled request_id=%s elapsed_ms=%.3f "
+            "frames=%s message=python_future_cancelled_engine_abort_not_confirmed",
+            request_id,
+            (perf_counter() - started) * 1000.0,
+            frame_count,
+        )
+        raise
+    except Exception as exc:
+        logger.debug(
+            "event=engine.generate_failed request_id=%s elapsed_ms=%.3f "
+            "frames=%s error_type=%s",
+            request_id,
+            (perf_counter() - started) * 1000.0,
+            frame_count,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise
     if final_output is None:
+        logger.error(
+            "event=engine.generate_empty request_id=%s elapsed_ms=%.3f frames=0",
+            request_id,
+            (perf_counter() - started) * 1000.0,
+        )
         raise RuntimeError("custom vLLM returned no request outputs")
+    logger.debug(
+        "event=engine.generate_complete request_id=%s elapsed_ms=%.3f "
+        "first_frame_ms=%s frames=%s final_type=%s",
+        request_id,
+        (perf_counter() - started) * 1000.0,
+        first_frame_ms,
+        frame_count,
+        _type_name(final_output),
+    )
     return final_output
 
 
@@ -1487,6 +3334,7 @@ def _build_910b_sampling_params(
     num_levels: int,
     trie: MultiPathTokenTrie,
 ) -> Any:
+    started = perf_counter()
     kwargs = {
         "temperature": 0.0,
         "max_tokens": int(output_budget),
@@ -1502,13 +3350,48 @@ def _build_910b_sampling_params(
             "the custom 910B vLLM SamplingParams does not expose "
             "request-level logits_processors"
         )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=sampling_params.construct_begin class=%s output_budget=%s "
+            "num_levels=%s trie_paths=%s trie_max_paths=%s kwargs=%s",
+            _safe_getattr(
+                sampling_params_cls,
+                "__qualname__",
+                _type_name(sampling_params_cls),
+            ),
+            output_budget,
+            num_levels,
+            len(trie.paths),
+            trie.max_paths,
+            {
+                key: (
+                    len(value)
+                    if key == "logits_processors" and isinstance(value, list)
+                    else value
+                )
+                for key, value in kwargs.items()
+            },
+        )
     try:
-        return sampling_params_cls(**kwargs)
+        result = sampling_params_cls(**kwargs)
     except TypeError as exc:
         raise RuntimeError(
             "the custom 910B vLLM SamplingParams must support LLMGen's "
             "request-level logits_processors"
         ) from exc
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=sampling_params.construct_complete class=%s elapsed_ms=%.3f "
+            "result_type=%s",
+            _safe_getattr(
+                sampling_params_cls,
+                "__qualname__",
+                _type_name(sampling_params_cls),
+            ),
+            (perf_counter() - started) * 1000.0,
+            _type_name(result),
+        )
+    return result
 
 
 def _custom_engine_max_model_len(runtime: LocalVLLM910BRuntime) -> int | None:
@@ -1516,21 +3399,29 @@ def _custom_engine_max_model_len(runtime: LocalVLLM910BRuntime) -> int | None:
 
     engine = runtime.engine
     for owner in (
-        getattr(engine, "llm_engine", None),
-        getattr(engine, "engine", None),
+        _safe_getattr(engine, "llm_engine", None),
+        _safe_getattr(engine, "engine", None),
         engine,
     ):
         if owner is None:
             continue
         for config_name in ("model_config", "engine_config", "vllm_config"):
-            config = getattr(owner, config_name, None)
-            nested = getattr(config, "model_config", config)
-            raw_value = getattr(nested, "max_model_len", None)
+            config = _safe_getattr(owner, config_name, None)
+            nested = _safe_getattr(config, "model_config", config)
+            raw_value = _safe_getattr(nested, "max_model_len", None)
             if (
                 isinstance(raw_value, (int, float))
                 and not isinstance(raw_value, bool)
                 and int(raw_value) > 0
             ):
+                logger.debug(
+                    "event=context_limit.runtime_resolved runtime_id=%s "
+                    "owner_type=%s config_name=%s max_model_len=%s",
+                    runtime.runtime_id,
+                    _type_name(owner),
+                    config_name,
+                    int(raw_value),
+                )
                 return int(raw_value)
     configured = runtime.engine_kwargs.get("max_model_len")
     if (
@@ -1538,7 +3429,17 @@ def _custom_engine_max_model_len(runtime: LocalVLLM910BRuntime) -> int | None:
         and not isinstance(configured, bool)
         and int(configured) > 0
     ):
+        logger.debug(
+            "event=context_limit.engine_args_fallback runtime_id=%s "
+            "max_model_len=%s",
+            runtime.runtime_id,
+            int(configured),
+        )
         return int(configured)
+    logger.debug(
+        "event=context_limit.unavailable runtime_id=%s",
+        runtime.runtime_id,
+    )
     return None
 
 
@@ -1546,24 +3447,88 @@ def _callable_accepts_keyword(callable_obj: object, name: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=callable_keyword.signature_unavailable callable=%s keyword=%s "
+                "assumed_supported=true",
+                _safe_getattr(
+                    callable_obj, "__qualname__", _type_name(callable_obj)
+                ),
+                name,
+            )
         return True
     if name in signature.parameters:
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=callable_keyword.supported callable=%s keyword=%s "
+                "support=explicit",
+                _safe_getattr(
+                    callable_obj, "__qualname__", _type_name(callable_obj)
+                ),
+                name,
+            )
         return True
-    return any(
+    supports_kwargs = any(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=callable_keyword.checked callable=%s keyword=%s support=%s",
+            _safe_getattr(
+                callable_obj, "__qualname__", _type_name(callable_obj)
+            ),
+            name,
+            "var_keyword" if supports_kwargs else "unsupported",
+        )
+    return supports_kwargs
 
 
-def _first_completion_output(request_output: Any) -> Any:
+def _first_completion_output(
+    request_output: Any, *, request_id: str | None = None
+) -> Any:
     outputs = _output_field(request_output, "outputs")
     if (
         not isinstance(outputs, Sequence)
         or isinstance(outputs, (str, bytes, bytearray))
         or not outputs
     ):
+        logger.error(
+            "event=completion.outputs_invalid request_output_type=%s "
+            "outputs_type=%s",
+            _type_name(request_output),
+            _type_name(outputs),
+        )
         raise RuntimeError("custom vLLM returned no Router completion outputs")
-    return outputs[0]
+    if len(outputs) > 1:
+        logger.warning(
+            "event=completion.multiple_outputs count=%s selected_index=0",
+            len(outputs),
+        )
+    first = outputs[0]
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            raw_token_ids = _output_field(first, "token_ids")
+            token_count: Any = (
+                len(raw_token_ids)
+                if isinstance(raw_token_ids, Sequence)
+                and not isinstance(raw_token_ids, (str, bytes, bytearray))
+                else None
+            )
+            finish_reason: Any = _output_field(first, "finish_reason")
+        except Exception as exc:
+            token_count = f"<diagnostic-error {type(exc).__name__}>"
+            finish_reason = token_count
+        logger.debug(
+            "event=completion.selected request_id=%s outputs=%s selected_type=%s "
+            "finish_reason=%s token_count=%s",
+            request_id,
+            len(outputs),
+            _type_name(first),
+            finish_reason,
+            token_count,
+        )
+    return first
 
 
 def _output_field(value: Any, name: str) -> Any:
@@ -1575,8 +3540,19 @@ def _output_field(value: Any, name: str) -> Any:
 def _pop_float_optional(options: dict[str, Any], key: str) -> float | None:
     value = options.pop(key, None)
     if value is None or not str(value).strip():
+        logger.debug(
+            "event=options.optional_float key=%s present=%s parsed=None",
+            key,
+            value is not None,
+        )
         return None
-    return float(value)
+    parsed = float(value)
+    logger.debug(
+        "event=options.optional_float key=%s present=true parsed=%s",
+        key,
+        parsed,
+    )
+    return parsed
 
 
 def _resolve_max_input_length(
@@ -1595,21 +3571,47 @@ def _resolve_max_input_length(
     ]
     total_limit = min(limits) if limits else 1024
     available = total_limit - output_budget
+    logger.debug(
+        "event=context_limit.resolve trained_max_length=%s engine_max_length=%s "
+        "valid_limits=%s selected_total_limit=%s output_budget=%s available=%s "
+        "explicit=%s",
+        trained_max_length,
+        engine_max_length,
+        limits,
+        total_limit,
+        output_budget,
+        available,
+        explicit,
+    )
     if available < 1:
         raise ServiceConfigurationError(
             "model context length leaves no room for a Router prompt"
         )
     if explicit is None:
+        logger.debug(
+            "event=context_limit.resolved source=automatic max_input_length=%s",
+            available,
+        )
         return available
     if explicit < 1 or explicit > available:
         raise ServiceConfigurationError(
             f"MAX_INPUT_LENGTH must be between 1 and {available}"
         )
+    logger.debug(
+        "event=context_limit.resolved source=environment max_input_length=%s",
+        explicit,
+    )
     return explicit
 
 
 def _load_router_settings(model_dir: Path) -> RouterManifestSettings:
+    started = perf_counter()
     manifest_path = model_dir / _ROUTER_MANIFEST_FILENAME
+    logger.debug(
+        "event=manifest.load_begin path=%s exists=%s",
+        manifest_path,
+        manifest_path.is_file(),
+    )
     if not manifest_path.is_file():
         raise ServiceConfigurationError(
             f"Router model is missing required prompt manifest: {manifest_path}"
@@ -1629,17 +3631,46 @@ def _load_router_settings(model_dir: Path) -> RouterManifestSettings:
         raise ServiceConfigurationError(
             "Router manifest has no valid training system_prompt"
         )
-    return RouterManifestSettings(
+    settings = RouterManifestSettings(
         max_length=max_length,
         system_prompt=raw_system_prompt,
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=manifest.load_complete path=%s elapsed_ms=%.3f schema_version=%s "
+            "phase=%s max_length=%s system_prompt_chars=%s system_prompt=%s keys=%s",
+            manifest_path,
+            (perf_counter() - started) * 1000.0,
+            manifest.get("schema_version"),
+            manifest.get("phase"),
+            settings.max_length,
+            len(settings.system_prompt),
+            _text_log_value(settings.system_prompt),
+            sorted(manifest),
+        )
+    return settings
 
 
 def _code_token_id_map(tokenizer: Any, tokens: Sequence[str]) -> dict[str, int]:
+    started = perf_counter()
+    logger.debug(
+        "event=tokenizer.virtual_tokens_begin tokenizer_type=%s token_count=%s",
+        _type_name(tokenizer),
+        len(tokens),
+    )
     mapping: dict[str, int] = {}
     used_ids: dict[int, str] = {}
     for token in tokens:
+        token_started = perf_counter()
         token_ids = tokenizer.encode(token, add_special_tokens=False)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "event=tokenizer.virtual_token_encoded token=%s token_ids=%s "
+                "elapsed_ms=%.3f",
+                _safe_log_value("virtual_token_text", token),
+                _token_ids_log_value(token_ids),
+                (perf_counter() - token_started) * 1000.0,
+            )
         if len(token_ids) != 1:
             raise ServiceConfigurationError(
                 f"hierarchical token {token!r} is not atomic for the Router tokenizer"
@@ -1651,69 +3682,197 @@ def _code_token_id_map(tokenizer: Any, tokens: Sequence[str]) -> dict[str, int]:
             )
         mapping[token] = token_id
         used_ids[token_id] = token
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=tokenizer.virtual_tokens_complete elapsed_ms=%.3f token_count=%s "
+            "token_ids=%s",
+            (perf_counter() - started) * 1000.0,
+            len(mapping),
+            _token_ids_log_value(sorted(mapping.values())),
+        )
     return mapping
 
 
 def _render_router_prompt(tokenizer: Any, query: str, system_prompt: str) -> str:
+    started = perf_counter()
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": query.strip()})
     apply_template = getattr(tokenizer, "apply_chat_template", None)
     if getattr(tokenizer, "chat_template", None) and callable(apply_template):
+        logger.debug(
+            "event=prompt.render_begin branch=chat_template tokenizer_type=%s "
+            "messages=%s query_chars=%s system_prompt_chars=%s",
+            _type_name(tokenizer),
+            len(messages),
+            len(query),
+            len(system_prompt),
+        )
         try:
-            return apply_template(
+            prompt = apply_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
             )
+            logger.debug(
+                "event=prompt.render_complete branch=chat_template_thinking_disabled "
+                "elapsed_ms=%.3f prompt_chars=%s prompt=%s",
+                (perf_counter() - started) * 1000.0,
+                len(prompt),
+                _text_log_value(prompt),
+            )
+            return prompt
         except TypeError:
-            return apply_template(
+            logger.debug(
+                "event=prompt.render_retry branch=chat_template_legacy "
+                "reason=type_error_from_enable_thinking",
+                exc_info=True,
+            )
+            prompt = apply_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
             )
+            logger.debug(
+                "event=prompt.render_complete branch=chat_template_legacy "
+                "elapsed_ms=%.3f prompt_chars=%s prompt=%s",
+                (perf_counter() - started) * 1000.0,
+                len(prompt),
+                _text_log_value(prompt),
+            )
+            return prompt
     system = f"System: {system_prompt.strip()}\n" if system_prompt else ""
-    return f"{system}User: {query.strip()}\nAssistant:"
+    prompt = f"{system}User: {query.strip()}\nAssistant:"
+    logger.debug(
+        "event=prompt.render_complete branch=plain_fallback tokenizer_type=%s "
+        "elapsed_ms=%.3f prompt_chars=%s prompt=%s query_chars=%s "
+        "system_prompt_chars=%s",
+        _type_name(tokenizer),
+        (perf_counter() - started) * 1000.0,
+        len(prompt),
+        _text_log_value(prompt),
+        len(query),
+        len(system_prompt),
+    )
+    return prompt
 
 
 def _shutdown_vllm(llm: Any | None) -> None:
     if llm is None:
+        logger.debug("event=shutdown.skipped reason=runtime_is_none")
         return
+    started = perf_counter()
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=shutdown.begin runtime_type=%s runtime_id=%s",
+            _type_name(llm),
+            _safe_getattr(llm, "runtime_id", None),
+        )
     targets = (
         llm,
         getattr(llm, "llm_engine", None),
         getattr(getattr(llm, "llm_engine", None), "model_executor", None),
     )
-    for target in targets:
+    for target_index, target in enumerate(targets):
         if target is None:
+            logger.debug(
+                "event=shutdown.target_skipped target_index=%s reason=none",
+                target_index,
+            )
             continue
         for method_name in ("shutdown", "close"):
             method = getattr(target, method_name, None)
             if callable(method):
+                operation_started = perf_counter()
+                logger.debug(
+                    "event=shutdown.operation_begin target_index=%s "
+                    "target_type=%s method=%s",
+                    target_index,
+                    _type_name(target),
+                    method_name,
+                )
                 try:
                     method()
                 except Exception:
-                    logger.exception("failed to %s vLLM runtime", method_name)
+                    logger.exception(
+                        "event=shutdown.operation_failed target_index=%s "
+                        "target_type=%s method=%s elapsed_ms=%.3f",
+                        target_index,
+                        _type_name(target),
+                        method_name,
+                        (perf_counter() - operation_started) * 1000.0,
+                    )
                     continue
+                logger.debug(
+                    "event=shutdown.complete target_index=%s target_type=%s "
+                    "method=%s operation_ms=%.3f total_ms=%.3f",
+                    target_index,
+                    _type_name(target),
+                    method_name,
+                    (perf_counter() - operation_started) * 1000.0,
+                    (perf_counter() - started) * 1000.0,
+                )
                 return
+            logger.debug(
+                "event=shutdown.method_skipped target_index=%s target_type=%s "
+                "method=%s reason=not_callable",
+                target_index,
+                _type_name(target),
+                method_name,
+            )
+    logger.warning(
+        "event=shutdown.no_supported_method runtime_type=%s elapsed_ms=%.3f",
+        _type_name(llm),
+        (perf_counter() - started) * 1000.0,
+    )
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
+    started = perf_counter()
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            is_file = path.is_file()
+            byte_count: Any = path.stat().st_size if is_file else None
+        except OSError as exc:
+            is_file = f"<diagnostic-error {type(exc).__name__}>"
+            byte_count = is_file
+        logger.debug(
+            "event=json.read_begin path=%s exists=%s bytes=%s",
+            path,
+            is_file,
+            byte_count,
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ServiceConfigurationError(f"invalid JSON object: {path}") from exc
     if not isinstance(payload, dict):
         raise ServiceConfigurationError(f"expected a JSON object: {path}")
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "event=json.read_complete path=%s elapsed_ms=%.3f keys=%s",
+            path,
+            (perf_counter() - started) * 1000.0,
+            sorted(payload),
+        )
     return payload
 
 
 def _load_mock_responses() -> dict[str, tuple[str, ...]]:
+    started = perf_counter()
     raw_payload = os.environ.get("MOCK_RESPONSES_JSON")
     if raw_payload is None or not raw_payload.strip():
-        return {"*": _DEFAULT_MOCK_RESPONSES}
+        responses = {"*": _DEFAULT_MOCK_RESPONSES}
+        logger.debug(
+            "event=mock_responses.loaded source=default elapsed_ms=%.3f "
+            "queries=%s total_results=%s",
+            (perf_counter() - started) * 1000.0,
+            len(responses),
+            sum(len(names) for names in responses.values()),
+        )
+        return responses
     try:
         payload = json.loads(raw_payload)
     except json.JSONDecodeError as exc:
@@ -1722,7 +3881,15 @@ def _load_mock_responses() -> dict[str, tuple[str, ...]]:
         ) from exc
 
     if isinstance(payload, list):
-        return {"*": _normalize_mock_names(payload, "mock fallback")}
+        responses = {"*": _normalize_mock_names(payload, "mock fallback")}
+        logger.debug(
+            "event=mock_responses.loaded source=list elapsed_ms=%.3f queries=%s "
+            "total_results=%s",
+            (perf_counter() - started) * 1000.0,
+            len(responses),
+            sum(len(names) for names in responses.values()),
+        )
+        return responses
     if not isinstance(payload, dict):
         raise ServiceConfigurationError(
             "MOCK_RESPONSES_JSON must be a result list or query-to-results object"
@@ -1740,6 +3907,14 @@ def _load_mock_responses() -> dict[str, tuple[str, ...]]:
         responses[query] = _normalize_mock_names(
             raw_names, f"mock response for {query!r}"
         )
+    logger.debug(
+        "event=mock_responses.loaded source=mapping elapsed_ms=%.3f queries=%s "
+        "total_results=%s has_fallback=%s",
+        (perf_counter() - started) * 1000.0,
+        len(responses),
+        sum(len(names) for names in responses.values()),
+        "*" in responses,
+    )
     return responses
 
 
@@ -1757,6 +3932,14 @@ def _normalize_mock_names(value: Any, label: str) -> tuple[str, ...]:
         if name not in seen:
             names.append(name)
             seen.add(name)
+    logger.debug(
+        "event=mock_responses.normalized label=%s input_count=%s output_count=%s "
+        "duplicates_removed=%s",
+        _text_log_value(label),
+        len(value),
+        len(names),
+        len(value) - len(names),
+    )
     return tuple(names)
 
 
