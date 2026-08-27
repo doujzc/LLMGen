@@ -1,0 +1,268 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v2",
+  "created_at": "2026-08-24T03:20:46.344468+00:00",
+  "config": {
+    "schema_version": 1,
+    "pipeline_version": "top1_controlled_multiturn_v2",
+    "seed": 20260824,
+    "target_count": 1500,
+    "single_turn_per_candidate": 30,
+    "intent_change_per_pair": 3,
+    "multi_turn_user_counts": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "require_no_personal_data": true,
+    "require_plan_fidelity": true,
+    "single_turn_confusions": {
+      "StockAdvice": [
+        "StockQuery",
+        "StockOther"
+      ],
+      "StockOther": [
+        "StockQuery",
+        "StockAdvice",
+        "CivicBoundHelper"
+      ],
+      "StockQuery": [
+        "StockAdvice",
+        "StockOther",
+        "CivicBoundHelper"
+      ],
+      "ProductGeneral": [
+        "ProductEcommerce",
+        "LifeExperience",
+        "TicketService",
+        "MedicalQuestionAnswer"
+      ],
+      "ProductEcommerce": [
+        "BeautyFashion",
+        "LifeExperience",
+        "FoodDiscovery",
+        "ProductGeneral"
+      ],
+      "ChitChat": [
+        "NoAvailable",
+        "LifeKnowledgeQA"
+      ],
+      "NoAvailable": [
+        "ChitChat",
+        "MedicalQuestionAnswer",
+        "CivicBoundHelper",
+        "TicketService",
+        "TravelGuide",
+        "LifeKnowledgeQA"
+      ],
+      "MedicalQuestionAnswer": [
+        "NoAvailable",
+        "BeautyFashion",
+        "FoodDiscovery",
+        "LifeKnowledgeQA",
+        "ProductGeneral"
+      ],
+      "CivicBoundHelper": [
+        "NoAvailable",
+        "LifeKnowledgeQA",
+        "StockOther",
+        "MedicalQuestionAnswer"
+      ],
+      "TicketService": [
+        "TravelGuide",
+        "NoAvailable",
+        "ProductGeneral"
+      ],
+      "TravelGuide": [
+        "TicketService",
+        "FoodDiscovery",
+        "LifeExperience",
+        "NoAvailable"
+      ],
+      "BeautyFashion": [
+        "ProductEcommerce",
+        "MedicalQuestionAnswer",
+        "LifeKnowledgeQA",
+        "LifeExperience"
+      ],
+      "FoodDiscovery": [
+        "MedicalQuestionAnswer",
+        "ProductEcommerce",
+        "LifeKnowledgeQA",
+        "TravelGuide"
+      ],
+      "LifeExperience": [
+        "LifeKnowledgeQA",
+        "ProductEcommerce",
+        "ProductGeneral",
+        "BeautyFashion",
+        "TravelGuide"
+      ],
+      "LifeKnowledgeQA": [
+        "LifeExperience",
+        "NoAvailable",
+        "MedicalQuestionAnswer",
+        "CivicBoundHelper",
+        "FoodDiscovery"
+      ]
+    },
+    "content_axes": {
+      "StockAdvice": [
+        "future_direction",
+        "target_recommendation",
+        "buy_sell_timing",
+        "position_sizing",
+        "trading_strategy"
+      ],
+      "StockOther": [
+        "company_operations",
+        "governance_and_equity",
+        "fund_etf_reit",
+        "bonds_fx_metals",
+        "personal_holdings_and_account"
+      ],
+      "StockQuery": [
+        "current_price_and_change",
+        "historical_kline",
+        "market_index",
+        "security_profile_and_code",
+        "announced_event_reaction",
+        "public_market_metrics"
+      ],
+      "ProductGeneral": [
+        "vehicle_or_housing",
+        "service_or_software",
+        "rights_or_license",
+        "custom_engineering",
+        "owned_product_fault",
+        "after_sales_and_order"
+      ],
+      "ProductEcommerce": [
+        "consumer_electronics",
+        "home_appliance",
+        "sports_and_outdoor_goods",
+        "office_and_study_goods",
+        "household_consumables",
+        "toys_and_hobby_goods"
+      ],
+      "ChitChat": [
+        "greeting_and_wakeup",
+        "thanks_and_farewell",
+        "emotion_sharing",
+        "assistant_identity",
+        "open_social_chat",
+        "casual_hobbies"
+      ],
+      "NoAvailable": [
+        "writing_or_translation",
+        "image_chart_or_media",
+        "programming_or_technical_task",
+        "weather_or_realtime_status",
+        "legal_or_academic_request",
+        "unsupported_external_execution",
+        "insufficient_input"
+      ],
+      "MedicalQuestionAnswer": [
+        "symptom_self_check",
+        "medication_safety",
+        "traditional_chinese_medicine",
+        "medical_report_interpretation",
+        "hospital_recommendation",
+        "department_recommendation",
+        "disease_related_diet"
+      ],
+      "CivicBoundHelper": [
+        "insurance_policy",
+        "subsidy_policy",
+        "real_estate_policy",
+        "provident_fund_policy",
+        "social_security_policy",
+        "tax_policy",
+        "medical_insurance_policy",
+        "official_charter"
+      ],
+      "TicketService": [
+        "rail_ticket",
+        "flight_ticket",
+        "coach_ticket",
+        "fare_and_availability",
+        "departure_arrival_constraints",
+        "vehicle_or_flight_details",
+        "ticket_purchase"
+      ],
+      "TravelGuide": [
+        "itinerary_planning",
+        "attraction_pitfalls",
+        "accommodation_area",
+        "photo_location",
+        "family_trip",
+        "holiday_off_peak",
+        "local_transport_experience"
+      ],
+      "BeautyFashion": [
+        "skin_care_selection",
+        "makeup_steps",
+        "color_and_shade",
+        "outfit_formula",
+        "body_shape_styling",
+        "sensitive_skin_care",
+        "personal_image"
+      ],
+      "FoodDiscovery": [
+        "restaurant_discovery",
+        "recipe_method",
+        "ingredient_selection",
+        "fitness_diet",
+        "local_snacks",
+        "daily_meal_pairing"
+      ],
+      "LifeExperience": [
+        "renovation_pitfalls",
+        "home_appliance_use",
+        "pet_care",
+        "parenting_practice",
+        "storage_and_cleaning",
+        "digital_home_experience",
+        "household_maintenance"
+      ],
+      "LifeKnowledgeQA": [
+        "household_safety",
+        "everyday_ingredients",
+        "daily_physics",
+        "materials_and_chemistry",
+        "appliance_principles",
+        "nonprofessional_interest_science"
+      ]
+    },
+    "generation_boundary_guidance": "- 所有样本只体现语义目标，不把讯飞晓医、携程、同程、小红书或问一问写成触发词。不得写入姓名、手机号、身份证号、精确住址、订单号、票号、病历号或其它个人标识，即使是虚构号码也不允许。\n- 按最后一轮要求的最终交付物判别，不得只看主题。代写、翻译、制图、编程、替用户发送消息或外部执行等未提供能力，即使主题涉及售后、政策、医疗、票务或旅行，也应生成 NoAvailable；仅咨询相应信息或使用已明确支持的查询、购买能力时才归专属候选。\n- 专属垂类优先于通用商品类：护肤彩妆穿搭经验归 BeautyFashion；菜谱、餐厅、食材和日常饮食经验归 FoodDiscovery；家居家电、数码、宠物、育儿和生活技巧的选用经验归 LifeExperience；轻量生活原理科普归 LifeKnowledgeQA。只有具体普通零售商品的平台检索、型号、价格、优惠、库存或下单才归 ProductEcommerce。\n- ProductGeneral 只处理未被专属垂类覆盖的非普通零售对象，以及具体已购商品的故障、维修、售后、物流和订单信息咨询；不得生成代写或外发工单，不得生成医疗问答、票务查询、旅行攻略或普通生活经验。\n- MedicalQuestionAnswer 处理个人健康症状、合理用药信息、中医辨证、报告解读、医院科室和疾病相关饮食建议；确诊、处方、急救、挂号缴费买药执行和论文级研究应生成 NoAvailable。\n- CivicBoundHelper 必须同时位于保险、补贴、不动产、公积金、社保、税务或医保政务域，并在自然请求中明确出现“政策”“发文”或“章程”至少一个正式文件词；近义但没有这些显式词、含这些词但不在政务域的请求都不得归入该类。\n- TicketService 只处理火车、汽车和飞机票的班次、余票、价格、详情、查询与购买；晚点、签证和酒店实时预订不属于它。精确票务需求归 TicketService，目的地规划、景点住宿区域和当地交通经验归 TravelGuide。\n- TravelGuide 与 FoodDiscovery 同时可能出现目的地餐饮时，整体行程安排归 TravelGuide，独立餐厅或菜品发现归 FoodDiscovery。\n- StockQuery 只查询已经存在的股票或证券公开行情事实；未来预测、标的推荐、买卖和仓位决策属于 StockAdvice；公司经营、基金及其它金融资产属于 StockOther。\n- assistant 回复要简洁自然；对实时政策、票价班次、医学和金融内容不得编造具体数值或冒充权威结论，可通过追问、说明所需信息或概括性回应推进对话。\n- 单轮样本要围绕计划中的 contrast_candidate 制造真实边界差异，但目标必须唯一、明确，不能把两个任务硬拼在一起。",
+    "generator_model": "Deepseek-V4-Flash-0731",
+    "labeler_model": "GLM-5.2",
+    "reviewer_model": "Qwen3.7-Plus",
+    "plan_auditor_model": "Qwen3.7-Plus",
+    "generator_temperature": 0.9,
+    "judge_temperature": 0.0,
+    "generation_batch_size": 2,
+    "judgment_batch_size": 8,
+    "max_workers": 4,
+    "max_sample_attempts": 12,
+    "request_attempts": 4,
+    "request_timeout_seconds": 180,
+    "generation_max_tokens": 7000,
+    "judgment_max_tokens": 7000
+  },
+  "inputs": {
+    "candidate_registry": {
+      "path": "/Users/tourxu/Codes/LLMGen/configs/top1_candidates_v2.json",
+      "sha256": "79e3d52a30c32074687d72f48483d348e34d985c429ec61ea2cc180886503417"
+    },
+    "taxonomy_data": {
+      "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_labeldesc_v2.jsonl",
+      "sha256": "8f196c9849f0c4f4157a1dcf62c024c8287f8ec3873d74433c5cb92ef5530a16"
+    }
+  },
+  "endpoint_sha256": "a683b480f841b79bb8c4fe6132001ee8c6a6a9ae8605caff48aa1acb19bbdeb8",
+  "taxonomy_prompt_sha256": "02edb855de6a002d5fc2ab54a9c0a8369e5c0dbe504204850c488de83aa5dd18",
+  "planned_rows": 1500,
+  "run_signature": "d2f52c8a2ab9c54385bbba67b9540390d5ae06823134a88c662201c087ce8dcf"
+}

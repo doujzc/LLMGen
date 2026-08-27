@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v2",
+  "created_at": "2026-08-24T02:33:13.483155+00:00",
+  "config": {
+    "schema_version": 1,
+    "pipeline_version": "top1_controlled_multiturn_v2",
+    "seed": 20260824,
+    "target_count": 1500,
+    "single_turn_per_candidate": 30,
+    "intent_change_per_pair": 3,
+    "multi_turn_user_counts": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "single_turn_confusions": {
+      "StockAdvice": [
+        "StockQuery",
+        "StockOther",
+        "NoAvailable"
+      ],
+      "StockOther": [
+        "StockQuery",
+        "StockAdvice",
+        "CivicBoundHelper"
+      ],
+      "StockQuery": [
+        "StockAdvice",
+        "StockOther",
+        "CivicBoundHelper"
+      ],
+      "ProductGeneral": [
+        "ProductEcommerce",
+        "LifeExperience",
+        "TicketService",
+        "MedicalQuestionAnswer"
+      ],
+      "ProductEcommerce": [
+        "BeautyFashion",
+        "LifeExperience",
+        "FoodDiscovery",
+        "ProductGeneral"
+      ],
+      "ChitChat": [
+        "NoAvailable",
+        "LifeKnowledgeQA"
+      ],
+      "NoAvailable": [
+        "ChitChat",
+        "MedicalQuestionAnswer",
+        "CivicBoundHelper",
+        "TicketService",
+        "TravelGuide",
+        "LifeKnowledgeQA"
+      ],
+      "MedicalQuestionAnswer": [
+        "NoAvailable",
+        "BeautyFashion",
+        "FoodDiscovery",
+        "LifeKnowledgeQA",
+        "ProductGeneral"
+      ],
+      "CivicBoundHelper": [
+        "NoAvailable",
+        "LifeKnowledgeQA",
+        "StockOther",
+        "MedicalQuestionAnswer"
+      ],
+      "TicketService": [
+        "TravelGuide",
+        "NoAvailable",
+        "ProductGeneral"
+      ],
+      "TravelGuide": [
+        "TicketService",
+        "FoodDiscovery",
+        "LifeExperience",
+        "NoAvailable"
+      ],
+      "BeautyFashion": [
+        "ProductEcommerce",
+        "MedicalQuestionAnswer",
+        "LifeKnowledgeQA",
+        "LifeExperience"
+      ],
+      "FoodDiscovery": [
+        "MedicalQuestionAnswer",
+        "ProductEcommerce",
+        "LifeKnowledgeQA",
+        "TravelGuide"
+      ],
+      "LifeExperience": [
+        "LifeKnowledgeQA",
+        "ProductEcommerce",
+        "ProductGeneral",
+        "BeautyFashion",
+        "TravelGuide"
+      ],
+      "LifeKnowledgeQA": [
+        "LifeExperience",
+        "NoAvailable",
+        "MedicalQuestionAnswer",
+        "CivicBoundHelper",
+        "FoodDiscovery"
+      ]
+    },
+    "generation_boundary_guidance": "- 所有样本只体现语义目标，不把讯飞晓医、携程、同程、小红书或问一问写成触发词。\n- 专属垂类优先于通用商品类：护肤彩妆穿搭经验归 BeautyFashion；菜谱、餐厅、食材和日常饮食经验归 FoodDiscovery；家居家电、数码、宠物、育儿和生活技巧的选用经验归 LifeExperience；轻量生活原理科普归 LifeKnowledgeQA。只有具体普通零售商品的平台检索、型号、价格、优惠、库存或下单才归 ProductEcommerce。\n- ProductGeneral 只处理未被专属垂类覆盖的非普通零售对象，以及具体已购商品的故障、维修、售后、物流和订单事务；不得生成医疗问答、票务、旅行攻略或普通生活经验。\n- MedicalQuestionAnswer 处理个人健康症状、合理用药信息、中医辨证、报告解读、医院科室和疾病相关饮食建议；确诊、处方、急救、挂号缴费买药执行和论文级研究应生成 NoAvailable。\n- CivicBoundHelper 必须同时位于保险、补贴、不动产、公积金、社保、税务或医保政务域，并在自然请求中明确出现“政策”“发文”或“章程”至少一个正式文件词；近义但没有这些显式词、含这些词但不在政务域的请求都不得归入该类。\n- TicketService 只处理火车、汽车和飞机票的班次、余票、价格、详情、查询与购买；晚点、签证和酒店实时预订不属于它。精确票务需求归 TicketService，目的地规划、景点住宿区域和当地交通经验归 TravelGuide。\n- TravelGuide 与 FoodDiscovery 同时可能出现目的地餐饮时，整体行程安排归 TravelGuide，独立餐厅或菜品发现归 FoodDiscovery。\n- StockQuery 只查询已经存在的股票或证券公开行情事实；未来预测、标的推荐、买卖和仓位决策属于 StockAdvice；公司经营、基金及其它金融资产属于 StockOther。\n- 单轮样本要围绕计划中的 contrast_candidate 制造真实边界差异，但目标必须唯一、明确，不能把两个任务硬拼在一起。",
+    "generator_model": "Deepseek-V4-Flash-0731",
+    "labeler_model": "GLM-5.2",
+    "reviewer_model": "Qwen3.7-Plus",
+    "generator_temperature": 0.9,
+    "judge_temperature": 0.0,
+    "generation_batch_size": 2,
+    "judgment_batch_size": 8,
+    "max_workers": 4,
+    "max_sample_attempts": 12,
+    "request_attempts": 4,
+    "request_timeout_seconds": 180,
+    "generation_max_tokens": 7000,
+    "judgment_max_tokens": 7000
+  },
+  "inputs": {
+    "candidate_registry": {
+      "path": "/Users/tourxu/Codes/LLMGen/configs/top1_candidates_v2.json",
+      "sha256": "79e3d52a30c32074687d72f48483d348e34d985c429ec61ea2cc180886503417"
+    },
+    "taxonomy_data": {
+      "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_labeldesc_v2.jsonl",
+      "sha256": "0c999d14eae617c2d569b7bb5691068e28019d912745b9528e713d2e938e4fcf"
+    }
+  },
+  "endpoint_sha256": "a683b480f841b79bb8c4fe6132001ee8c6a6a9ae8605caff48aa1acb19bbdeb8",
+  "taxonomy_prompt_sha256": "828c88e8cb6ee88c451835a13ebd0c1262231d16e578918e2cae4b6991ca8bc6",
+  "planned_rows": 1500,
+  "run_signature": "e985524b7591b46cabeea96289d1dd5436897d44a2a7d6175bebaaf1f30c7e1d"
+}

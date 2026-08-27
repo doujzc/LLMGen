@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "generator_version": "intent_change_v1",
+  "seed": 20260817,
+  "per_directed_pair": 10,
+  "rows": 420,
+  "source_data": {
+    "path": "/Users/tourxu/Codes/PromptGen/data/xiaoyi_intent_v1.jsonl",
+    "sha256": "8b46dccc67bdbdbc9dd4e3ab975560290852e4f397c34b6914a9d82bd2540584"
+  },
+  "reserved_id_files": [
+    {
+      "path": "/Users/tourxu/Codes/PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit.txt",
+      "sha256": "bee900c0a5f4dab430ba6ab881510434ccd808891fc6d46600b6f34fc2e0e3ef"
+    },
+    {
+      "path": "/Users/tourxu/Codes/PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_2.txt",
+      "sha256": "f6cc14966b74bc0fef938e79616b33ed0dc8c742d868acabf8e9479b1b4e5c2a"
+    },
+    {
+      "path": "/Users/tourxu/Codes/PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_3.txt",
+      "sha256": "f1ad52132da3335150affa7bcf4e44df620d8b69c504788de0943d7a426af004"
+    },
+    {
+      "path": "/Users/tourxu/Codes/PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_4.txt",
+      "sha256": "e3a38b90a84d8ce49f51cff0b5d3482e07d6cae76bd1be2d73c77fb8e5a876fd"
+    },
+    {
+      "path": "/Users/tourxu/Codes/PromptGen/eval/cohorts/xiaoyi_v1_reserved_audit_5.txt",
+      "sha256": "3b5c315700571cb99c8c5d83c98fb930273d76819122bd7a01aafa5423701fc2"
+    }
+  ],
+  "reserved_ids_excluded": 2824,
+  "independent_chitchat_seeds": 20,
+  "target_excluded_scenario_families": [
+    "oos_no_available_insufficient_reference"
+  ],
+  "source_candidate_counts": {
+    "ChitChat": 60,
+    "NoAvailable": 60,
+    "ProductEcommerce": 60,
+    "ProductGeneral": 60,
+    "StockAdvice": 60,
+    "StockOther": 60,
+    "StockQuery": 60
+  },
+  "target_candidate_counts": {
+    "ChitChat": 60,
+    "NoAvailable": 60,
+    "ProductEcommerce": 60,
+    "ProductGeneral": 60,
+    "StockAdvice": 60,
+    "StockOther": 60,
+    "StockQuery": 60
+  },
+  "transition_style_counts": {
+    "direct": 420
+  },
+  "directed_pair_counts": {
+    "ChitChat->NoAvailable": 10,
+    "ChitChat->ProductEcommerce": 10,
+    "ChitChat->ProductGeneral": 10,
+    "ChitChat->StockAdvice": 10,
+    "ChitChat->StockOther": 10,
+    "ChitChat->StockQuery": 10,
+    "NoAvailable->ChitChat": 10,
+    "NoAvailable->ProductEcommerce": 10,
+    "NoAvailable->ProductGeneral": 10,
+    "NoAvailable->StockAdvice": 10,
+    "NoAvailable->StockOther": 10,
+    "NoAvailable->StockQuery": 10,
+    "ProductEcommerce->ChitChat": 10,
+    "ProductEcommerce->NoAvailable": 10,
+    "ProductEcommerce->ProductGeneral": 10,
+    "ProductEcommerce->StockAdvice": 10,
+    "ProductEcommerce->StockOther": 10,
+    "ProductEcommerce->StockQuery": 10,
+    "ProductGeneral->ChitChat": 10,
+    "ProductGeneral->NoAvailable": 10,
+    "ProductGeneral->ProductEcommerce": 10,
+    "ProductGeneral->StockAdvice": 10,
+    "ProductGeneral->StockOther": 10,
+    "ProductGeneral->StockQuery": 10,
+    "StockAdvice->ChitChat": 10,
+    "StockAdvice->NoAvailable": 10,
+    "StockAdvice->ProductEcommerce": 10,
+    "StockAdvice->ProductGeneral": 10,
+    "StockAdvice->StockOther": 10,
+    "StockAdvice->StockQuery": 10,
+    "StockOther->ChitChat": 10,
+    "StockOther->NoAvailable": 10,
+    "StockOther->ProductEcommerce": 10,
+    "StockOther->ProductGeneral": 10,
+    "StockOther->StockAdvice": 10,
+    "StockOther->StockQuery": 10,
+    "StockQuery->ChitChat": 10,
+    "StockQuery->NoAvailable": 10,
+    "StockQuery->ProductEcommerce": 10,
+    "StockQuery->ProductGeneral": 10,
+    "StockQuery->StockAdvice": 10,
+    "StockQuery->StockOther": 10
+  },
+  "output": {
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/top1_intent_change_v1.jsonl",
+    "sha256": "c4841321a0bd61cc376af51557fb9b841fce33ba245cb1e5f439358c75f887bc"
+  }
+}

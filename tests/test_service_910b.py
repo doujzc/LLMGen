@@ -330,6 +330,7 @@ class SelfContainedService910BTest(unittest.TestCase):
                 "logging",
                 "os",
                 "pathlib",
+                "sys",
                 "threading",
                 "time",
                 "transformers",
@@ -364,13 +365,55 @@ class SelfContainedService910BTest(unittest.TestCase):
             )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+        stdout_lines = [line for line in completed.stdout.splitlines() if line]
+        log_lines = [
+            line
+            for line in stdout_lines
+            if line.startswith(service_910b._LOG_MARKER)
+        ]
+        payload_lines = [
+            line
+            for line in stdout_lines
+            if not line.startswith(service_910b._LOG_MARKER)
+        ]
+        self.assertTrue(log_lines)
+        self.assertEqual(len(payload_lines), 1)
         self.assertEqual(
-            json.loads(completed.stdout.strip()),
+            json.loads(payload_lines[0]),
             ["天气查询", "空气质量"],
         )
-        self.assertIn(service_910b._LOG_MARKER, completed.stderr)
-        self.assertIn("event=service.load_complete", completed.stderr)
-        self.assertIn("event=service.calc_complete", completed.stderr)
+        self.assertTrue(
+            all(line.count(service_910b._LOG_MARKER) == 1 for line in log_lines)
+        )
+        stdout_logs = "\n".join(log_lines)
+        self.assertIn(service_910b._LOG_MARKER, stdout_logs)
+        for event in (
+            "event=service.load_complete",
+            "event=service.calc_complete",
+            "event=service.close_complete",
+        ):
+            self.assertEqual(stdout_logs.count(event), 1)
+        self.assertEqual(completed.stderr, "")
+
+    def test_service_logger_is_bound_only_to_stdout(self) -> None:
+        self.assertFalse(service_910b.logger.propagate)
+        self.assertFalse(service_910b.logger.disabled)
+        owned_handlers = [
+            handler
+            for handler in service_910b.logger.handlers
+            if getattr(handler, service_910b._STDOUT_HANDLER_TAG, False)
+        ]
+        self.assertEqual(len(owned_handlers), 1)
+        self.assertEqual(len(service_910b.logger.handlers), 1)
+        handler = owned_handlers[0]
+        self.assertIsInstance(handler, logging.StreamHandler)
+        self.assertEqual(handler.level, logging.NOTSET)
+        owned_filters = [
+            log_filter
+            for log_filter in service_910b.logger.filters
+            if getattr(log_filter, service_910b._LOG_FILTER_TAG, False)
+        ]
+        self.assertEqual(len(owned_filters), 1)
 
     def test_debug_logs_have_marker_trace_id_and_hidden_text(self) -> None:
         sensitive_query = "SENSITIVE-QUERY-SHOULD-STAY-HIDDEN"

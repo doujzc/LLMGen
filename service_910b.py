@@ -35,8 +35,9 @@ results.  Structured query and prompt fields stay hidden unless
 require ``SERVICE_910B_LOG_TOKEN_IDS=1`` and
 ``SERVICE_910B_LOG_TRACEBACKS=1`` respectively.  Tracebacks are intended for
 development because third-party exception messages can contain request text.
-The script preserves the host's logging pipeline; use a non-blocking handler
-for verbose tracing because handler latency counts toward request/startup time.
+Service records are written directly to stdout and do not propagate through
+the host/root logger.  Stdout backpressure therefore counts toward
+request/startup time, especially with verbose per-token tracing enabled.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import sys
 import threading
 from time import perf_counter
 from typing import Any, Dict, Iterable, Mapping, Sequence
@@ -57,6 +59,8 @@ import uuid
 
 
 _LOG_MARKER = "[[LLMGEN-910B]]"
+_LOG_FILTER_TAG = "_llmgen_service_910b_marker_filter"
+_STDOUT_HANDLER_TAG = "_llmgen_service_910b_stdout_handler"
 
 
 class _ServiceLogMarker(logging.Filter):
@@ -95,8 +99,32 @@ class _ServiceLogMarker(logging.Filter):
 
 
 logger = logging.getLogger("web_demo.service_910b")
-if not any(isinstance(item, _ServiceLogMarker) for item in logger.filters):
-    logger.addFilter(_ServiceLogMarker())
+for _existing_filter in tuple(logger.filters):
+    if getattr(_existing_filter, _LOG_FILTER_TAG, False):
+        logger.removeFilter(_existing_filter)
+_service_log_marker = _ServiceLogMarker()
+setattr(_service_log_marker, _LOG_FILTER_TAG, True)
+logger.addFilter(_service_log_marker)
+
+
+def _install_stdout_log_handler() -> None:
+    """Route this service's records directly to stdout without propagation."""
+
+    for handler in tuple(logger.handlers):
+        logger.removeHandler(handler)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    setattr(stdout_handler, _STDOUT_HANDLER_TAG, True)
+    stdout_handler.setLevel(logging.NOTSET)
+    # Keep the grep marker at the start of every physical service-log line.
+    stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(stdout_handler)
+    logger.propagate = False
+    logger.disabled = False
+    if logger.level == logging.NOTSET:
+        logger.setLevel(logging.INFO)
+
+
+_install_stdout_log_handler()
 
 _VLLM_TENSOR_PARALLEL_SIZE = 1
 _VLLM_DTYPE = "bfloat16"
@@ -232,7 +260,7 @@ class ServiceConfigurationError(RuntimeError):
 
 
 def _configure_service_logging() -> None:
-    """Apply the optional service-local log level without touching root logging."""
+    """Apply the service-local log level without touching root logging."""
 
     raw_level = os.environ.get("SERVICE_910B_LOG_LEVEL", "").strip()
     if raw_level:
@@ -242,7 +270,7 @@ def _configure_service_logging() -> None:
             level = getattr(logging, raw_level.upper(), None)
         if not isinstance(level, int):
             logger.warning(
-                "event=logging.invalid_level value=%r; inheriting configured level",
+                "event=logging.invalid_level value=%r; retaining configured level",
                 raw_level,
             )
         else:
@@ -4000,7 +4028,8 @@ def _coerce_optional_int(value: Any) -> int | None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    # Third-party/root records also use stdout when this file is run directly.
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     service = RetriverTest()
     try:
         service.load()

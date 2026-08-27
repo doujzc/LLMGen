@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v2",
+  "updated_at": "2026-08-24T10:17:33.119258+00:00",
+  "complete": false,
+  "planned_rows": 1500,
+  "accepted_rows": 6,
+  "unresolved_rows": 1494,
+  "attempts": 101,
+  "rejected_attempts": 95,
+  "acceptance_rate_per_attempt": 0.0594059405940594,
+  "candidate_counts": {
+    "ChitChat": 1,
+    "MedicalQuestionAnswer": 1,
+    "StockAdvice": 1,
+    "TicketService": 1,
+    "TravelGuide": 2
+  },
+  "phenomenon_counts": {
+    "single_turn": 6
+  },
+  "source_candidate_counts": {},
+  "rejection_reason_counts": {
+    "contrast_contrast_is_plausible": 2,
+    "contrast_contrast_link_natural": 2,
+    "contrast_crosscheck_1:expected scenario_id missing from response.audits": 8,
+    "contrast_crosscheck_1:response.audits[2] has an unexpected scenario_id": 8,
+    "dialogue_quality_crosscheck_1:temporal_context_consistent must be boolean": 8,
+    "dialogue_quality_natural_dialogue": 27,
+    "dialogue_quality_opening_context_valid": 5,
+    "directness_final_request_failed": 9,
+    "directness_not_only_new_request": 9,
+    "directness_references_previous_exchange": 3,
+    "directness_transition_or_acknowledgment": 1,
+    "expected 5 alternating messages, got 6": 4,
+    "expected 7 alternating messages, got 8": 2,
+    "expected 9 alternating messages, got 10": 1,
+    "generation_api_failure": 2,
+    "invalid model JSON: Expecting ',' delimiter": 34,
+    "labeler_api_failure": 8,
+    "labeler_label_mismatch": 2,
+    "labeler_phenomenon_mismatch": 4,
+    "missing_contrast_audit": 8,
+    "missing_dialogue_quality_audit": 8,
+    "missing_labeler_judgment": 42,
+    "missing_plan_fidelity_audit": 9,
+    "missing_reviewer_judgment": 16,
+    "plan_fidelity_crosscheck_1:plan_fidelity_api_failure": 8,
+    "plan_fidelity_crosscheck_1:target_axis_unambiguous must be boolean": 1,
+    "plan_fidelity_target_axis_mismatch": 3,
+    "plan_fidelity_target_axis_unambiguous": 2,
+    "quality.assistant_no_fabricated_personal_experience must be boolean": 1,
+    "quality.assistant_no_unsupported_factual_claims must be boolean": 2,
+    "quality.conversation_context_consistent must be boolean": 1,
+    "quality.entity_and_facts_consistent must be boolean": 1,
+    "quality.no_candidate_name_leakage must be boolean": 1,
+    "quality.no_personal_data must be boolean": 1,
+    "quality.policy_boundary_respected must be boolean": 1,
+    "quality.single_turn_standalone must be boolean": 1,
+    "response.judgments must be a list": 16,
+    "reviewer_issues_not_empty": 2,
+    "reviewer_label_mismatch": 5,
+    "reviewer_non_intent_source_candidate": 1,
+    "reviewer_phenomenon_mismatch": 7
+  },
+  "model_usage": {
+    "contrast": {
+      "calls": 6,
+      "failed_calls": 0,
+      "prompt_tokens": 18329,
+      "completion_tokens": 17269,
+      "total_tokens": 35598
+    },
+    "contrast_crosscheck_1": {
+      "calls": 6,
+      "failed_calls": 0,
+      "prompt_tokens": 18608,
+      "completion_tokens": 20911,
+      "total_tokens": 39519
+    },
+    "dialogue_quality": {
+      "calls": 12,
+      "failed_calls": 0,
+      "prompt_tokens": 22718,
+      "completion_tokens": 52619,
+      "total_tokens": 75337
+    },
+    "dialogue_quality_crosscheck_1": {
+      "calls": 12,
+      "failed_calls": 0,
+      "prompt_tokens": 23025,
+      "completion_tokens": 38639,
+      "total_tokens": 61664
+    },
+    "directness": {
+      "calls": 4,
+      "failed_calls": 0,
+      "prompt_tokens": 9798,
+      "completion_tokens": 9526,
+      "total_tokens": 19324
+    },
+    "directness_crosscheck_1": {
+      "calls": 4,
+      "failed_calls": 0,
+      "prompt_tokens": 10017,
+      "completion_tokens": 7379,
+      "total_tokens": 17396
+    },
+    "generation": {
+      "calls": 51,
+      "failed_calls": 1,
+      "prompt_tokens": 523306,
+      "completion_tokens": 156037,
+      "total_tokens": 679343
+    },
+    "labeler": {
+      "calls": 12,
+      "failed_calls": 1,
+      "prompt_tokens": 43784,
+      "completion_tokens": 61361,
+      "total_tokens": 105145
+    },
+    "plan_fidelity": {
+      "calls": 12,
+      "failed_calls": 0,
+      "prompt_tokens": 95419,
+      "completion_tokens": 51547,
+      "total_tokens": 146966
+    },
+    "plan_fidelity_crosscheck_1": {
+      "calls": 12,
+      "failed_calls": 1,
+      "prompt_tokens": 89303,
+      "completion_tokens": 50836,
+      "total_tokens": 140139
+    },
+    "reviewer": {
+      "calls": 12,
+      "failed_calls": 0,
+      "prompt_tokens": 47624,
+      "completion_tokens": 48015,
+      "total_tokens": 95639
+    }
+  },
+  "output": {
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/generated/top1_controlled_multiturn_v2/train.jsonl",
+    "exists": true,
+    "sha256": "b87014712dc217e14c1a2715c2d26c4cc3bd45f84121f53365285442fd174298"
+  }
+}

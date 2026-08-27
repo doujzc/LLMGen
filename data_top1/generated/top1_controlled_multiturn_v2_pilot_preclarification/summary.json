@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v2",
+  "updated_at": "2026-08-24T03:02:21.417395+00:00",
+  "complete": false,
+  "planned_rows": 1500,
+  "accepted_rows": 150,
+  "unresolved_rows": 1350,
+  "attempts": 189,
+  "rejected_attempts": 39,
+  "acceptance_rate_per_attempt": 0.7936507936507936,
+  "candidate_counts": {
+    "BeautyFashion": 5,
+    "ChitChat": 14,
+    "CivicBoundHelper": 12,
+    "FoodDiscovery": 9,
+    "LifeExperience": 9,
+    "LifeKnowledgeQA": 7,
+    "MedicalQuestionAnswer": 13,
+    "NoAvailable": 8,
+    "ProductEcommerce": 9,
+    "ProductGeneral": 9,
+    "StockAdvice": 10,
+    "StockOther": 18,
+    "StockQuery": 6,
+    "TicketService": 11,
+    "TravelGuide": 10
+  },
+  "phenomenon_counts": {
+    "assistant_distractor": 5,
+    "clarification_revision": 8,
+    "contextual_follow_up": 11,
+    "intent_change": 61,
+    "progressive_reveal": 12,
+    "rambling": 4,
+    "single_turn": 49
+  },
+  "source_candidate_counts": {
+    "BeautyFashion": 5,
+    "ChitChat": 1,
+    "CivicBoundHelper": 3,
+    "FoodDiscovery": 4,
+    "LifeExperience": 5,
+    "LifeKnowledgeQA": 3,
+    "MedicalQuestionAnswer": 3,
+    "NoAvailable": 2,
+    "ProductEcommerce": 4,
+    "ProductGeneral": 5,
+    "StockAdvice": 4,
+    "StockOther": 4,
+    "StockQuery": 4,
+    "TicketService": 9,
+    "TravelGuide": 5
+  },
+  "rejection_reason_counts": {
+    "directness:response.audits must be a list": 2,
+    "directness_crosscheck_1:scenario missing from directness response": 1,
+    "directness_final_request_failed": 2,
+    "directness_not_only_new_request": 3,
+    "directness_references_previous_exchange": 3,
+    "directness_transition_or_acknowledgment": 3,
+    "duplicate scenario in judgment response": 1,
+    "expected 3 alternating messages, got 4": 5,
+    "expected 5 alternating messages, got 6": 2,
+    "expected 7 alternating messages, got 8": 3,
+    "expected 9 alternating messages, got 10": 1,
+    "invalid predicted candidate": 1,
+    "missing_directness_audit": 2,
+    "missing_labeler_judgment": 7,
+    "missing_reviewer_judgment": 16,
+    "model response must be a JSON object": 8,
+    "response.judgments must be a list": 8,
+    "scenario missing from judgment response": 5
+  },
+  "model_usage": {
+    "directness": {
+      "calls": 11,
+      "failed_calls": 0,
+      "prompt_tokens": 25751,
+      "completion_tokens": 22198,
+      "total_tokens": 47949
+    },
+    "directness_crosscheck_1": {
+      "calls": 11,
+      "failed_calls": 0,
+      "prompt_tokens": 26112,
+      "completion_tokens": 18793,
+      "total_tokens": 44905
+    },
+    "generation": {
+      "calls": 95,
+      "failed_calls": 0,
+      "prompt_tokens": 272804,
+      "completion_tokens": 263635,
+      "total_tokens": 536439
+    },
+    "labeler": {
+      "calls": 23,
+      "failed_calls": 0,
+      "prompt_tokens": 90085,
+      "completion_tokens": 53532,
+      "total_tokens": 143617
+    },
+    "reviewer": {
+      "calls": 23,
+      "failed_calls": 0,
+      "prompt_tokens": 88885,
+      "completion_tokens": 66536,
+      "total_tokens": 155421
+    }
+  },
+  "output": {
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/generated/top1_controlled_multiturn_v2/train.jsonl",
+    "exists": true,
+    "sha256": "ca14b52c6bda0a0ce0d639f28f16ea482454c67fe6492832f8485fe05ed7e468"
+  }
+}

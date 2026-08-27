@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "pipeline_version": "top1_controlled_multiturn_v2",
+  "updated_at": "2026-08-24T14:06:18.716703+00:00",
+  "complete": false,
+  "planned_rows": 1500,
+  "accepted_rows": 0,
+  "unresolved_rows": 1500,
+  "attempts": 202,
+  "rejected_attempts": 202,
+  "acceptance_rate_per_attempt": 0.0,
+  "candidate_counts": {},
+  "phenomenon_counts": {},
+  "source_candidate_counts": {},
+  "rejection_reason_counts": {
+    "dialogue_quality_assistant_no_unsupported_factual_claims": 6,
+    "dialogue_quality_natural_dialogue": 1,
+    "dialogue_quality_opening_context_valid": 1,
+    "directness_final_request_failed": 1,
+    "directness_not_only_new_request": 1,
+    "expected 9 alternating messages, got 7": 1,
+    "generation_api_failure": 101,
+    "labeler_issues_not_empty": 1,
+    "labeler_label_mismatch": 2,
+    "labeler_phenomenon_mismatch": 7,
+    "labeler_quality_assistant_no_unsupported_factual_claims": 1,
+    "labeler_source_candidate_mismatch": 3,
+    "messages[2] role must be user": 1,
+    "missing_plan_fidelity_audit": 99,
+    "plan_fidelity:plan_fidelity_api_failure": 51,
+    "plan_fidelity_crosscheck_1:plan_fidelity_api_failure": 99,
+    "reviewer_issues_not_empty": 4,
+    "reviewer_label_mismatch": 4,
+    "reviewer_phenomenon_mismatch": 8,
+    "reviewer_quality_assistant_no_unsupported_factual_claims": 1,
+    "reviewer_quality_single_turn_standalone": 1
+  },
+  "model_usage": {
+    "contrast": {
+      "calls": 11,
+      "failed_calls": 0,
+      "prompt_tokens": 28800,
+      "completion_tokens": 19763,
+      "total_tokens": 48563
+    },
+    "contrast_crosscheck_1": {
+      "calls": 11,
+      "failed_calls": 0,
+      "prompt_tokens": 29261,
+      "completion_tokens": 23982,
+      "total_tokens": 53243
+    },
+    "dialogue_quality": {
+      "calls": 25,
+      "failed_calls": 0,
+      "prompt_tokens": 36886,
+      "completion_tokens": 61672,
+      "total_tokens": 98558
+    },
+    "dialogue_quality_crosscheck_1": {
+      "calls": 25,
+      "failed_calls": 0,
+      "prompt_tokens": 37405,
+      "completion_tokens": 61971,
+      "total_tokens": 99376
+    },
+    "directness": {
+      "calls": 9,
+      "failed_calls": 0,
+      "prompt_tokens": 13575,
+      "completion_tokens": 12606,
+      "total_tokens": 26181
+    },
+    "directness_crosscheck_1": {
+      "calls": 9,
+      "failed_calls": 0,
+      "prompt_tokens": 13745,
+      "completion_tokens": 10890,
+      "total_tokens": 24635
+    },
+    "generation": {
+      "calls": 202,
+      "failed_calls": 101,
+      "prompt_tokens": 1072442,
+      "completion_tokens": 165898,
+      "total_tokens": 1238340
+    },
+    "labeler": {
+      "calls": 25,
+      "failed_calls": 0,
+      "prompt_tokens": 94056,
+      "completion_tokens": 89766,
+      "total_tokens": 183822
+    },
+    "plan_fidelity": {
+      "calls": 25,
+      "failed_calls": 13,
+      "prompt_tokens": 66506,
+      "completion_tokens": 33239,
+      "total_tokens": 99745
+    },
+    "plan_fidelity_crosscheck_1": {
+      "calls": 25,
+      "failed_calls": 25,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0
+    },
+    "reviewer": {
+      "calls": 25,
+      "failed_calls": 0,
+      "prompt_tokens": 92837,
+      "completion_tokens": 64643,
+      "total_tokens": 157480
+    }
+  },
+  "output": {
+    "path": "/Users/tourxu/Codes/LLMGen/data_top1/generated/top1_controlled_multiturn_v2/train.jsonl",
+    "exists": true,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
