@@ -469,6 +469,91 @@ class SelfContainedService910BTest(unittest.TestCase):
             4,
         )
 
+    def test_startup_info_explains_candidate_override_before_path_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            model_directory = Path(raw_directory).resolve()
+            missing_candidate_directory = model_directory / "missing-candidates"
+            environment = {
+                "MODEL_PATH": str(model_directory),
+                "SKILL_INDEX_PATH": str(missing_candidate_directory),
+                "SERVICE_910B_LOG_LEVEL": "INFO",
+            }
+            with patch.dict(os.environ, environment, clear=True), self.assertLogs(
+                service_910b.logger, level="INFO"
+            ) as captured:
+                runtime = service_910b.RetriverTest()
+                with self.assertRaisesRegex(
+                    service_910b.ServiceConfigurationError,
+                    "candidate state directory does not exist",
+                ):
+                    runtime.load()
+
+        messages = [record.getMessage() for record in captured.records]
+        combined = "\n".join(messages)
+        self.assertIn("event=service.process_context", combined)
+        self.assertIn("event=service.deployment_environment", combined)
+        self.assertIn("model_source=MODEL_PATH", combined)
+        self.assertIn("tokenizer_source=model", combined)
+        self.assertIn("candidate_source=SKILL_INDEX_PATH", combined)
+        self.assertIn("event=service.paths_resolved", combined)
+        self.assertIn(f"model={model_directory}", combined)
+        self.assertIn(f"tokenizer={model_directory}", combined)
+        self.assertIn(f"candidate={missing_candidate_directory}", combined)
+        path_checks = [
+            message
+            for message in messages
+            if "event=service.path_check" in message
+        ]
+        self.assertEqual(len(path_checks), 3)
+        candidate_probe = next(
+            message
+            for message in messages
+            if "role=candidate_decode_map" in message
+        )
+        self.assertIn("requirement=required", candidate_probe)
+        self.assertIn("exists=False", candidate_probe)
+        self.assertIn("is_file=False", candidate_probe)
+        self.assertIn("event=service.path_invalid", combined)
+
+    def test_startup_info_shows_sfs_model_directory_as_candidate_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            sfs_base = Path(raw_directory).resolve()
+            model_object_id = "router-object-123"
+            model_directory = sfs_base / model_object_id / "model"
+            model_directory.mkdir(parents=True)
+            environment = {
+                "MODEL_OBJECT_ID": model_object_id,
+                "MODEL_SFS": json.dumps({"sfsBasePath": str(sfs_base)}),
+                "SERVICE_910B_LOG_LEVEL": "INFO",
+            }
+            with patch.dict(os.environ, environment, clear=True), self.assertLogs(
+                service_910b.logger, level="INFO"
+            ) as captured:
+                runtime = service_910b.RetriverTest()
+                with self.assertRaisesRegex(
+                    service_910b.ServiceConfigurationError,
+                    "no consolidated Hugging Face inference weights",
+                ):
+                    runtime.load()
+
+        combined = "\n".join(
+            record.getMessage() for record in captured.records
+        )
+        self.assertIn("model_source=MODEL_SFS+MODEL_OBJECT_ID", combined)
+        self.assertIn("model_sfs_status=valid", combined)
+        self.assertIn(f"model_sfs_base_path={sfs_base}", combined)
+        self.assertIn("tokenizer_source=model", combined)
+        self.assertIn("candidate_source=model", combined)
+        self.assertIn(f"model={model_directory}", combined)
+        self.assertIn(f"tokenizer={model_directory}", combined)
+        self.assertIn(f"candidate={model_directory}", combined)
+        self.assertIn("role=candidate_decode_map", combined)
+        self.assertIn("role=candidate_virtual_tokens", combined)
+
     def test_debug_metadata_accepts_non_string_request_keys(self) -> None:
         environment = {
             "MOCK_MODE": "1",
