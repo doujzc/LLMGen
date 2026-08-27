@@ -66,6 +66,13 @@ _ROUTER_FILES_TO_PRESERVE = (
     "training_args.bin",
     "virtual_tokens.txt",
 )
+_BASE_PROCESSOR_FILES_TO_PRESERVE = (
+    "preprocessor_config.json",
+    "processor_config.json",
+    "image_processor_config.json",
+    "video_preprocessor_config.json",
+    "feature_extractor_config.json",
+)
 
 
 class ReconstructionError(RuntimeError):
@@ -271,6 +278,19 @@ def _copy_router_files(router_dir: Path, output_dir: Path) -> list[str]:
     return copied
 
 
+def _copy_base_processor_files(base_dir: Path, output_dir: Path) -> list[str]:
+    """Preserve processor metadata without importing torchvision."""
+
+    copied: list[str] = []
+    for name in _BASE_PROCESSOR_FILES_TO_PRESERVE:
+        source = base_dir / name
+        if not source.is_file():
+            continue
+        shutil.copy2(source, output_dir / name)
+        copied.append(name)
+    return copied
+
+
 def _transformers_stack() -> tuple[Any, Any]:
     try:
         import torch
@@ -354,18 +374,14 @@ def rebuild(args: argparse.Namespace) -> Path:
     full_model_cls = _full_model_class(transformers)
     text_model_cls = getattr(transformers, "AutoModelForCausalLM", None)
     tokenizer_cls = getattr(transformers, "AutoTokenizer", None)
-    processor_cls = getattr(transformers, "AutoProcessor", None)
-    if text_model_cls is None or tokenizer_cls is None or processor_cls is None:
+    if text_model_cls is None or tokenizer_cls is None:
         raise ReconstructionError(
-            "installed transformers lacks AutoModelForCausalLM/AutoTokenizer/AutoProcessor"
+            "installed transformers lacks AutoModelForCausalLM/AutoTokenizer"
         )
 
-    LOGGER.info("loading trained Router tokenizer and original VL processor")
+    LOGGER.info("loading trained Router tokenizer")
     router_tokenizer = tokenizer_cls.from_pretrained(
         str(router_dir), trust_remote_code=bool(args.trust_remote_code)
-    )
-    processor = processor_cls.from_pretrained(
-        str(base_dir), trust_remote_code=bool(args.trust_remote_code)
     )
     tokenizer_size = len(router_tokenizer)
     if int(router_config_dict.get("vocab_size", -1)) != tokenizer_size:
@@ -384,9 +400,6 @@ def rebuild(args: argparse.Namespace) -> Path:
     LOGGER.info("loading trained text-only Router model from %s", router_dir)
     router_model = text_model_cls.from_pretrained(str(router_dir), **load_kwargs)
     _attach_router_language_modules(full_model, router_model)
-    if not hasattr(processor, "tokenizer"):
-        raise ReconstructionError("original VL processor has no tokenizer attribute")
-    processor.tokenizer = router_tokenizer
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(
@@ -399,13 +412,17 @@ def rebuild(args: argparse.Namespace) -> Path:
             safe_serialization=True,
             max_shard_size=args.max_shard_size,
         )
-        processor.save_pretrained(str(staging_dir))
+        processor_files = _copy_base_processor_files(base_dir, staging_dir)
         router_tokenizer.save_pretrained(str(staging_dir))
         copied = _copy_router_files(router_dir, staging_dir)
         _verify_reconstructed_config(staging_dir, tokenizer_size)
+        LOGGER.info(
+            "preserved base processor files: %s",
+            ", ".join(processor_files) if processor_files else "<none>",
+        )
         LOGGER.info("preserved Router files: %s", ", ".join(copied))
 
-        del router_model, full_model, processor, router_tokenizer
+        del router_model, full_model, router_tokenizer
         gc.collect()
 
         if args.verify_load:

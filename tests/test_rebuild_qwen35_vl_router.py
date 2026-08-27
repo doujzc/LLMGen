@@ -154,6 +154,37 @@ class RebuildQwen35VlRouterTest(unittest.TestCase):
             )
             self.assertFalse((output / "model.safetensors").exists())
 
+    def test_base_processor_metadata_is_copied_without_base_tokenizer(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            base = root / "base"
+            output = root / "output"
+            base.mkdir()
+            output.mkdir()
+            for name in (
+                "preprocessor_config.json",
+                "processor_config.json",
+                "video_preprocessor_config.json",
+                "tokenizer.json",
+                "config.json",
+                "model.safetensors",
+            ):
+                (base / name).write_text(name, encoding="utf-8")
+
+            copied = rebuild_script._copy_base_processor_files(base, output)
+
+            self.assertEqual(
+                copied,
+                [
+                    "preprocessor_config.json",
+                    "processor_config.json",
+                    "video_preprocessor_config.json",
+                ],
+            )
+            self.assertFalse((output / "tokenizer.json").exists())
+            self.assertFalse((output / "config.json").exists())
+            self.assertFalse((output / "model.safetensors").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
