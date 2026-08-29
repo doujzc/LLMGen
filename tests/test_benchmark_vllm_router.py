@@ -26,6 +26,8 @@ class BenchmarkVllmRouterTest(unittest.TestCase):
     def test_summary_reports_latency_and_requested_throughput(self) -> None:
         summary = benchmark._summary(
             latencies=[10.0, 20.0],
+            ttfts=[4.0, 6.0],
+            tpots=[1.0, 3.0],
             wall_seconds=0.5,
             input_chars=256,
             output_tokens=8,
@@ -37,6 +39,20 @@ class BenchmarkVllmRouterTest(unittest.TestCase):
         self.assertEqual(summary["qps"], 4.0)
         self.assertEqual(summary["requested_output_tokens_per_second"], 32.0)
         self.assertEqual(summary["latency_ms"]["p50"], 15.0)
+        self.assertEqual(summary["ttft_ms"]["p50"], 5.0)
+        self.assertEqual(summary["tpot_ms"]["p50"], 2.0)
+
+    def test_parses_vllm_and_sse_stream_frames(self) -> None:
+        self.assertEqual(
+            benchmark._generated_text(
+                benchmark._parse_stream_payload(
+                    b'{"text":["prompt-token"]}'
+                ),
+                "prompt-",
+            ),
+            "token",
+        )
+        self.assertIsNone(benchmark._parse_stream_payload(b"data: [DONE]"))
 
 
 if __name__ == "__main__":

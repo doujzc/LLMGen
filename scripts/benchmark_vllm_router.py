@@ -69,10 +69,10 @@ def _post_generate(
     prompt: str,
     output_tokens: int,
     timeout: float,
-) -> tuple[float, int]:
+) -> tuple[float, int, float, float]:
     payload = {
         "prompt": prompt,
-        "stream": False,
+        "stream": True,
         "temperature": 0.0,
         "max_tokens": output_tokens,
         # Prevent early EOS so every request performs comparable decode work.
@@ -88,7 +88,9 @@ def _post_generate(
     started = perf_counter()
     try:
         with urlopen(request, timeout=timeout) as response:
-            response_body = response.read()
+            response_bytes, first_token_at = _consume_stream(
+                response, prompt=prompt, started=started
+            )
     except HTTPError as exc:
         details = exc.read().decode("utf-8", errors="replace")
         raise BenchmarkError(
@@ -96,14 +98,94 @@ def _post_generate(
         ) from exc
     except URLError as exc:
         raise BenchmarkError(f"cannot reach {url}: {exc}") from exc
-    latency_ms = (perf_counter() - started) * 1000.0
+    finished = perf_counter()
+    if first_token_at is None:
+        raise BenchmarkError("vLLM stream contained no generated token")
+    latency_ms = (finished - started) * 1000.0
+    ttft_ms = (first_token_at - started) * 1000.0
+    tpot_ms = (
+        (finished - first_token_at) * 1000.0 / (output_tokens - 1)
+        if output_tokens > 1
+        else 0.0
+    )
+    return latency_ms, response_bytes, ttft_ms, tpot_ms
+
+
+def _parse_stream_payload(frame: bytes) -> Mapping[str, Any] | None:
+    text = frame.decode("utf-8", errors="replace").strip()
+    if text.startswith("data:"):
+        text = text[5:].strip()
+    if not text or text == "[DONE]":
+        return None
     try:
-        decoded: Any = json.loads(response_body)
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise BenchmarkError("vLLM returned invalid JSON") from exc
-    if not isinstance(decoded, Mapping):
-        raise BenchmarkError("vLLM response JSON is not an object")
-    return latency_ms, len(response_body)
+        raise BenchmarkError(f"invalid vLLM stream frame: {text[:500]}") from exc
+    if not isinstance(payload, Mapping):
+        raise BenchmarkError("vLLM stream frame is not a JSON object")
+    return payload
+
+
+def _generated_text(payload: Mapping[str, Any], prompt: str) -> str | None:
+    value: Any = payload.get("text")
+    if value is None:
+        value = payload.get("generated_text")
+    if value is None and isinstance(payload.get("outputs"), list):
+        outputs = payload["outputs"]
+        if outputs and isinstance(outputs[0], Mapping):
+            value = outputs[0].get("text")
+    if value is None and isinstance(payload.get("choices"), list):
+        choices = payload["choices"]
+        if choices and isinstance(choices[0], Mapping):
+            value = choices[0].get("text")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if not isinstance(value, str):
+        return None
+    return value[len(prompt) :] if value.startswith(prompt) else value
+
+
+def _consume_stream(
+    response: Any, *, prompt: str, started: float
+) -> tuple[int, float | None]:
+    """Consume NUL-delimited vLLM frames or standard SSE frames."""
+
+    del started  # Documents the timestamp domain used by the caller.
+    buffer = b""
+    response_bytes = 0
+    first_token_at: float | None = None
+    read_chunk = getattr(response, "read1", response.read)
+
+    def consume(frame: bytes) -> None:
+        nonlocal first_token_at
+        payload = _parse_stream_payload(frame)
+        if payload is None:
+            return
+        generated = _generated_text(payload, prompt)
+        if generated and first_token_at is None:
+            first_token_at = perf_counter()
+
+    while True:
+        chunk = read_chunk(4096)
+        if not chunk:
+            break
+        response_bytes += len(chunk)
+        buffer += chunk
+        while True:
+            separators = [
+                (position, separator)
+                for separator in (b"\0", b"\n\n")
+                if (position := buffer.find(separator)) >= 0
+            ]
+            if not separators:
+                break
+            position, separator = min(separators, key=lambda item: item[0])
+            frame = buffer[:position]
+            buffer = buffer[position + len(separator) :]
+            consume(frame)
+    if buffer.strip():
+        consume(buffer)
+    return response_bytes, first_token_at
 
 
 def _percentile(values: Sequence[float], percentile: float) -> float:
@@ -118,6 +200,8 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 def _summary(
     *,
     latencies: Sequence[float],
+    ttfts: Sequence[float],
+    tpots: Sequence[float],
     wall_seconds: float,
     input_chars: int,
     output_tokens: int,
@@ -125,6 +209,16 @@ def _summary(
     response_bytes: int,
 ) -> dict[str, Any]:
     count = len(latencies)
+    def latency_stats(values: Sequence[float]) -> dict[str, float]:
+        return {
+            "min": round(min(values), 3),
+            "mean": round(statistics.fmean(values), 3),
+            "p50": round(_percentile(values, 0.50), 3),
+            "p95": round(_percentile(values, 0.95), 3),
+            "p99": round(_percentile(values, 0.99), 3),
+            "max": round(max(values), 3),
+        }
+
     return {
         "requests": count,
         "concurrency": concurrency,
@@ -136,14 +230,9 @@ def _summary(
             count * output_tokens / wall_seconds, 4
         ),
         "response_bytes": response_bytes,
-        "latency_ms": {
-            "min": round(min(latencies), 3),
-            "mean": round(statistics.fmean(latencies), 3),
-            "p50": round(_percentile(latencies, 0.50), 3),
-            "p95": round(_percentile(latencies, 0.95), 3),
-            "p99": round(_percentile(latencies, 0.99), 3),
-            "max": round(max(latencies), 3),
-        },
+        "latency_ms": latency_stats(latencies),
+        "ttft_ms": latency_stats(ttfts),
+        "tpot_ms": latency_stats(tpots),
     }
 
 
@@ -168,6 +257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         started = perf_counter()
         latencies: list[float] = []
+        ttfts: list[float] = []
+        tpots: list[float] = []
         response_bytes = 0
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = [
@@ -181,14 +272,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for _ in range(args.requests)
             ]
             for future in as_completed(futures):
-                latency_ms, body_size = future.result()
+                latency_ms, body_size, ttft_ms, tpot_ms = future.result()
                 latencies.append(latency_ms)
+                ttfts.append(ttft_ms)
+                tpots.append(tpot_ms)
                 response_bytes += body_size
         wall_seconds = perf_counter() - started
         print(
             json.dumps(
                 _summary(
                     latencies=latencies,
+                    ttfts=ttfts,
+                    tpots=tpots,
                     wall_seconds=wall_seconds,
                     input_chars=len(prompt),
                     output_tokens=args.output_tokens,
