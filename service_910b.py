@@ -2054,22 +2054,36 @@ class RetriverTest:
                     names = self._search_names(query, request_id=request_id)
                     inference_ms = (perf_counter() - inference_started) * 1000.0
             selected_names = names[:resolved_top_k]
+            serialization_started = perf_counter()
+            response_json = json.dumps(selected_names, ensure_ascii=False)
+            serialization_ms = (perf_counter() - serialization_started) * 1000.0
+            total_ms = (perf_counter() - total_started) * 1000.0
+            queue_wait_ms = load_lock_wait_ms + inference_wait_ms
+            calc_overhead_ms = max(
+                0.0,
+                total_ms - queue_wait_ms - inference_ms - serialization_ms,
+            )
             logger.info(
                 "event=service.calc_complete instance_id=%s request_id=%s "
                 "status=ok elapsed_ms=%.3f inference_ms=%.3f load_lock_wait_ms=%.3f "
-                "inference_lock_wait_ms=%.3f query_chars=%s decoded_results=%s "
-                "returned_results=%s",
+                "inference_lock_wait_ms=%.3f queue_wait_ms=%.3f "
+                "json_serialize_ms=%.3f calc_overhead_ms=%.3f query_chars=%s "
+                "decoded_results=%s returned_results=%s response_chars=%s",
                 self.instance_id,
                 request_id,
-                (perf_counter() - total_started) * 1000.0,
+                total_ms,
                 inference_ms,
                 load_lock_wait_ms,
                 inference_wait_ms,
+                queue_wait_ms,
+                serialization_ms,
+                calc_overhead_ms,
                 len(query),
                 len(names),
                 len(selected_names),
+                len(response_json),
             )
-            return json.dumps(selected_names, ensure_ascii=False)
+            return response_json
         except Exception as exc:
             logger.exception(
                 "event=service.calc_failed instance_id=%s request_id=%s phase=%s "
@@ -2188,12 +2202,13 @@ class RetriverTest:
             query,
             self.system_prompt,
         )
+        render_ms = (perf_counter() - render_started) * 1000.0
         logger.info(
             "event=search.prompt_rendered instance_id=%s request_id=%s "
             "elapsed_ms=%.3f prompt_chars=%s prompt=%s system_prompt_chars=%s",
             self.instance_id,
             resolved_request_id,
-            (perf_counter() - render_started) * 1000.0,
+            render_ms,
             len(prompt),
             _text_log_value(prompt),
             len(self.system_prompt),
@@ -2247,13 +2262,14 @@ class RetriverTest:
                     original_prompt_tokens,
                     len(prompt_ids),
                 )
+        tokenize_ms = (perf_counter() - tokenize_started) * 1000.0
         logger.info(
             "event=search.prompt_tokenized instance_id=%s request_id=%s "
             "elapsed_ms=%.3f original_tokens=%s submitted_tokens=%s "
             "max_input_length=%s truncated=%s token_ids=%s",
             self.instance_id,
             resolved_request_id,
-            (perf_counter() - tokenize_started) * 1000.0,
+            tokenize_ms,
             original_prompt_tokens,
             len(prompt_ids),
             self.max_input_length,
@@ -2268,14 +2284,16 @@ class RetriverTest:
             sampling_params=self.sampling_params,
             request_id=resolved_request_id,
         )
+        generation_ms = (perf_counter() - generation_started) * 1000.0
         logger.info(
             "event=search.generation_returned instance_id=%s request_id=%s "
             "elapsed_ms=%.3f output_type=%s",
             self.instance_id,
             resolved_request_id,
-            (perf_counter() - generation_started) * 1000.0,
+            generation_ms,
             _type_name(request_output),
         )
+        decode_started = perf_counter()
         completion = _first_completion_output(
             request_output, request_id=resolved_request_id
         )
@@ -2324,6 +2342,7 @@ class RetriverTest:
         paths = self.trie.parse_complete(
             generated, request_id=resolved_request_id
         )
+        decode_ms = (perf_counter() - decode_started) * 1000.0
         logger.info(
             "event=search.paths_decoded instance_id=%s request_id=%s "
             "eos_position=%s path_count=%s paths=%s",
@@ -2334,6 +2353,7 @@ class RetriverTest:
             _token_ids_log_value(paths),
         )
 
+        mapping_started = perf_counter()
         skill_ids: list[str] = []
         seen: set[str] = set()
         for path in paths:
@@ -2354,12 +2374,31 @@ class RetriverTest:
             str(self.bundle.skills[skill_id].get("name") or skill_id)
             for skill_id in skill_ids
         ]
+        mapping_ms = (perf_counter() - mapping_started) * 1000.0
+        search_total_ms = (perf_counter() - started) * 1000.0
+        service_non_generation_ms = max(0.0, search_total_ms - generation_ms)
+        measured_stage_ms = (
+            render_ms + tokenize_ms + generation_ms + decode_ms + mapping_ms
+        )
+        unattributed_ms = max(0.0, search_total_ms - measured_stage_ms)
         logger.info(
             "event=search.complete instance_id=%s request_id=%s elapsed_ms=%.3f "
+            "render_ms=%.3f tokenize_ms=%.3f generation_ms=%.3f "
+            "decode_ms=%.3f mapping_ms=%.3f service_non_generation_ms=%.3f "
+            "unattributed_ms=%.3f prompt_tokens=%s completion_tokens=%s "
             "path_count=%s skill_id_count=%s result_count=%s",
             self.instance_id,
             resolved_request_id,
-            (perf_counter() - started) * 1000.0,
+            search_total_ms,
+            render_ms,
+            tokenize_ms,
+            generation_ms,
+            decode_ms,
+            mapping_ms,
+            service_non_generation_ms,
+            unattributed_ms,
+            len(prompt_ids),
+            len(generated),
             len(paths),
             len(skill_ids),
             len(names),
@@ -3519,6 +3558,58 @@ async def _start_custom_engine(
         await asyncio.sleep(sleep_seconds)
 
 
+def _completion_token_count_quiet(request_output: Any) -> int | None:
+    """Read the first completion token count without affecting inference."""
+
+    try:
+        outputs = _output_field(request_output, "outputs")
+        if (
+            not isinstance(outputs, Sequence)
+            or isinstance(outputs, (str, bytes, bytearray))
+            or not outputs
+        ):
+            return None
+        token_ids = _output_field(outputs[0], "token_ids")
+        if (
+            not isinstance(token_ids, Sequence)
+            or isinstance(token_ids, (str, bytes, bytearray))
+        ):
+            return None
+        return len(token_ids)
+    except Exception:
+        return None
+
+
+def _finite_float_quiet(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed != parsed or abs(parsed) == float("inf"):
+        return None
+    return parsed
+
+
+def _request_metric_seconds_quiet(request_output: Any, name: str) -> float | None:
+    """Read an optional vLLM RequestMetrics value expressed in seconds."""
+
+    try:
+        metrics = _output_field(request_output, "metrics")
+        if metrics is None:
+            outputs = _output_field(request_output, "outputs")
+            if (
+                isinstance(outputs, Sequence)
+                and not isinstance(outputs, (str, bytes, bytearray))
+                and outputs
+            ):
+                metrics = _output_field(outputs[0], "metrics")
+        if metrics is None:
+            return None
+        return _finite_float_quiet(_output_field(metrics, name))
+    except Exception:
+        return None
+
+
 async def _generate_on_910b_loop(
     *,
     engine: Any,
@@ -3560,11 +3651,21 @@ async def _generate_on_910b_loop(
     final_output = None
     frame_count = 0
     first_frame_ms: float | None = None
+    first_token_frame_ms: float | None = None
+    first_token_frame_count: int | None = None
     try:
         async for request_output in results_generator:
             frame_count += 1
             if first_frame_ms is None:
                 first_frame_ms = (perf_counter() - started) * 1000.0
+            frame_token_count = _completion_token_count_quiet(request_output)
+            if (
+                first_token_frame_ms is None
+                and frame_token_count is not None
+                and frame_token_count > 0
+            ):
+                first_token_frame_ms = (perf_counter() - started) * 1000.0
+                first_token_frame_count = frame_token_count
             final_output = request_output
             if logger.isEnabledFor(logging.INFO):
                 try:
@@ -3613,12 +3714,97 @@ async def _generate_on_910b_loop(
             (perf_counter() - started) * 1000.0,
         )
         raise RuntimeError("custom vLLM returned no request outputs")
+    total_ms = (perf_counter() - started) * 1000.0
+    completion_tokens = _completion_token_count_quiet(final_output)
+    arrival_time = _request_metric_seconds_quiet(final_output, "arrival_time")
+    first_token_time = _request_metric_seconds_quiet(
+        final_output, "first_token_time"
+    )
+    last_token_time = _request_metric_seconds_quiet(
+        final_output, "last_token_time"
+    )
+    if last_token_time is None:
+        last_token_time = _request_metric_seconds_quiet(
+            final_output, "finished_time"
+        )
+    first_scheduled_time = _request_metric_seconds_quiet(
+        final_output, "first_scheduled_time"
+    )
+    engine_queue_seconds = _request_metric_seconds_quiet(
+        final_output, "time_in_queue"
+    )
+    if (
+        engine_queue_seconds is None
+        and arrival_time is not None
+        and first_scheduled_time is not None
+        and first_scheduled_time >= arrival_time
+    ):
+        engine_queue_seconds = first_scheduled_time - arrival_time
+
+    ttft_ms: float | None = None
+    tpot_ms: float | None = None
+    timing_source = "unavailable"
+    if (
+        arrival_time is not None
+        and first_token_time is not None
+        and first_token_time >= arrival_time
+    ):
+        ttft_ms = (first_token_time - arrival_time) * 1000.0
+        timing_source = "request_output_metrics"
+        if (
+            completion_tokens is not None
+            and completion_tokens > 1
+            and last_token_time is not None
+            and last_token_time >= first_token_time
+        ):
+            tpot_ms = (
+                (last_token_time - first_token_time)
+                * 1000.0
+                / (completion_tokens - 1)
+            )
+    elif first_token_frame_ms is not None:
+        # The SkillHub-compatible request is deliberately non-streaming.  A
+        # custom engine may still yield intermediate RequestOutputs, but this
+        # fallback is only a frame-level proxy rather than device-level TTFT.
+        ttft_ms = first_token_frame_ms
+        timing_source = "first_nonempty_frame_proxy"
+        if (
+            completion_tokens is not None
+            and first_token_frame_count is not None
+            and completion_tokens > first_token_frame_count
+        ):
+            tpot_ms = max(0.0, total_ms - first_token_frame_ms) / (
+                completion_tokens - first_token_frame_count
+            )
+
+    scheduler_seconds = _request_metric_seconds_quiet(
+        final_output, "scheduler_time"
+    )
+    model_forward_seconds = _request_metric_seconds_quiet(
+        final_output, "model_forward_time"
+    )
+    model_execute_seconds = _request_metric_seconds_quiet(
+        final_output, "model_execute_time"
+    )
     logger.info(
         "event=engine.generate_complete request_id=%s elapsed_ms=%.3f "
-        "first_frame_ms=%s frames=%s final_type=%s",
+        "first_frame_ms=%s first_token_frame_ms=%s first_token_frame_count=%s "
+        "ttft_ms=%s tpot_ms=%s timing_source=%s completion_tokens=%s "
+        "engine_queue_ms=%s scheduler_ms=%s model_forward_ms=%s "
+        "model_execute_ms=%s frames=%s is_stream=False final_type=%s",
         request_id,
-        (perf_counter() - started) * 1000.0,
+        total_ms,
         first_frame_ms,
+        first_token_frame_ms,
+        first_token_frame_count,
+        ttft_ms,
+        tpot_ms,
+        timing_source,
+        completion_tokens,
+        None if engine_queue_seconds is None else engine_queue_seconds * 1000.0,
+        None if scheduler_seconds is None else scheduler_seconds * 1000.0,
+        None if model_forward_seconds is None else model_forward_seconds * 1000.0,
+        None if model_execute_seconds is None else model_execute_seconds * 1000.0,
         frame_count,
         _type_name(final_output),
     )

@@ -253,6 +253,16 @@ def _fake_dependency_modules(
                     ]
                 )
                 yield SimpleNamespace(
+                    metrics=SimpleNamespace(
+                        arrival_time=10.0,
+                        first_scheduled_time=10.02,
+                        first_token_time=10.1,
+                        last_token_time=10.5,
+                        time_in_queue=0.02,
+                        scheduler_time=0.03,
+                        model_forward_time=0.4,
+                        model_execute_time=0.45,
+                    ),
                     outputs=[
                         SimpleNamespace(
                             text="text-must-not-be-used-for-routing",
@@ -1145,10 +1155,48 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                 "event=engine.load_model_begin",
                 "event=engine.health_poll_complete",
                 "event=engine.generate_frame",
+                "event=engine.generate_complete",
                 "event=search.paths_decoded",
+                "event=search.complete",
+                "event=service.calc_complete",
                 "event=runtime.close_complete",
             ):
                 self.assertIn(event, debug_output)
+            engine_latency = next(
+                message
+                for message in debug_messages
+                if "event=engine.generate_complete" in message
+            )
+            self.assertIn("ttft_ms=", engine_latency)
+            self.assertIn("tpot_ms=", engine_latency)
+            self.assertIn("timing_source=request_output_metrics", engine_latency)
+            self.assertIn("completion_tokens=5", engine_latency)
+            search_latency = next(
+                message
+                for message in debug_messages
+                if "event=search.complete" in message
+            )
+            for field in (
+                "render_ms=",
+                "tokenize_ms=",
+                "generation_ms=",
+                "decode_ms=",
+                "mapping_ms=",
+                "service_non_generation_ms=",
+                "unattributed_ms=",
+            ):
+                self.assertIn(field, search_latency)
+            calc_latency = next(
+                message
+                for message in debug_messages
+                if "event=service.calc_complete" in message
+            )
+            for field in (
+                "queue_wait_ms=",
+                "json_serialize_ms=",
+                "calc_overhead_ms=",
+            ):
+                self.assertIn(field, calc_latency)
             self.assertIn("token_ids=<hidden count=2>", debug_output)
             self.assertNotIn("[40, 41]", debug_output)
             calc_begin = next(
