@@ -347,6 +347,7 @@ class SelfContainedService910BTest(unittest.TestCase):
                     {"query": "test"},
                     {"query": "test", "top_k": None},
                     {"query": "test", "top_k": ""},
+                    {"query": "test", "top_k": "not-an-integer"},
                 ):
                     self.assertEqual(
                         json.loads(runtime.calc({"data": request})),
@@ -362,6 +363,139 @@ class SelfContainedService910BTest(unittest.TestCase):
                 )
             finally:
                 runtime.close()
+
+    def test_malformed_request_value_is_recovered_without_poisoning_service(
+        self,
+    ) -> None:
+        class InvalidQuery:
+            @staticmethod
+            def __str__() -> str:
+                raise ValueError("query cannot be converted to text")
+
+        environment = {
+            "MOCK_MODE": "1",
+            "MOCK_RESPONSES_JSON": json.dumps({"valid": ["Skill A"]}),
+            "SERVICE_910B_LOG_LEVEL": "ERROR",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            runtime = service_910b.RetriverTest()
+            runtime.load()
+            try:
+                malformed_result = runtime.calc(
+                    {"data": {"query": InvalidQuery()}}
+                )
+                valid_result = runtime.calc({"data": {"query": "valid"}})
+            finally:
+                runtime.close()
+
+        self.assertEqual(json.loads(malformed_result), [])
+        self.assertEqual(json.loads(valid_result), ["Skill A"])
+
+    def test_recoverable_generation_and_parse_failures_return_empty_list(
+        self,
+    ) -> None:
+        state = _FakeDependencyState()
+        fake_modules = _fake_dependency_modules(state)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            environment = _service_environment(directory)
+            environment["SERVICE_910B_LOG_LEVEL"] = "ERROR"
+            runtime = service_910b.RetriverTest()
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, fake_modules),
+                self.assertLogs(service_910b.logger, level="ERROR") as captured,
+            ):
+                runtime.load()
+                try:
+                    assert runtime.llm is not None
+                    with patch.object(
+                        runtime.llm,
+                        "generate",
+                        side_effect=RuntimeError("transient generation failure"),
+                    ):
+                        generation_result = runtime.calc(
+                            {"data": {"query": "test"}}
+                        )
+
+                    assert runtime.trie is not None
+                    with patch.object(
+                        runtime.trie,
+                        "parse_complete",
+                        side_effect=RuntimeError("invalid generated path"),
+                    ):
+                        parse_result = runtime.calc(
+                            {"data": {"query": "test"}}
+                        )
+
+                    # A recovered request must not poison the long-lived
+                    # runtime; a later valid request can still succeed.
+                    valid_result = runtime.calc(
+                        {"data": {"query": "test"}}
+                    )
+                finally:
+                    runtime.close()
+
+        self.assertEqual(json.loads(generation_result), [])
+        self.assertEqual(json.loads(parse_result), [])
+        self.assertEqual(
+            json.loads(valid_result),
+            ["天气查询", "地图导航"],
+        )
+        recovered_logs = [
+            record.getMessage()
+            for record in captured.records
+            if "event=service.calc_recovered" in record.getMessage()
+        ]
+        self.assertEqual(len(recovered_logs), 2)
+        self.assertTrue(
+            all("recoverable=True" in message for message in recovered_logs)
+        )
+
+    def test_missing_loaded_runtime_remains_unrecoverable(self) -> None:
+        environment = {
+            "SERVICE_910B_LOG_LEVEL": "ERROR",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            runtime = service_910b.RetriverTest()
+            runtime._loaded = True
+            with self.assertRaises(
+                service_910b.ServiceRuntimeUnavailableError
+            ):
+                runtime.calc({"data": {"query": "test"}})
+
+    def test_close_recovers_shutdown_failure_and_clears_state(self) -> None:
+        environment = {
+            "MOCK_MODE": "1",
+            "SERVICE_910B_LOG_LEVEL": "ERROR",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            runtime = service_910b.RetriverTest()
+            runtime.load()
+            runtime.llm = object()
+            with (
+                patch.object(
+                    service_910b,
+                    "_shutdown_vllm",
+                    side_effect=RuntimeError("shutdown failed"),
+                ),
+                self.assertLogs(service_910b.logger, level="ERROR") as captured,
+            ):
+                runtime.close()
+
+        self.assertFalse(runtime._loaded)
+        self.assertIsNone(runtime.llm)
+        self.assertIsNone(runtime.tokenizer)
+        self.assertIsNone(runtime.sampling_params)
+        self.assertIsNone(runtime.bundle)
+        self.assertIsNone(runtime.trie)
+        self.assertIn(
+            "event=service.close_shutdown_recovered",
+            "\n".join(record.getMessage() for record in captured.records),
+        )
 
     def test_imports_only_standard_library_and_lazy_runtime_dependencies(self) -> None:
         source_path = Path(service_910b.__file__).resolve()

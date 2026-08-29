@@ -8,7 +8,9 @@ The hosting contract intentionally matches the reference retrieval service:
 * ``calc({"data": {"query": ..., "top_k": ...}})`` returns a JSON string
   containing a list of Skill names. ``top_k`` is optional (``topk`` is also
   accepted); when omitted, null, or empty, it uses ``TOP_K`` whose default is
-  ``2``.
+  ``2``. Recoverable request, generation, and decoding failures return the
+  same protocol's empty JSON list; only startup/configuration failures or a
+  missing/closed long-lived runtime escape as exceptions.
 
 The model directory must be a complete LLMGen Router bundle containing the
 Hugging Face model/tokenizer files, ``skill_decode_map.json``,
@@ -260,6 +262,10 @@ _VLLM_ENGINE_ARG_DEFAULTS: Dict[str, Any] = {
 
 class ServiceConfigurationError(RuntimeError):
     """Raised when deployment artifacts or environment settings disagree."""
+
+
+class ServiceRuntimeUnavailableError(RuntimeError):
+    """Raised when the long-lived model runtime cannot serve more requests."""
 
 
 def _configure_service_logging() -> None:
@@ -1090,7 +1096,9 @@ class _AsyncLoopRunner:
                 operation,
                 request_id,
             )
-            raise RuntimeError("custom vLLM async loop is closed")
+            raise ServiceRuntimeUnavailableError(
+                "custom vLLM async loop is closed"
+            )
         started = perf_counter()
         logger.info(
             "event=async_loop.submit runner_id=%s operation=%s request_id=%s "
@@ -1285,7 +1293,9 @@ class LocalVLLM910BRuntime:
         request_id: str | None = None,
     ) -> Any:
         if self._closed:
-            raise RuntimeError("custom vLLM 910B runtime is closed")
+            raise ServiceRuntimeUnavailableError(
+                "custom vLLM 910B runtime is closed"
+            )
         resolved_request_id = request_id or str(uuid.uuid4())
         started = perf_counter()
         if logger.isEnabledFor(logging.INFO):
@@ -1955,10 +1965,32 @@ class RetriverTest:
         _configure_service_logging()
         request_id = str(uuid.uuid4())
         total_started = perf_counter()
-        container = req_data if isinstance(req_data, Mapping) else {}
-        data = container.get("data", {})
-        request = dict(data) if isinstance(data, Mapping) else {}
-        query = str(request.get("query", _DEFAULT_QUERY)).strip()
+        try:
+            container = req_data if isinstance(req_data, Mapping) else {}
+            data = container.get("data", {})
+            request = dict(data) if isinstance(data, Mapping) else {}
+            query = str(request.get("query", _DEFAULT_QUERY)).strip()
+        except MemoryError:
+            logger.exception(
+                "event=service.calc_failed instance_id=%s request_id=%s "
+                "phase=request_parse recoverable=False elapsed_ms=%.3f "
+                "error_type=MemoryError",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+            )
+            raise
+        except Exception as exc:
+            logger.error(
+                "event=service.calc_recovered instance_id=%s request_id=%s "
+                "phase=request_parse recoverable=True elapsed_ms=%.3f "
+                "error_type=%s response=[]",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+                type(exc).__name__,
+            )
+            return json.dumps([], ensure_ascii=False)
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "event=service.calc_begin instance_id=%s request_id=%s loaded=%s "
@@ -2103,16 +2135,44 @@ class RetriverTest:
             )
             return response_json
         except Exception as exc:
-            logger.exception(
-                "event=service.calc_failed instance_id=%s request_id=%s phase=%s "
-                "elapsed_ms=%.3f error_type=%s",
+            unrecoverable = (
+                phase == "automatic_load"
+                or not self._loaded
+                or isinstance(
+                    exc,
+                    (
+                        MemoryError,
+                        ServiceConfigurationError,
+                        ServiceRuntimeUnavailableError,
+                    ),
+                )
+            )
+            if unrecoverable:
+                logger.exception(
+                    "event=service.calc_failed instance_id=%s request_id=%s "
+                    "phase=%s recoverable=False elapsed_ms=%.3f error_type=%s",
+                    self.instance_id,
+                    request_id,
+                    phase,
+                    (perf_counter() - total_started) * 1000.0,
+                    type(exc).__name__,
+                )
+                raise
+            # A malformed generation, per-request engine error, tokenizer
+            # failure, or Trie/mapping parse failure must not take down the
+            # hosting worker.  The service protocol has no error envelope, so
+            # the safe recoverable response is the normal JSON empty list.
+            logger.error(
+                "event=service.calc_recovered instance_id=%s request_id=%s "
+                "phase=%s recoverable=True elapsed_ms=%.3f error_type=%s "
+                "response=[]",
                 self.instance_id,
                 request_id,
                 phase,
                 (perf_counter() - total_started) * 1000.0,
                 type(exc).__name__,
             )
-            raise
+            return json.dumps([], ensure_ascii=False)
 
     def close(self) -> None:
         close_id = uuid.uuid4().hex[:12]
@@ -2142,18 +2202,40 @@ class RetriverTest:
                     close_id,
                     (perf_counter() - started) * 1000.0,
                 )
-                _shutdown_vllm(self.llm)
-                self.llm = None
-                self.tokenizer = None
-                self.sampling_params = None
-                self.bundle = None
-                self.trie = None
-                self.path_skill_ids = {}
-                self.backend = "vllm_910b"
-                self.mock_responses = {}
-                self.system_prompt = _DEFAULT_SYSTEM_PROMPT
-                self._loaded = False
-            gc.collect()
+                try:
+                    _shutdown_vllm(self.llm)
+                except Exception as exc:
+                    # close() is a best-effort lifecycle hook.  A broken
+                    # third-party shutdown implementation must not prevent
+                    # local state from being released or crash the host.
+                    logger.error(
+                        "event=service.close_shutdown_recovered instance_id=%s "
+                        "close_id=%s error_type=%s",
+                        self.instance_id,
+                        close_id,
+                        type(exc).__name__,
+                    )
+                finally:
+                    self.llm = None
+                    self.tokenizer = None
+                    self.sampling_params = None
+                    self.bundle = None
+                    self.trie = None
+                    self.path_skill_ids = {}
+                    self.backend = "vllm_910b"
+                    self.mock_responses = {}
+                    self.system_prompt = _DEFAULT_SYSTEM_PROMPT
+                    self._loaded = False
+            try:
+                gc.collect()
+            except Exception as exc:
+                logger.error(
+                    "event=service.close_gc_recovered instance_id=%s close_id=%s "
+                    "error_type=%s",
+                    self.instance_id,
+                    close_id,
+                    type(exc).__name__,
+                )
         logger.info(
             "event=service.close_complete instance_id=%s close_id=%s "
             "elapsed_ms=%.3f loaded=%s runtime_present=%s",
@@ -2178,7 +2260,9 @@ class RetriverTest:
         )
         if self.backend == "mock":
             if not self._loaded:
-                raise RuntimeError("LLMGen mock retrieval service is not loaded")
+                raise ServiceRuntimeUnavailableError(
+                    "LLMGen mock retrieval service is not loaded"
+                )
             exact_match = query in self.mock_responses
             results = list(
                 self.mock_responses.get(query, self.mock_responses.get("*", ()))
@@ -2213,7 +2297,9 @@ class RetriverTest:
                 self.trie is not None,
                 self._loaded,
             )
-            raise RuntimeError("LLMGen retrieval service is not loaded")
+            raise ServiceRuntimeUnavailableError(
+                "LLMGen retrieval service is not loaded"
+            )
         render_started = perf_counter()
         prompt = _render_router_prompt(
             self.tokenizer,
@@ -4563,9 +4649,20 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _coerce_optional_int(value: Any) -> int | None:
-    if value is None or not str(value).strip():
+    if value is None:
         return None
-    return int(value)
+    try:
+        if not str(value).strip():
+            return None
+        return int(value)
+    except Exception as exc:
+        logger.warning(
+            "event=service.optional_integer_invalid value=%s error_type=%s "
+            "fallback=default",
+            _safe_log_value("value", value),
+            type(exc).__name__,
+        )
+        return None
 
 
 if __name__ == "__main__":
