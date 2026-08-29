@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import gc
 import inspect
 import json
@@ -266,6 +266,27 @@ class ServiceConfigurationError(RuntimeError):
 
 class ServiceRuntimeUnavailableError(RuntimeError):
     """Raised when the long-lived model runtime cannot serve more requests."""
+
+
+@dataclass(slots=True)
+class _RequestTerminationState:
+    """Cross-thread proof that a timed-out engine request was terminated."""
+
+    completed: threading.Event = field(default_factory=threading.Event)
+    started: bool = False
+    cancellation_observed: bool = False
+    abort_attempted: bool = False
+    abort_confirmed: bool = False
+    abort_method: str | None = None
+    abort_error_type: str | None = None
+
+    def timeout_cleanup_confirmed(self) -> bool:
+        """Return whether no request can remain active after caller timeout."""
+
+        if not self.completed.is_set():
+            return False
+        # A request that completed in the timeout/cancel race needs no abort.
+        return not self.cancellation_observed or self.abort_confirmed
 
 
 def _configure_service_logging() -> None:
@@ -1084,6 +1105,8 @@ class _AsyncLoopRunner:
         timeout: float | None = None,
         operation: str = "coroutine",
         request_id: str | None = None,
+        termination_state: _RequestTerminationState | None = None,
+        termination_timeout: float = 5.0,
     ) -> Any:
         if self._closed:
             close_coroutine = getattr(coroutine, "close", None)
@@ -1148,7 +1171,7 @@ class _AsyncLoopRunner:
             logger.warning(
                 "event=async_loop.submit_timeout runner_id=%s operation=%s "
                 "request_id=%s elapsed_ms=%.3f timeout_seconds=%s "
-                "cancel_requested=%s future_done=%s",
+                "cancel_requested=%s future_done=%s termination_timeout_seconds=%s",
                 self.runner_id,
                 operation,
                 request_id,
@@ -1156,8 +1179,75 @@ class _AsyncLoopRunner:
                 timeout,
                 cancel_requested,
                 future.done(),
+                termination_timeout,
             )
-            raise
+            cleanup_started = perf_counter()
+            cleanup_completed = bool(
+                termination_state is not None
+                and termination_state.completed.wait(
+                    timeout=max(0.0, float(termination_timeout))
+                )
+            )
+            cleanup_confirmed = bool(
+                cleanup_completed
+                and termination_state is not None
+                and termination_state.timeout_cleanup_confirmed()
+            )
+            if cleanup_confirmed:
+                logger.warning(
+                    "event=async_loop.submit_timeout_cleanup_complete "
+                    "runner_id=%s operation=%s request_id=%s cleanup_ms=%.3f "
+                    "request_started=%s cancellation_observed=%s "
+                    "abort_attempted=%s abort_confirmed=%s abort_method=%s",
+                    self.runner_id,
+                    operation,
+                    request_id,
+                    (perf_counter() - cleanup_started) * 1000.0,
+                    termination_state.started,
+                    termination_state.cancellation_observed,
+                    termination_state.abort_attempted,
+                    termination_state.abort_confirmed,
+                    termination_state.abort_method,
+                )
+                raise
+            logger.error(
+                "event=async_loop.submit_timeout_cleanup_unconfirmed "
+                "runner_id=%s operation=%s request_id=%s cleanup_ms=%.3f "
+                "cleanup_completed=%s request_started=%s "
+                "cancellation_observed=%s abort_attempted=%s "
+                "abort_confirmed=%s abort_method=%s abort_error_type=%s",
+                self.runner_id,
+                operation,
+                request_id,
+                (perf_counter() - cleanup_started) * 1000.0,
+                cleanup_completed,
+                None if termination_state is None else termination_state.started,
+                (
+                    None
+                    if termination_state is None
+                    else termination_state.cancellation_observed
+                ),
+                (
+                    None
+                    if termination_state is None
+                    else termination_state.abort_attempted
+                ),
+                (
+                    None
+                    if termination_state is None
+                    else termination_state.abort_confirmed
+                ),
+                None if termination_state is None else termination_state.abort_method,
+                (
+                    None
+                    if termination_state is None
+                    else termination_state.abort_error_type
+                ),
+            )
+            raise ServiceRuntimeUnavailableError(
+                "timed-out custom vLLM request termination was not confirmed; "
+                "runtime is no longer safe to reuse"
+            ) from exc
         except Exception as exc:
             logger.info(
                 "event=async_loop.submit_failed runner_id=%s operation=%s "
@@ -1255,6 +1345,7 @@ class LocalVLLM910BRuntime:
         sampling_params_cls: Any,
         loop_runner: _AsyncLoopRunner,
         request_timeout: float | None,
+        request_abort_timeout: float,
         engine_kwargs: Mapping[str, Any],
     ) -> None:
         self.runtime_id = uuid.uuid4().hex[:12]
@@ -1263,13 +1354,16 @@ class LocalVLLM910BRuntime:
         self.sampling_params_cls = sampling_params_cls
         self.loop_runner = loop_runner
         self.request_timeout = request_timeout
+        self.request_abort_timeout = request_abort_timeout
         self.engine_kwargs = dict(engine_kwargs)
         self._close_lock = threading.Lock()
         self._closed = False
+        self._unavailable = False
         if logger.isEnabledFor(logging.INFO):
             logger.info(
                 "event=runtime.created runtime_id=%s runner_id=%s engine_type=%s "
                 "tokenizer_type=%s sampling_params_type=%s request_timeout=%s "
+                "request_abort_timeout=%s "
                 "engine_summary=%s",
                 self.runtime_id,
                 self.loop_runner.runner_id,
@@ -1281,6 +1375,7 @@ class LocalVLLM910BRuntime:
                     _type_name(self.sampling_params_cls),
                 ),
                 self.request_timeout,
+                self.request_abort_timeout,
                 _engine_log_summary(self.engine_kwargs),
             )
 
@@ -1292,11 +1387,12 @@ class LocalVLLM910BRuntime:
         sampling_params: Any,
         request_id: str | None = None,
     ) -> Any:
-        if self._closed:
+        if self._closed or self._unavailable:
             raise ServiceRuntimeUnavailableError(
-                "custom vLLM 910B runtime is closed"
+                "custom vLLM 910B runtime is closed or unavailable"
             )
         resolved_request_id = request_id or str(uuid.uuid4())
+        termination_state = _RequestTerminationState()
         started = perf_counter()
         if logger.isEnabledFor(logging.INFO):
             processors = _safe_getattr(sampling_params, "logits_processors", ())
@@ -1325,11 +1421,20 @@ class LocalVLLM910BRuntime:
                     prompt_token_ids=prompt_token_ids,
                     sampling_params=sampling_params,
                     request_id=resolved_request_id,
+                    termination_state=termination_state,
                 ),
                 timeout=self.request_timeout,
                 operation="generate",
                 request_id=resolved_request_id,
+                termination_state=termination_state,
+                termination_timeout=self.request_abort_timeout,
             )
+        except ServiceRuntimeUnavailableError:
+            # The timed-out request may still own engine resources.  Reject
+            # subsequent requests until the hosting layer closes/restarts the
+            # runtime instead of allowing an overlapping ghost generation.
+            self._unavailable = True
+            raise
         except Exception as exc:
             logger.info(
                 "event=runtime.generate_failed runtime_id=%s request_id=%s "
@@ -3074,17 +3179,25 @@ def load_vllm_model(
     )
     dtype = str(options.pop("dtype", _vllm_dtype()) or _VLLM_DTYPE)
     request_timeout = _env_float_optional("PROGRESSIVE_REQUEST_TIMEOUT")
+    request_abort_timeout = _env_float(
+        "SERVICE_910B_REQUEST_ABORT_TIMEOUT", 5.0
+    )
+    if request_abort_timeout <= 0:
+        raise ServiceConfigurationError(
+            "SERVICE_910B_REQUEST_ABORT_TIMEOUT must be greater than zero"
+        )
     logger.info(
         "event=runtime.load_normalized_options runtime_load_id=%s dtype=%s "
         "trust_remote_code=%s health_check_timeout=%s "
-        "health_check_interval=%s request_timeout=%s removed_service_options=%s "
-        "engine_option_keys=%s",
+        "health_check_interval=%s request_timeout=%s request_abort_timeout=%s "
+        "removed_service_options=%s engine_option_keys=%s",
         runtime_load_id,
         dtype,
         trust_remote_code,
         health_check_timeout,
         health_check_interval,
         request_timeout,
+        request_abort_timeout,
         {
             key: _safe_log_value(key, value)
             for key, value in removed_service_options.items()
@@ -3187,6 +3300,7 @@ def load_vllm_model(
         sampling_params_cls=SamplingParams,
         loop_runner=loop_runner,
         request_timeout=request_timeout,
+        request_abort_timeout=request_abort_timeout,
         engine_kwargs=accepted_engine_kwargs,
     )
     try:
@@ -3741,6 +3855,81 @@ def _processor_timing_snapshot_quiet(
         return ()
 
 
+async def _abort_custom_engine_request(
+    *,
+    engine: Any,
+    request_id: str,
+) -> tuple[bool, str | None, str | None]:
+    """Abort one request on the custom engine and await acknowledgement.
+
+    SkillHub's pinned adapter does not expose a cancellation wrapper.  Custom
+    910B vLLM builds have used both ``abort`` and ``abort_request``, on either
+    the async facade or its nested engine.  A successful return from one of
+    those request-ID APIs is the acknowledgement used by the timeout path.
+    """
+
+    nested_engine = _safe_getattr(engine, "engine", None)
+    candidates = (
+        ("engine.abort", _safe_getattr(engine, "abort", None)),
+        ("engine.abort_request", _safe_getattr(engine, "abort_request", None)),
+        (
+            "engine.engine.abort",
+            _safe_getattr(nested_engine, "abort", None),
+        ),
+        (
+            "engine.engine.abort_request",
+            _safe_getattr(nested_engine, "abort_request", None),
+        ),
+    )
+    last_error_type: str | None = None
+    callable_found = False
+    for method_name, abort_request in candidates:
+        if not callable(abort_request):
+            continue
+        callable_found = True
+        abort_started = perf_counter()
+        logger.warning(
+            "event=engine.generate_abort_begin request_id=%s method=%s",
+            request_id,
+            method_name,
+        )
+        try:
+            result = abort_request(request_id)
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:
+            last_error_type = type(exc).__name__
+            logger.error(
+                "event=engine.generate_abort_failed request_id=%s method=%s "
+                "elapsed_ms=%.3f error_type=%s",
+                request_id,
+                method_name,
+                (perf_counter() - abort_started) * 1000.0,
+                last_error_type,
+                exc_info=True,
+            )
+            continue
+        logger.warning(
+            "event=engine.generate_abort_complete request_id=%s method=%s "
+            "elapsed_ms=%.3f result_type=%s",
+            request_id,
+            method_name,
+            (perf_counter() - abort_started) * 1000.0,
+            _type_name(result),
+        )
+        return True, method_name, None
+
+    if not callable_found:
+        last_error_type = "AbortMethodUnavailable"
+        logger.error(
+            "event=engine.generate_abort_unavailable request_id=%s "
+            "checked_methods=%s",
+            request_id,
+            [name for name, _ in candidates],
+        )
+    return False, None, last_error_type
+
+
 async def _generate_on_910b_loop(
     *,
     engine: Any,
@@ -3748,7 +3937,10 @@ async def _generate_on_910b_loop(
     prompt_token_ids: Sequence[int],
     sampling_params: Any,
     request_id: str,
+    termination_state: _RequestTerminationState | None = None,
 ) -> Any:
+    state = termination_state or _RequestTerminationState()
+    state.started = True
     started = perf_counter()
     if logger.isEnabledFor(logging.INFO):
         logger.info(
@@ -3761,30 +3953,31 @@ async def _generate_on_910b_loop(
             _text_log_value(prompt),
             _token_ids_log_value(prompt_token_ids),
         )
-    results_generator = engine.generate(
-        prompt=prompt,
-        sampling_params=sampling_params,
-        request_id=request_id,
-        prompt_token_ids=[int(token_id) for token_id in prompt_token_ids],
-        tag=None,
-        arrival_time=None,
-        multi_modal_data=None,
-        scheduler_result=None,
-        is_stream=False,
-    )
-    logger.info(
-        "event=engine.generate_iterator request_id=%s iterator_type=%s "
-        "create_elapsed_ms=%.3f",
-        request_id,
-        _type_name(results_generator),
-        (perf_counter() - started) * 1000.0,
-    )
+    results_generator: Any = None
     final_output = None
     frame_count = 0
     first_frame_ms: float | None = None
     first_token_frame_ms: float | None = None
     first_token_frame_count: int | None = None
     try:
+        results_generator = engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            prompt_token_ids=[int(token_id) for token_id in prompt_token_ids],
+            tag=None,
+            arrival_time=None,
+            multi_modal_data=None,
+            scheduler_result=None,
+            is_stream=False,
+        )
+        logger.info(
+            "event=engine.generate_iterator request_id=%s iterator_type=%s "
+            "create_elapsed_ms=%.3f",
+            request_id,
+            _type_name(results_generator),
+            (perf_counter() - started) * 1000.0,
+        )
         async for request_output in results_generator:
             frame_count += 1
             if first_frame_ms is None:
@@ -3819,12 +4012,46 @@ async def _generate_on_910b_loop(
                     _type_name(request_output),
                 )
     except asyncio.CancelledError:
+        state.cancellation_observed = True
+        state.abort_attempted = True
+        abort_confirmed, abort_method, abort_error_type = (
+            await _abort_custom_engine_request(
+                engine=engine,
+                request_id=request_id,
+            )
+        )
+        state.abort_confirmed = abort_confirmed
+        state.abort_method = abort_method
+        state.abort_error_type = abort_error_type
+
+        iterator_close_confirmed = True
+        iterator_close = _safe_getattr(results_generator, "aclose", None)
+        if callable(iterator_close):
+            try:
+                close_result = iterator_close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception as close_exc:
+                iterator_close_confirmed = False
+                logger.error(
+                    "event=engine.generate_iterator_close_failed request_id=%s "
+                    "error_type=%s",
+                    request_id,
+                    type(close_exc).__name__,
+                    exc_info=True,
+                )
         logger.warning(
             "event=engine.generate_cancelled request_id=%s elapsed_ms=%.3f "
-            "frames=%s message=python_future_cancelled_engine_abort_not_confirmed",
+            "frames=%s abort_attempted=%s abort_confirmed=%s abort_method=%s "
+            "abort_error_type=%s iterator_close_confirmed=%s",
             request_id,
             (perf_counter() - started) * 1000.0,
             frame_count,
+            state.abort_attempted,
+            state.abort_confirmed,
+            state.abort_method,
+            state.abort_error_type,
+            iterator_close_confirmed,
         )
         raise
     except Exception as exc:
@@ -3838,6 +4065,11 @@ async def _generate_on_910b_loop(
             exc_info=True,
         )
         raise
+    finally:
+        # threading.Event publishes all state fields to the caller waiting in
+        # _AsyncLoopRunner.submit.  It is intentionally set only after abort
+        # and iterator cleanup have returned on the engine's own event loop.
+        state.completed.set()
     if final_output is None:
         logger.error(
             "event=engine.generate_empty request_id=%s elapsed_ms=%.3f frames=0",

@@ -122,6 +122,10 @@ class _FakeDependencyState:
         self.from_engine_args_calls: list[object] = []
         self.sampling_params_calls: list[dict[str, object]] = []
         self.generate_calls: list[dict[str, object]] = []
+        self.generate_delay = 0.0
+        self.abort_delay = 0.0
+        self.abort_error: BaseException | None = None
+        self.abort_calls: list[str] = []
         self.engine: object | None = None
         self.tokenizer: object | None = None
         self.engine_role_m = object()
@@ -257,37 +261,52 @@ def _fake_dependency_modules(
             state.events.append("generate")
 
             async def output_frames() -> object:
-                processor = sampling_params.logits_processors[0]  # type: ignore[attr-defined]
-                for prefix in (
-                    [],
-                    [1],
-                    [1, 2],
-                    [1, 2, 9],
-                    [1, 2, 9, 4],
-                ):
-                    processor(prefix, FakeScores())
-                # The first frame is intentionally unusable: successful decoding
-                # proves that the service consumes the final streamed frame.
-                yield SimpleNamespace(
-                    outputs=[
-                        SimpleNamespace(
-                            text="partial-text-must-not-be-parsed",
-                            token_ids=[999],
-                            finish_reason=None,
-                        )
-                    ]
-                )
-                yield SimpleNamespace(
-                    outputs=[
-                        SimpleNamespace(
-                            text="text-must-not-be-used-for-routing",
-                            token_ids=[1, 2, 9, 4, 5],
-                            finish_reason="length",
-                        )
-                    ]
-                )
+                try:
+                    if state.generate_delay:
+                        await asyncio.sleep(state.generate_delay)
+                    processor = sampling_params.logits_processors[0]  # type: ignore[attr-defined]
+                    for prefix in (
+                        [],
+                        [1],
+                        [1, 2],
+                        [1, 2, 9],
+                        [1, 2, 9, 4],
+                    ):
+                        processor(prefix, FakeScores())
+                    # The first frame is intentionally unusable: successful
+                    # decoding proves that the service consumes the final frame.
+                    yield SimpleNamespace(
+                        outputs=[
+                            SimpleNamespace(
+                                text="partial-text-must-not-be-parsed",
+                                token_ids=[999],
+                                finish_reason=None,
+                            )
+                        ]
+                    )
+                    yield SimpleNamespace(
+                        outputs=[
+                            SimpleNamespace(
+                                text="text-must-not-be-used-for-routing",
+                                token_ids=[1, 2, 9, 4, 5],
+                                finish_reason="length",
+                            )
+                        ]
+                    )
+                finally:
+                    state.events.append("generate_finalized")
 
             return output_frames()
+
+        @staticmethod
+        async def abort(request_id: str) -> None:
+            state.abort_calls.append(request_id)
+            state.events.append("abort_begin")
+            if state.abort_delay:
+                await asyncio.sleep(state.abort_delay)
+            if state.abort_error is not None:
+                raise state.abort_error
+            state.events.append("abort_complete")
 
         @staticmethod
         def shutdown_background_loop() -> None:
@@ -1410,6 +1429,7 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                 "start_background_loop",
                 "is_health",
                 "generate",
+                "generate_finalized",
                 "shutdown_background_loop",
                 "llm_engine.shutdown",
             ],
@@ -1426,6 +1446,93 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                 and thread.is_alive()
                 for thread in threading.enumerate()
             )
+        )
+
+    def test_request_timeout_waits_for_confirmed_engine_abort(self) -> None:
+        state = _FakeDependencyState()
+        state.generate_delay = 10.0
+        fake_modules = _fake_dependency_modules(state)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            environment = _service_environment(directory)
+            environment["PROGRESSIVE_REQUEST_TIMEOUT"] = "0.02"
+            environment["SERVICE_910B_REQUEST_ABORT_TIMEOUT"] = "0.5"
+            runtime = service_910b.RetriverTest()
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, fake_modules),
+                self.assertLogs(service_910b.logger, level="WARNING") as captured,
+            ):
+                runtime.load()
+                try:
+                    timed_out_result = runtime.calc(
+                        {"data": {"query": "first request"}}
+                    )
+                    # A confirmed abort leaves the runtime reusable.
+                    state.generate_delay = 0.0
+                    next_result = runtime.calc(
+                        {"data": {"query": "second request"}}
+                    )
+                finally:
+                    runtime.close()
+
+        self.assertEqual(json.loads(timed_out_result), [])
+        self.assertEqual(
+            json.loads(next_result), ["天气查询", "地图导航"]
+        )
+        self.assertEqual(len(state.abort_calls), 1)
+        self.assertEqual(
+            state.abort_calls[0], state.generate_calls[0]["request_id"]
+        )
+        self.assertIn("abort_complete", state.events)
+        self.assertIn("generate_finalized", state.events)
+        messages = "\n".join(record.getMessage() for record in captured.records)
+        self.assertIn("event=engine.generate_abort_complete", messages)
+        self.assertIn(
+            "event=async_loop.submit_timeout_cleanup_complete", messages
+        )
+
+    def test_unconfirmed_timeout_makes_runtime_unavailable(self) -> None:
+        state = _FakeDependencyState()
+        state.generate_delay = 10.0
+        state.abort_error = RuntimeError("fake abort failure")
+        fake_modules = _fake_dependency_modules(state)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            environment = _service_environment(directory)
+            environment["PROGRESSIVE_REQUEST_TIMEOUT"] = "0.02"
+            environment["SERVICE_910B_REQUEST_ABORT_TIMEOUT"] = "0.5"
+            runtime = service_910b.RetriverTest()
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, fake_modules),
+                self.assertLogs(service_910b.logger, level="ERROR") as captured,
+            ):
+                runtime.load()
+                try:
+                    with self.assertRaises(
+                        service_910b.ServiceRuntimeUnavailableError
+                    ):
+                        runtime.calc({"data": {"query": "first request"}})
+                    with self.assertRaises(
+                        service_910b.ServiceRuntimeUnavailableError
+                    ):
+                        runtime.calc({"data": {"query": "second request"}})
+                finally:
+                    runtime.close()
+
+        self.assertEqual(len(state.abort_calls), 1)
+        self.assertEqual(len(state.generate_calls), 1)
+        messages = "\n".join(record.getMessage() for record in captured.records)
+        self.assertIn("event=engine.generate_abort_failed", messages)
+        self.assertIn(
+            "event=async_loop.submit_timeout_cleanup_unconfirmed", messages
         )
 
     def test_startup_failure_closes_engine_and_async_loop(self) -> None:
