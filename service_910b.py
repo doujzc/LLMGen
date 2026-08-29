@@ -1860,7 +1860,6 @@ class RetriverTest:
                 output_budget = (
                     self.trie.max_paths * self.bundle.num_levels
                     + (self.trie.max_paths - 1) * len(separator_ids)
-                    + 1
                 )
                 engine_max_length = _custom_engine_max_model_len(self.llm)
                 stage = "resolve_context_limits"
@@ -2281,8 +2280,6 @@ class RetriverTest:
             request_output, request_id=resolved_request_id
         )
         finish_reason = _output_field(completion, "finish_reason")
-        if finish_reason == "length":
-            raise RuntimeError("constrained vLLM generation exhausted its token budget")
         raw_token_ids = _output_field(completion, "token_ids")
         if raw_token_ids is None:
             raise RuntimeError("custom vLLM 910B completion has no token IDs")
@@ -2299,19 +2296,31 @@ class RetriverTest:
         try:
             eos_position = generated.index(self.trie.eos_token_id)
         except ValueError as exc:
-            raise RuntimeError("constrained vLLM generation did not emit EOS") from exc
-        trailing_count = len(generated) - eos_position - 1
-        if trailing_count:
-            logger.warning(
-                "event=search.tokens_after_eos instance_id=%s request_id=%s "
-                "eos_position=%s trailing_count=%s trailing_tokens=%s",
+            if finish_reason != "length":
+                raise RuntimeError(
+                    "constrained vLLM generation did not emit EOS"
+                ) from exc
+            eos_position = None
+            logger.info(
+                "event=search.length_truncation_accepted instance_id=%s "
+                "request_id=%s generated_count=%s",
                 self.instance_id,
                 resolved_request_id,
-                eos_position,
-                trailing_count,
-                _token_ids_log_value(generated[eos_position + 1 :]),
+                len(generated),
             )
-        generated = generated[:eos_position]
+        else:
+            trailing_count = len(generated) - eos_position - 1
+            if trailing_count:
+                logger.warning(
+                    "event=search.tokens_after_eos instance_id=%s request_id=%s "
+                    "eos_position=%s trailing_count=%s trailing_tokens=%s",
+                    self.instance_id,
+                    resolved_request_id,
+                    eos_position,
+                    trailing_count,
+                    _token_ids_log_value(generated[eos_position + 1 :]),
+                )
+            generated = generated[:eos_position]
         paths = self.trie.parse_complete(
             generated, request_id=resolved_request_id
         )

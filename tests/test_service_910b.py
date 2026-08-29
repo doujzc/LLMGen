@@ -256,8 +256,8 @@ def _fake_dependency_modules(
                     outputs=[
                         SimpleNamespace(
                             text="text-must-not-be-used-for-routing",
-                            token_ids=[1, 2, 9, 4, 5, 0],
-                            finish_reason="stop",
+                            token_ids=[1, 2, 9, 4, 5],
+                            finish_reason="length",
                         )
                     ]
                 )
@@ -985,7 +985,7 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                     )
                     self.assertEqual(runtime.backend, "vllm_910b")
                     self.assertEqual(runtime.system_prompt, "测试专用检索提示")
-                    self.assertEqual(runtime.max_input_length, 58)
+                    self.assertEqual(runtime.max_input_length, 59)
 
                     self.assertEqual(len(state.tokenizer_load_calls), 1)
                     tokenizer_path, tokenizer_kwargs = state.tokenizer_load_calls[0]
@@ -1060,7 +1060,7 @@ class CustomVllm910BServiceTest(unittest.TestCase):
                         },
                     )
                     self.assertEqual(sampling_kwargs["temperature"], 0.0)
-                    self.assertEqual(sampling_kwargs["max_tokens"], 6)
+                    self.assertEqual(sampling_kwargs["max_tokens"], 5)
                     self.assertEqual(sampling_kwargs["min_tokens"], 2)
                     self.assertFalse(sampling_kwargs["detokenize"])
                     self.assertFalse(sampling_kwargs["skip_special_tokens"])
