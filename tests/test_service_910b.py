@@ -184,6 +184,22 @@ def _fake_dependency_modules(
             state.sampling_params_calls.append(dict(kwargs))
             self.__dict__.update(kwargs)
 
+    class FakeScores:
+        shape = (16,)
+
+        @classmethod
+        def new_full(cls, shape: object, value: object) -> "FakeScores":
+            del shape, value
+            return cls()
+
+        @staticmethod
+        def __getitem__(indices: object) -> list[float]:
+            return [0.0 for _ in indices]  # type: ignore[union-attr]
+
+        @staticmethod
+        def __setitem__(indices: object, values: object) -> None:
+            del indices, values
+
     class FakeAsyncEngineArgs:
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = dict(kwargs)
@@ -241,6 +257,15 @@ def _fake_dependency_modules(
             state.events.append("generate")
 
             async def output_frames() -> object:
+                processor = sampling_params.logits_processors[0]  # type: ignore[attr-defined]
+                for prefix in (
+                    [],
+                    [1],
+                    [1, 2],
+                    [1, 2, 9],
+                    [1, 2, 9, 4],
+                ):
+                    processor(prefix, FakeScores())
                 # The first frame is intentionally unusable: successful decoding
                 # proves that the service consumes the final streamed frame.
                 yield SimpleNamespace(
@@ -253,16 +278,6 @@ def _fake_dependency_modules(
                     ]
                 )
                 yield SimpleNamespace(
-                    metrics=SimpleNamespace(
-                        arrival_time=10.0,
-                        first_scheduled_time=10.02,
-                        first_token_time=10.1,
-                        last_token_time=10.5,
-                        time_in_queue=0.02,
-                        scheduler_time=0.03,
-                        model_forward_time=0.4,
-                        model_execute_time=0.45,
-                    ),
                     outputs=[
                         SimpleNamespace(
                             text="text-must-not-be-used-for-routing",
@@ -1169,8 +1184,14 @@ class CustomVllm910BServiceTest(unittest.TestCase):
             )
             self.assertIn("ttft_ms=", engine_latency)
             self.assertIn("tpot_ms=", engine_latency)
-            self.assertIn("timing_source=request_output_metrics", engine_latency)
+            self.assertNotIn("ttft_ms=None", engine_latency)
+            self.assertNotIn("tpot_ms=None", engine_latency)
+            self.assertIn(
+                "timing_source=logits_processor_callbacks", engine_latency
+            )
             self.assertIn("completion_tokens=5", engine_latency)
+            self.assertIn("average_output_token_ms=", engine_latency)
+            self.assertIn("processor_timing_steps=5", engine_latency)
             search_latency = next(
                 message
                 for message in debug_messages

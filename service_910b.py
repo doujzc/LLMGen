@@ -790,12 +790,28 @@ class TrieLogitsProcessor:
 
     def __init__(self, trie: MultiPathTokenTrie) -> None:
         self.trie = trie
+        # The decoding rule itself is stateless.  These bounded timestamps are
+        # diagnostics only: the custom SkillHub flow is non-streaming, while
+        # the processor is invoked immediately before each sampled token.
+        self._timing_steps: dict[int, float] = {}
 
     def clone(self) -> "TrieLogitsProcessor":
-        # The processor is stateless; generated IDs are supplied by vLLM.
+        # Share diagnostic timestamps when the custom engine clones a request
+        # processor inside the service process.
         return self
 
+    def timing_snapshot(self) -> tuple[tuple[int, float], ...]:
+        """Return sampled-token step start times for the current request."""
+
+        return tuple(sorted(self._timing_steps.items()))
+
     def __call__(self, output_token_ids: list[int], scores: Any) -> Any:
+        generated_count = len(output_token_ids)
+        now = perf_counter()
+        if generated_count == 0:
+            self._timing_steps = {0: now}
+        elif generated_count not in self._timing_steps:
+            self._timing_steps[generated_count] = now
         allowed = self.trie.allowed_next(output_token_ids)
         if logger.isEnabledFor(logging.INFO) and _log_flag(
             "SERVICE_910B_TRACE_TRIE", False
@@ -803,7 +819,7 @@ class TrieLogitsProcessor:
             logger.info(
                 "event=trie.mask.step generated_count=%s generated=%s allowed_count=%s "
                 "allowed=%s score_shape=%s",
-                len(output_token_ids),
+                generated_count,
                 _token_ids_log_value(output_token_ids),
                 len(allowed),
                 _token_ids_log_value(allowed),
@@ -812,7 +828,7 @@ class TrieLogitsProcessor:
         if not allowed:
             logger.error(
                 "event=trie.mask.invalid_prefix generated_count=%s generated=%s",
-                len(output_token_ids),
+                generated_count,
                 _token_ids_log_value(output_token_ids),
             )
             raise RuntimeError(
@@ -3610,6 +3626,33 @@ def _request_metric_seconds_quiet(request_output: Any, name: str) -> float | Non
         return None
 
 
+def _processor_timing_snapshot_quiet(
+    sampling_params: Any,
+) -> tuple[tuple[int, float], ...]:
+    """Read in-process logits-processor timing without affecting generation."""
+
+    try:
+        processors = _safe_getattr(sampling_params, "logits_processors", ())
+        if (
+            not isinstance(processors, Sequence)
+            or isinstance(processors, (str, bytes, bytearray))
+            or not processors
+        ):
+            return ()
+        snapshot = _safe_getattr(processors[0], "timing_snapshot", None)
+        if not callable(snapshot):
+            return ()
+        normalized: list[tuple[int, float]] = []
+        for raw_count, raw_time in snapshot():
+            count = int(raw_count)
+            timestamp = _finite_float_quiet(raw_time)
+            if count >= 0 and timestamp is not None:
+                normalized.append((count, timestamp))
+        return tuple(sorted(normalized))
+    except Exception:
+        return ()
+
+
 async def _generate_on_910b_loop(
     *,
     engine: Any,
@@ -3714,8 +3757,38 @@ async def _generate_on_910b_loop(
             (perf_counter() - started) * 1000.0,
         )
         raise RuntimeError("custom vLLM returned no request outputs")
-    total_ms = (perf_counter() - started) * 1000.0
+    finished_at = perf_counter()
+    total_ms = (finished_at - started) * 1000.0
     completion_tokens = _completion_token_count_quiet(final_output)
+    average_output_token_ms = (
+        None
+        if completion_tokens is None or completion_tokens < 1
+        else total_ms / completion_tokens
+    )
+    processor_timing = tuple(
+        (count, timestamp)
+        for count, timestamp in _processor_timing_snapshot_quiet(sampling_params)
+        if started <= timestamp <= finished_at
+    )
+    processor_step_times = dict(processor_timing)
+    processor_first_token_time = processor_step_times.get(1)
+    processor_ttft_ms: float | None = None
+    processor_tpot_ms: float | None = None
+    if (
+        completion_tokens is not None
+        and completion_tokens > 0
+        and processor_first_token_time is not None
+        and started <= processor_first_token_time <= finished_at
+    ):
+        processor_ttft_ms = (processor_first_token_time - started) * 1000.0
+        if completion_tokens > 1:
+            processor_tpot_ms = (
+                (finished_at - processor_first_token_time)
+                * 1000.0
+                / (completion_tokens - 1)
+            )
+    elif completion_tokens == 1 and 0 in processor_step_times:
+        processor_ttft_ms = total_ms
     arrival_time = _request_metric_seconds_quiet(final_output, "arrival_time")
     first_token_time = _request_metric_seconds_quiet(
         final_output, "first_token_time"
@@ -3762,6 +3835,13 @@ async def _generate_on_910b_loop(
                 * 1000.0
                 / (completion_tokens - 1)
             )
+        elif processor_tpot_ms is not None:
+            tpot_ms = processor_tpot_ms
+            timing_source = "request_metrics_and_logits_processor_callbacks"
+    elif processor_ttft_ms is not None:
+        ttft_ms = processor_ttft_ms
+        tpot_ms = processor_tpot_ms
+        timing_source = "logits_processor_callbacks"
     elif first_token_frame_ms is not None:
         # The SkillHub-compatible request is deliberately non-streaming.  A
         # custom engine may still yield intermediate RequestOutputs, but this
@@ -3790,6 +3870,7 @@ async def _generate_on_910b_loop(
         "event=engine.generate_complete request_id=%s elapsed_ms=%.3f "
         "first_frame_ms=%s first_token_frame_ms=%s first_token_frame_count=%s "
         "ttft_ms=%s tpot_ms=%s timing_source=%s completion_tokens=%s "
+        "average_output_token_ms=%s processor_timing_steps=%s "
         "engine_queue_ms=%s scheduler_ms=%s model_forward_ms=%s "
         "model_execute_ms=%s frames=%s is_stream=False final_type=%s",
         request_id,
@@ -3801,6 +3882,8 @@ async def _generate_on_910b_loop(
         tpot_ms,
         timing_source,
         completion_tokens,
+        average_output_token_ms,
+        len(processor_timing),
         None if engine_queue_seconds is None else engine_queue_seconds * 1000.0,
         None if scheduler_seconds is None else scheduler_seconds * 1000.0,
         None if model_forward_seconds is None else model_forward_seconds * 1000.0,
