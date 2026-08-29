@@ -330,6 +330,39 @@ def _fake_dependency_modules(
 
 
 class SelfContainedService910BTest(unittest.TestCase):
+    def test_top_k_is_optional_and_defaults_to_two(self) -> None:
+        environment = {
+            "MOCK_MODE": "1",
+            "MOCK_RESPONSES_JSON": json.dumps(
+                ["Skill A", "Skill B", "Skill C"]
+            ),
+            "SERVICE_910B_LOG_LEVEL": "ERROR",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            runtime = service_910b.RetriverTest()
+            runtime.load()
+            try:
+                self.assertEqual(runtime.default_top_k, 2)
+                for request in (
+                    {"query": "test"},
+                    {"query": "test", "top_k": None},
+                    {"query": "test", "top_k": ""},
+                ):
+                    self.assertEqual(
+                        json.loads(runtime.calc({"data": request})),
+                        ["Skill A", "Skill B"],
+                    )
+                self.assertEqual(
+                    json.loads(
+                        runtime.calc(
+                            {"data": {"query": "test", "topk": 1}}
+                        )
+                    ),
+                    ["Skill A"],
+                )
+            finally:
+                runtime.close()
+
     def test_imports_only_standard_library_and_lazy_runtime_dependencies(self) -> None:
         source_path = Path(service_910b.__file__).resolve()
         tree = ast.parse(source_path.read_text(encoding="utf-8"))

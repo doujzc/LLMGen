@@ -6,7 +6,9 @@ The hosting contract intentionally matches the reference retrieval service:
 
 * ``load()`` initializes the long-lived model runtime.
 * ``calc({"data": {"query": ..., "top_k": ...}})`` returns a JSON string
-  containing a list of Skill names.
+  containing a list of Skill names. ``top_k`` is optional (``topk`` is also
+  accepted); when omitted, null, or empty, it uses ``TOP_K`` whose default is
+  ``2``.
 
 The model directory must be a complete LLMGen Router bundle containing the
 Hugging Face model/tokenizer files, ``skill_decode_map.json``,
