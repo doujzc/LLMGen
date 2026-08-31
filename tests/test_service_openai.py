@@ -399,6 +399,58 @@ class IndependentVllmLoaderTest(unittest.TestCase):
         )
         self.assertEqual(result["outputs"][0]["token_ids"], [1, 2])
 
+    def test_model_output_debug_logging_is_bounded_and_opt_in(self) -> None:
+        response = {"text": ["prompt" + "x" * 100]}
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(service_openai.logger, "info") as log_info,
+        ):
+            service_openai._log_vllm_raw_response(
+                response,
+                instance_id="instance",
+                request_id="request",
+            )
+            service_openai._log_vllm_token_ids(
+                [1, 2, 3],
+                stage="raw_generation",
+                instance_id="instance",
+                request_id="request",
+            )
+        log_info.assert_not_called()
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SERVICE_OPENAI_LOG_MODEL_OUTPUT": "1",
+                    "SERVICE_OPENAI_LOG_TOKEN_IDS": "1",
+                    "SERVICE_OPENAI_LOG_PREVIEW_CHARS": "20",
+                    "SERVICE_OPENAI_LOG_TOKEN_ITEMS": "2",
+                },
+                clear=True,
+            ),
+            patch.object(service_openai.logger, "info") as log_info,
+        ):
+            service_openai._log_vllm_raw_response(
+                response,
+                instance_id="instance",
+                request_id="request",
+            )
+            service_openai._log_vllm_token_ids(
+                [1, 2, 3],
+                stage="raw_generation",
+                instance_id="instance",
+                request_id="request",
+            )
+
+        self.assertEqual(log_info.call_count, 2)
+        raw_log_args = log_info.call_args_list[0].args
+        self.assertIn("event=search.model_raw_output", raw_log_args[0])
+        self.assertIn("<truncated chars=", raw_log_args[-1])
+        token_log_args = log_info.call_args_list[1].args
+        self.assertIn("event=search.model_token_ids", token_log_args[0])
+        self.assertEqual(token_log_args[-1], "[1, 2]<truncated items=1>")
+
     def test_existing_single_card_kwargs_json_maps_to_cli(self) -> None:
         with patch.dict(
             os.environ,

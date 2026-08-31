@@ -115,6 +115,8 @@ _DEFAULT_VLLM_SERVER_HOST = "127.0.0.1"
 _DEFAULT_VLLM_STARTUP_TIMEOUT_SECONDS = 900.0
 _DEFAULT_VLLM_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 _DEFAULT_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
+_DEFAULT_MODEL_OUTPUT_PREVIEW_CHARS = 4000
+_DEFAULT_MODEL_OUTPUT_TOKEN_ITEMS = 256
 _VLLM_SERVER_SUPPORTED_KWARGS = frozenset(
     {
         "tokenizer_mode",
@@ -800,6 +802,23 @@ class RetriverTest:
                     self.instance_id,
                     load_id,
                 )
+                logger.info(
+                    "event=service.model_output_logging instance_id=%s "
+                    "load_id=%s raw_output_enabled=%s token_ids_enabled=%s "
+                    "preview_chars=%s token_items=%s",
+                    self.instance_id,
+                    load_id,
+                    _env_bool("SERVICE_OPENAI_LOG_MODEL_OUTPUT", False),
+                    _env_bool("SERVICE_OPENAI_LOG_TOKEN_IDS", False),
+                    _debug_log_positive_int(
+                        "SERVICE_OPENAI_LOG_PREVIEW_CHARS",
+                        _DEFAULT_MODEL_OUTPUT_PREVIEW_CHARS,
+                    ),
+                    _debug_log_positive_int(
+                        "SERVICE_OPENAI_LOG_TOKEN_ITEMS",
+                        _DEFAULT_MODEL_OUTPUT_TOKEN_ITEMS,
+                    ),
+                )
                 self.backend = "vllm_http"
                 self._loaded = True
                 logger.info(
@@ -981,12 +1000,13 @@ class RetriverTest:
             logger.error(
                 "event=service.calc_recovered instance_id=%s request_id=%s "
                 "phase=%s recoverable=True elapsed_ms=%.3f error_type=%s "
-                "response=[]",
+                "error=%s response=[]",
                 self.instance_id,
                 request_id,
                 phase,
                 (perf_counter() - total_started) * 1000.0,
                 type(exc).__name__,
+                _debug_error_log_value(exc),
             )
             return json.dumps([], ensure_ascii=False)
 
@@ -1118,11 +1138,33 @@ class RetriverTest:
         generation_started = perf_counter()
         response = self.vllm_client.generate(payload)
         generation_ms = (perf_counter() - generation_started) * 1000.0
-        decode_started = perf_counter()
-        generated = _vllm_generate_token_ids(
+        _log_vllm_raw_response(
             response,
-            tokenizer=self.tokenizer,
-            prompt=prompt,
+            instance_id=self.instance_id,
+            request_id=resolved_request_id,
+        )
+        decode_started = perf_counter()
+        try:
+            generated = _vllm_generate_token_ids(
+                response,
+                tokenizer=self.tokenizer,
+                prompt=prompt,
+            )
+        except Exception as exc:
+            logger.error(
+                "event=search.model_output_decode_failed instance_id=%s "
+                "request_id=%s error_type=%s error=%s",
+                self.instance_id,
+                resolved_request_id,
+                type(exc).__name__,
+                _debug_error_log_value(exc),
+            )
+            raise
+        _log_vllm_token_ids(
+            generated,
+            stage="raw_generation",
+            instance_id=self.instance_id,
+            request_id=resolved_request_id,
         )
         try:
             eos_position = generated.index(self.trie.eos_token_id)
@@ -1132,7 +1174,26 @@ class RetriverTest:
             eos_position = None
         else:
             generated = generated[:eos_position]
-        paths = self.trie.parse_complete(generated)
+        _log_vllm_token_ids(
+            generated,
+            stage="trie_input",
+            instance_id=self.instance_id,
+            request_id=resolved_request_id,
+        )
+        try:
+            paths = self.trie.parse_complete(generated)
+        except Exception as exc:
+            logger.error(
+                "event=search.trie_parse_failed instance_id=%s request_id=%s "
+                "error_type=%s error=%s generated_count=%s token_ids=%s",
+                self.instance_id,
+                resolved_request_id,
+                type(exc).__name__,
+                _debug_error_log_value(exc),
+                len(generated),
+                _debug_token_ids_log_value(generated),
+            )
+            raise
         decode_ms = (perf_counter() - decode_started) * 1000.0
 
         mapping_started = perf_counter()
@@ -1834,6 +1895,116 @@ def _close_vllm_client(client: Any | None) -> None:
             close()
         except Exception:
             logger.exception("failed to close local vLLM HTTP client")
+
+
+def _debug_log_positive_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning(
+            "event=service.debug_log_limit_invalid name=%s value=%s "
+            "fallback=%s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    if value < 1:
+        logger.warning(
+            "event=service.debug_log_limit_invalid name=%s value=%s "
+            "fallback=%s",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+    return value
+
+
+def _bounded_log_text(value: str, *, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit] + f"<truncated chars={len(value) - limit}>"
+
+
+def _log_vllm_raw_response(
+    response: Mapping[str, Any],
+    *,
+    instance_id: str,
+    request_id: str,
+) -> None:
+    if not _env_bool("SERVICE_OPENAI_LOG_MODEL_OUTPUT", False):
+        return
+    serialized = json.dumps(
+        response,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+    limit = _debug_log_positive_int(
+        "SERVICE_OPENAI_LOG_PREVIEW_CHARS",
+        _DEFAULT_MODEL_OUTPUT_PREVIEW_CHARS,
+    )
+    logger.info(
+        "event=search.model_raw_output instance_id=%s request_id=%s "
+        "response_chars=%s response=%s",
+        instance_id,
+        request_id,
+        len(serialized),
+        _bounded_log_text(serialized, limit=limit),
+    )
+
+
+def _debug_token_ids_log_value(token_ids: Sequence[int]) -> str:
+    if not _env_bool("SERVICE_OPENAI_LOG_TOKEN_IDS", False):
+        return f"<hidden count={len(token_ids)}>"
+    item_limit = _debug_log_positive_int(
+        "SERVICE_OPENAI_LOG_TOKEN_ITEMS",
+        _DEFAULT_MODEL_OUTPUT_TOKEN_ITEMS,
+    )
+    visible = [int(value) for value in token_ids[:item_limit]]
+    if len(token_ids) <= item_limit:
+        return repr(visible)
+    return repr(visible) + f"<truncated items={len(token_ids) - item_limit}>"
+
+
+def _log_vllm_token_ids(
+    token_ids: Sequence[int],
+    *,
+    stage: str,
+    instance_id: str,
+    request_id: str,
+) -> None:
+    if not _env_bool("SERVICE_OPENAI_LOG_TOKEN_IDS", False):
+        return
+    logger.info(
+        "event=search.model_token_ids instance_id=%s request_id=%s "
+        "stage=%s count=%s token_ids=%s",
+        instance_id,
+        request_id,
+        stage,
+        len(token_ids),
+        _debug_token_ids_log_value(token_ids),
+    )
+
+
+def _debug_error_log_value(exc: BaseException) -> str:
+    if not (
+        _env_bool("SERVICE_OPENAI_LOG_MODEL_OUTPUT", False)
+        or _env_bool("SERVICE_OPENAI_LOG_TOKEN_IDS", False)
+    ):
+        return (
+            "<hidden; enable SERVICE_OPENAI_LOG_MODEL_OUTPUT or "
+            "SERVICE_OPENAI_LOG_TOKEN_IDS>"
+        )
+    limit = _debug_log_positive_int(
+        "SERVICE_OPENAI_LOG_PREVIEW_CHARS",
+        _DEFAULT_MODEL_OUTPUT_PREVIEW_CHARS,
+    )
+    return _bounded_log_text(str(exc), limit=limit)
 
 
 def _object_field(value: Any, name: str, default: Any = None) -> Any:
