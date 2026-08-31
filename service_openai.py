@@ -25,9 +25,11 @@ when it is unset, zero, or occupied, the service chooses another free port.
 
 Inference uses the server's ``POST /generate`` endpoint. The simple API-server
 protocol cannot transport an in-process Python Trie callback, so generated
-token IDs are strictly validated against the same LLMGen Trie before Skill
-mapping. Deployments whose custom endpoint supports additional constrained
-decoding fields can add them through ``VLLM_GENERATE_KWARGS_JSON``.
+token IDs are validated against the same LLMGen Trie before Skill mapping. If
+an invalid suffix follows one or more complete registered paths, the longest
+complete prefix is retained. Deployments whose custom endpoint supports
+additional constrained decoding fields can add them through
+``VLLM_GENERATE_KWARGS_JSON``.
 
 For local contract tests, set ``MOCK_MODE=1``.  This skips model and candidate
 artifact loading.  ``MOCK_RESPONSES_JSON`` may be either one result list used
@@ -245,6 +247,27 @@ class VllmGenerateClient:
         """Match the service lifecycle; urllib keeps no owned session."""
 
 
+@dataclass(frozen=True)
+class TrieParseResult:
+    """Result of one strict-or-recoverable token grammar scan."""
+
+    paths: tuple[tuple[int, ...], ...]
+    recovered: bool
+    consumed_tokens: int
+    discarded_tokens: int
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _TrieScanState:
+    completed: tuple[tuple[int, ...], ...]
+    prefix: tuple[int, ...]
+    mode: str
+    separator_offset: int
+    invalid_reason: str | None
+    last_complete_token_count: int
+
+
 class MultiPathTokenTrie:
     """Grammar for ``path (separator path)* EOS`` constrained decoding."""
 
@@ -282,33 +305,63 @@ class MultiPathTokenTrie:
         self.separator_token_ids = separator
         self.max_paths = min(int(max_paths), len(self.paths))
 
+        # Build immutable prefix indexes once during load. Request-time parsing
+        # then performs O(generated tokens) dictionary lookups instead of
+        # scanning every candidate path for every generated token.
+        paths_by_prefix: dict[
+            tuple[int, ...], set[tuple[int, ...]]
+        ] = {}
+        next_tokens_by_prefix: dict[tuple[int, ...], set[int]] = {}
+        for path in self.paths:
+            for depth in range(self.num_levels + 1):
+                prefix = path[:depth]
+                paths_by_prefix.setdefault(prefix, set()).add(path)
+                if depth < self.num_levels:
+                    next_tokens_by_prefix.setdefault(prefix, set()).add(path[depth])
+        self._paths_by_prefix = {
+            prefix: frozenset(descendants)
+            for prefix, descendants in paths_by_prefix.items()
+        }
+        self._next_tokens_by_prefix = {
+            prefix: tuple(sorted(token_ids))
+            for prefix, token_ids in next_tokens_by_prefix.items()
+        }
+
     def _state(
         self, generated: Sequence[int]
-    ) -> tuple[tuple[tuple[int, ...], ...], tuple[int, ...], str, int] | None:
+    ) -> _TrieScanState:
         completed: list[tuple[int, ...]] = []
+        completed_set: set[tuple[int, ...]] = set()
         prefix: list[int] = []
         mode = "path"
         separator_offset = 0
-        for raw_token_id in generated:
+        invalid_reason: str | None = None
+        last_complete_token_count = 0
+        for token_offset, raw_token_id in enumerate(generated):
             token_id = int(raw_token_id)
             if token_id == self.eos_token_id:
-                return None
+                invalid_reason = "unexpected_eos"
+                break
             if mode == "path":
                 prefix.append(token_id)
                 current_prefix = tuple(prefix)
-                if not any(
-                    path not in completed
-                    and path[: len(current_prefix)] == current_prefix
-                    for path in self.paths
-                ):
-                    return None
+                descendants = self._paths_by_prefix.get(current_prefix)
+                if descendants is None or descendants.issubset(completed_set):
+                    invalid_reason = "invalid_or_duplicate_path_prefix"
+                    break
                 if len(prefix) == self.num_levels:
                     completed.append(current_prefix)
+                    completed_set.add(current_prefix)
+                    last_complete_token_count = token_offset + 1
                     prefix = []
                     mode = "boundary"
             elif mode == "boundary":
+                if len(completed) >= self.max_paths:
+                    invalid_reason = "token_after_max_paths"
+                    break
                 if token_id != self.separator_token_ids[0]:
-                    return None
+                    invalid_reason = "invalid_path_boundary"
+                    break
                 if len(self.separator_token_ids) == 1:
                     mode = "path"
                 else:
@@ -316,46 +369,107 @@ class MultiPathTokenTrie:
                     separator_offset = 1
             else:
                 if token_id != self.separator_token_ids[separator_offset]:
-                    return None
+                    invalid_reason = "invalid_path_separator"
+                    break
                 separator_offset += 1
                 if separator_offset == len(self.separator_token_ids):
                     mode = "path"
-        return tuple(completed), tuple(prefix), mode, separator_offset
+        return _TrieScanState(
+            completed=tuple(completed),
+            prefix=tuple(prefix),
+            mode=mode,
+            separator_offset=separator_offset,
+            invalid_reason=invalid_reason,
+            last_complete_token_count=last_complete_token_count,
+        )
+
+    @staticmethod
+    def _incomplete_reason(state: _TrieScanState) -> str:
+        if state.invalid_reason is not None:
+            return state.invalid_reason
+        if state.mode == "separator":
+            return "incomplete_path_separator"
+        if state.mode == "path":
+            return (
+                "incomplete_path"
+                if state.prefix
+                else "missing_path_after_separator"
+            )
+        return "empty_generation"
 
     def allowed_next(self, generated: Sequence[int]) -> tuple[int, ...]:
         state = self._state(generated)
-        if state is None:
+        if state.invalid_reason is not None:
             return ()
-        completed, prefix, mode, separator_offset = state
-        if mode == "separator":
-            return (self.separator_token_ids[separator_offset],)
-        if mode == "boundary":
-            if len(completed) >= self.max_paths or len(completed) >= len(self.paths):
+        if state.mode == "separator":
+            return (self.separator_token_ids[state.separator_offset],)
+        if state.mode == "boundary":
+            if (
+                len(state.completed) >= self.max_paths
+                or len(state.completed) >= len(self.paths)
+            ):
                 return (self.eos_token_id,)
             return tuple(sorted({self.eos_token_id, self.separator_token_ids[0]}))
 
-        candidates = [
-            path
-            for path in self.paths
-            if path not in completed and path[: len(prefix)] == prefix
-        ]
-        if not candidates or len(prefix) >= self.num_levels:
+        if len(state.prefix) >= self.num_levels:
             return ()
-        return tuple(sorted({path[len(prefix)] for path in candidates}))
+        completed_set = set(state.completed)
+        allowed: list[int] = []
+        for token_id in self._next_tokens_by_prefix.get(state.prefix, ()):
+            descendants = self._paths_by_prefix[state.prefix + (token_id,)]
+            if not descendants.issubset(completed_set):
+                allowed.append(token_id)
+        return tuple(allowed)
+
+    def parse_with_recovery(self, generated: Sequence[int]) -> TrieParseResult:
+        """Parse once, falling back to the longest complete registered prefix."""
+
+        state = self._state(generated)
+        generated_count = len(generated)
+        if (
+            state.invalid_reason is None
+            and state.completed
+            and len(state.completed) <= self.max_paths
+            and not state.prefix
+            and state.mode == "boundary"
+        ):
+            return TrieParseResult(
+                paths=state.completed,
+                recovered=False,
+                consumed_tokens=generated_count,
+                discarded_tokens=0,
+            )
+        reason = self._incomplete_reason(state)
+        if not state.completed:
+            return TrieParseResult(
+                paths=(),
+                recovered=False,
+                consumed_tokens=0,
+                discarded_tokens=generated_count,
+                reason=reason,
+            )
+        return TrieParseResult(
+            paths=state.completed,
+            recovered=True,
+            consumed_tokens=state.last_complete_token_count,
+            discarded_tokens=max(
+                0, generated_count - state.last_complete_token_count
+            ),
+            reason=reason,
+        )
 
     def parse_complete(self, generated: Sequence[int]) -> tuple[tuple[int, ...], ...]:
         state = self._state(generated)
-        if state is None:
+        if state.invalid_reason is not None:
             raise RuntimeError("vLLM generated an invalid code sequence")
-        completed, prefix, mode, _ = state
         if (
-            not completed
-            or len(completed) > self.max_paths
-            or prefix
-            or mode != "boundary"
+            not state.completed
+            or len(state.completed) > self.max_paths
+            or state.prefix
+            or state.mode != "boundary"
         ):
             raise RuntimeError("vLLM generation did not end at a code-path boundary")
-        return completed
+        return state.completed
 
 
 class TrieLogitsProcessor:
@@ -1214,20 +1328,36 @@ class RetriverTest:
             instance_id=self.instance_id,
             request_id=resolved_request_id,
         )
-        try:
-            paths = self.trie.parse_complete(generated)
-        except Exception as exc:
+        parse_result = self.trie.parse_with_recovery(generated)
+        if not parse_result.paths:
+            exc = RuntimeError(
+                "vLLM generation contains no complete registered code path"
+            )
             logger.error(
                 "event=search.trie_parse_failed instance_id=%s request_id=%s "
-                "error_type=%s error=%s generated_count=%s token_ids=%s",
+                "error_type=%s error=%s generated_count=%s token_ids=%s reason=%s",
                 self.instance_id,
                 resolved_request_id,
                 type(exc).__name__,
                 _debug_error_log_value(exc),
                 len(generated),
                 _debug_token_ids_log_value(generated),
+                parse_result.reason,
             )
-            raise
+            raise exc
+        paths = parse_result.paths
+        if parse_result.recovered:
+            logger.warning(
+                "event=search.trie_recovered instance_id=%s request_id=%s "
+                "reason=%s consumed_tokens=%s discarded_tokens=%s "
+                "path_count=%s",
+                self.instance_id,
+                resolved_request_id,
+                parse_result.reason,
+                parse_result.consumed_tokens,
+                parse_result.discarded_tokens,
+                len(paths),
+            )
         decode_ms = (perf_counter() - decode_started) * 1000.0
 
         mapping_started = perf_counter()

@@ -1099,6 +1099,48 @@ class OpenAIServiceEndToEndTest(unittest.TestCase):
         self.assertEqual(server_handle.close_calls, 1)
         self.assertFalse(runtime._loaded)
 
+    def test_invalid_model_suffix_recovers_complete_skill_path(self) -> None:
+        state = _FakeDependencyState()
+        # The first two IDs form the registered weather path. The final ID is
+        # another level-2 token where the grammar expects EOS or a separator.
+        state.completion_tokens = [1, 2, 5]
+        _FakeGenerateClient.state = state
+        server_handle = _FakeVllmServerHandle()
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            with (
+                patch.dict(
+                    os.environ,
+                    _service_environment(directory),
+                    clear=True,
+                ),
+                patch.dict(sys.modules, _fake_dependency_modules(state)),
+                patch.object(
+                    service_openai,
+                    "load_vllm_model",
+                    return_value=server_handle,
+                ),
+                patch.object(
+                    service_openai,
+                    "VllmGenerateClient",
+                    _FakeGenerateClient,
+                ),
+            ):
+                runtime = service_openai.RetriverTest()
+                runtime.load()
+                try:
+                    result = runtime.calc(
+                        {"data": {"query": "查天气", "top_k": 2}}
+                    )
+                finally:
+                    runtime.close()
+
+        self.assertEqual(json.loads(result), ["天气查询"])
+        self.assertEqual(state.close_calls, 1)
+        self.assertEqual(server_handle.close_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -443,7 +443,7 @@ class SelfContainedService910BTest(unittest.TestCase):
                     assert runtime.trie is not None
                     with patch.object(
                         runtime.trie,
-                        "parse_complete",
+                        "parse_with_recovery",
                         side_effect=RuntimeError("invalid generated path"),
                     ):
                         parse_result = runtime.calc(
@@ -473,6 +473,45 @@ class SelfContainedService910BTest(unittest.TestCase):
         self.assertTrue(
             all("recoverable=True" in message for message in recovered_logs)
         )
+
+    def test_invalid_model_suffix_recovers_complete_skill_path(self) -> None:
+        state = _FakeDependencyState()
+        fake_modules = _fake_dependency_modules(state)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            _write_router_bundle(directory)
+            environment = _service_environment(directory)
+            environment["SERVICE_910B_LOG_LEVEL"] = "ERROR"
+            runtime = service_910b.RetriverTest()
+
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.dict(sys.modules, fake_modules),
+            ):
+                runtime.load()
+                try:
+                    assert runtime.llm is not None
+                    malformed_suffix = SimpleNamespace(
+                        outputs=[
+                            SimpleNamespace(
+                                token_ids=[1, 2, 5],
+                                finish_reason="length",
+                            )
+                        ]
+                    )
+                    with patch.object(
+                        runtime.llm,
+                        "generate",
+                        return_value=malformed_suffix,
+                    ):
+                        result = runtime.calc(
+                            {"data": {"query": "查天气", "top_k": 2}}
+                        )
+                finally:
+                    runtime.close()
+
+        self.assertEqual(json.loads(result), ["天气查询"])
 
     def test_missing_loaded_runtime_remains_unrecoverable(self) -> None:
         environment = {
