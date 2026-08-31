@@ -926,7 +926,11 @@ class RetriverTest:
                     ) * 1000.0
                     phase = "inference"
                     inference_started = perf_counter()
-                    names = self._search_names(query, request_id=request_id)
+                    names = self._search_names(
+                        query,
+                        request_id=request_id,
+                        requested_max_paths=resolved_top_k,
+                    )
                     inference_ms = (
                         perf_counter() - inference_started
                     ) * 1000.0
@@ -1035,6 +1039,7 @@ class RetriverTest:
         query: str,
         *,
         request_id: str | None = None,
+        requested_max_paths: int | None = None,
     ) -> list[str]:
         resolved_request_id = request_id or str(uuid.uuid4())
         started = perf_counter()
@@ -1125,11 +1130,40 @@ class RetriverTest:
             truncated,
         )
 
+        effective_max_paths = (
+            self.trie.max_paths
+            if requested_max_paths is None
+            else min(
+                self.trie.max_paths,
+                max(1, int(requested_max_paths)),
+            )
+        )
+        request_output_budget = (
+            effective_max_paths * self.bundle.num_levels
+            + (effective_max_paths - 1)
+            * len(self.trie.separator_token_ids)
+        )
+        logger.info(
+            "event=search.generation_configuration instance_id=%s "
+            "request_id=%s requested_max_paths=%s effective_max_paths=%s "
+            "initialized_max_paths=%s request_output_budget=%s "
+            "initialized_output_budget=%s num_levels=%s separator_tokens=%s",
+            self.instance_id,
+            resolved_request_id,
+            requested_max_paths,
+            effective_max_paths,
+            self.trie.max_paths,
+            request_output_budget,
+            self.output_budget,
+            self.bundle.num_levels,
+            len(self.trie.separator_token_ids),
+        )
+
         payload: dict[str, Any] = {
             "prompt": prompt,
             "stream": False,
             "temperature": 0.0,
-            "max_tokens": self.output_budget,
+            "max_tokens": request_output_budget,
             "min_tokens": self.bundle.num_levels,
             "skip_special_tokens": False,
             "spaces_between_special_tokens": False,

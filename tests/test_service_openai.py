@@ -203,9 +203,13 @@ class _FakeGenerateClient:
 
     def generate(self, payload: dict[str, object]) -> dict[str, object]:
         self.state.generate_calls.append(dict(payload))
+        max_tokens = int(payload.get("max_tokens", len(self.state.completion_tokens)))
         return {
             "outputs": [
-                {"token_ids": list(self.state.completion_tokens), "text": ""}
+                {
+                    "token_ids": list(self.state.completion_tokens[:max_tokens]),
+                    "text": "",
+                }
             ]
         }
 
@@ -1018,6 +1022,25 @@ class OpenAIServiceEndToEndTest(unittest.TestCase):
                     rendered_prompt = state.tokenizer_encode_calls[-1][0]
                     self.assertIn("测试专用检索提示", rendered_prompt)
                     self.assertIn("出门前查天气和路线", rendered_prompt)
+
+                    top_one_result = runtime.calc(
+                        {
+                            "data": {
+                                "query": "只查天气",
+                                "top_k": 1,
+                            }
+                        }
+                    )
+                    self.assertEqual(json.loads(top_one_result), ["天气查询"])
+                    self.assertEqual(len(state.generate_calls), 2)
+                    self.assertEqual(
+                        state.generate_calls[1]["max_tokens"],
+                        2,
+                    )
+                    self.assertEqual(
+                        state.generate_calls[1]["min_tokens"],
+                        2,
+                    )
                 finally:
                     runtime.close()
                     runtime.close()
