@@ -83,7 +83,7 @@ run_closedset() {
     "$INDEX_DIR/train_codes.jsonl" \
     "$INDEX_DIR/train_registry.json" \
     "$queries" "$qrels" "$output_dir" \
-    "${EVAL_FORWARD_ARGS[@]}"
+    ${EVAL_FORWARD_ARGS[@]+"${EVAL_FORWARD_ARGS[@]}"}
 }
 
 run_unseen() {
@@ -98,7 +98,7 @@ run_unseen() {
     "$PROCESSED_DIR/queries_test.jsonl" \
     "$PROCESSED_DIR/qrels_test.jsonl" \
     "$output_dir" \
-    "${EVAL_FORWARD_ARGS[@]}"
+    ${EVAL_FORWARD_ARGS[@]+"${EVAL_FORWARD_ARGS[@]}"}
 }
 
 EVAL_FORWARD_ARGS=("$@")

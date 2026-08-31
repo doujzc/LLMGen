@@ -37,7 +37,7 @@ fi
   --memorization-validation "$ROUTER_DATA_DIR/memorization_validation.jsonl" \
   --memorization-epochs "$ROUTER_MEMORIZATION_EPOCHS" \
   --memorization-learning-rate "$ROUTER_MEMORIZATION_LR" \
-  "${FINETUNE_ARGS[@]}" \
-  "${RESUME_ARGS[@]}" \
-  "${ROUTER_COMPAT_EXTRA_ARGS[@]}" \
+  ${FINETUNE_ARGS[@]+"${FINETUNE_ARGS[@]}"} \
+  ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} \
+  ${ROUTER_COMPAT_EXTRA_ARGS[@]+"${ROUTER_COMPAT_EXTRA_ARGS[@]}"} \
   "$@"

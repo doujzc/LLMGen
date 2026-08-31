@@ -27,7 +27,7 @@ fi
   --catalog "$PROCESSED_DIR/catalog_train.jsonl" \
   --queries "$PROCESSED_DIR/queries_train.jsonl" \
   --qrels "$PROCESSED_DIR/qrels_train.jsonl" \
-  "${ALIGNMENT_ARGS[@]}" \
+  ${ALIGNMENT_ARGS[@]+"${ALIGNMENT_ARGS[@]}"} \
   --codes "$INDEX_DIR/train_codes.jsonl" \
   --virtual-tokens "$INDEX_DIR/virtual_tokens.txt" \
   --output-dir "$ROUTER_DATA_DIR" \

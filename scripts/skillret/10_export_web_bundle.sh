@@ -93,8 +93,8 @@ if [[ ! -f "$MODEL_DIR/router_manifest.json" ]]; then
     --max-length "$ROUTER_MAX_LENGTH" \
     --seed "$ROUTER_SEED" \
     --base-model-name-or-path "$ROUTER_MODEL" \
-    "${REPLAY_ARGS[@]}" \
-    "${TRUST_ARGS[@]}" \
+    ${REPLAY_ARGS[@]+"${REPLAY_ARGS[@]}"} \
+    ${TRUST_ARGS[@]+"${TRUST_ARGS[@]}"} \
     "$@"
   exit 0
 fi

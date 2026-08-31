@@ -1,0 +1,191 @@
+schema_version: 1
+
+run:
+  name: generic-router
+  output_dir: runs/generic-router
+  seed: 42
+
+input:
+  candidates: data/candidates.jsonl
+  id_policy: explicit_or_name
+  preserve_metadata: true
+  single_candidate_policy: error
+
+providers:
+  generation:
+    type: openai_compatible
+    base_url: "${GENERATION_API_BASE:-http://127.0.0.1:8000/v1}"
+    api_key_env: GENERATION_API_KEY
+    api_config: ""
+    model: "${GENERATION_MODEL:-Qwen3.7-Plus}"
+    concurrency: 12
+    timeout_seconds: 300
+    max_retries: 3
+  review:
+    type: openai_compatible
+    base_url: "${REVIEW_API_BASE:-http://127.0.0.1:8000/v1}"
+    api_key_env: REVIEW_API_KEY
+    api_config: ""
+    model: "${REVIEW_MODEL:-GLM-5.2}"
+    concurrency: 12
+    timeout_seconds: 300
+    max_retries: 3
+  embedding:
+    type: openai_compatible
+    base_url: "${EMBEDDING_API_BASE:-http://127.0.0.1:8000/v1}"
+    api_key_env: EMBEDDING_API_KEY
+    api_config: ""
+    model: "${EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-8B}"
+    timeout_seconds: 600
+    max_retries: 5
+    batch_size: 8
+    dimensions: null
+    max_batch_chars: 12000
+    max_skill_chars: null
+
+data_generation:
+  alignment_queries_per_skill: 10
+  retrieval_positives_per_skill: 20
+  skills_per_query:
+    min: 2
+    max: 4
+  explicit_variants: 3
+  implicit_variants: 1
+  order_variants: 4
+  max_backfill_rounds: 5
+  alignment_backfill_rounds: 5
+  final_alignment_backfill_rounds: 5
+  coverage_oversample_factor: 3.0
+  workflows_per_skill: 3
+  profile_batch_size: 10
+  query_batch_size: 4
+  review_batch_size: 10
+  alignment_batch_size: 3
+  validation_retry_rounds: 3
+  min_completion_rate: 0.95
+  min_augmented_train_queries: 0
+  manual_alignment_path: ""
+  split:
+    train: 0.90
+    validation: 0.05
+    test: 0.05
+
+code:
+  mode: auto
+  latency_priority: balanced
+  num_levels: null
+  branching_factors: []
+  spare_capacity_ratio: 1.25
+  max_virtual_tokens: 512
+  max_branching_factor: 256
+  assignment: balanced_hierarchical
+  assignment_exact_group_size: 2048
+  max_collision_rate: 0.01
+  max_raw_collision_rate: 1.0
+  max_bucket_size: 2
+  min_level_utilization: 0.0
+  min_normalized_entropy: 0.0
+  min_raw_level_utilization: []
+  min_raw_normalized_entropy: 0.0
+  rq_layers: [512, 256, 128]
+  embedding_dim: 64
+  sk_epsilons: []
+  beta: 0.25
+  epochs: 100
+  batch_size: 512
+  learning_rate: 1.0e-4
+  scheduler: cosine
+  warmup_ratio: 0.05
+  eval_every: 1
+  graph_lambda: 0.001
+  amp_dtype: bf16
+  version: generic-v1
+  export_batch_size: 512
+
+router:
+  base_model: "${ROUTER_BASE_MODEL:-/models/Qwen3-1.7B}"
+  finetune_mode: full
+  precision: bf16
+  max_length: 4096
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  logging_steps: 10
+  gradient_checkpointing: true
+  gradient_checkpointing_mode: auto
+  trust_remote_code: false
+  validation_fraction: 0.02
+  data_seed: 42
+  lora:
+    r: 16
+    alpha: 32
+    dropout: 0.05
+    target_modules: q_proj,k_proj,v_proj,o_proj
+    modules_to_save: auto
+  memorization:
+    enabled: true
+    epochs: 10
+    learning_rate: 2.0e-5
+    alignment_replay_fraction: 0.0
+    memorization_replay_fraction: 0.0
+  alignment:
+    enabled: true
+    epochs: 3
+    learning_rate: 2.0e-5
+    alignment_replay_fraction: 0.0
+    memorization_replay_fraction: 0.0
+  retrieval:
+    enabled: true
+    epochs: 10
+    learning_rate: 2.0e-5
+    alignment_replay_fraction: 0.15
+    memorization_replay_fraction: 0.05
+
+runtime:
+  python: "${PIPELINE_PYTHON:-}"
+  device: "${PIPELINE_DEVICE:-cuda}"
+  devices: auto
+  num_devices: 1
+  distributed: auto
+  deepspeed: auto
+  dataloader_workers: 4
+  environment: {}
+
+checkpointing:
+  llm_batch_records: 20
+  embedding_batch_records: 100
+  training_save_steps: 100
+  training_eval_steps: 100
+  keep_last: 3
+
+evaluation:
+  protocol: closedset
+  query_split: test
+  cutoffs: [1, 2, 5]
+  top_k: 20
+  max_code_paths: 8
+  batch_size: 1
+  dtype: bfloat16
+  require_format_valid_rate: 0.99
+  require_candidate_coverage: 1.0
+  # Example: {"recall@1": 0.80, "ordered_code_exact_match": 0.95}
+  metric_thresholds: {}
+
+export:
+  output_dir: export/model
+  require_all_gates: true
+  smoke_test: false
+  allow_failed_gates: false
+
+logging:
+  console_level: INFO
+  file_level: DEBUG
+  marker: "[[LLMGEN-PIPELINE]]"
+  progress_interval_seconds: 30
+  capture_subprocess: true
+  save_llm_requests: false
+  save_llm_responses: false
+  console_text_preview: false
+  file_text_preview_chars: 1000

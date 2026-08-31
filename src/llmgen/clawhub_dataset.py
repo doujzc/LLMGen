@@ -179,6 +179,8 @@ def load_api_config(path: Path, *, model: str | None = None) -> ApiConfig:
     plain_lines = [line for line in lines if ":" not in line]
     if not values.get("api_key") and len(plain_lines) == 1:
         values["api_key"] = plain_lines[0]
+    if not values.get("api_key"):
+        values["api_key"] = os.environ.get("OPENAI_API_KEY", "").strip()
     if not values.get("base_url"):
         values["base_url"] = os.environ.get("API_BASE_URL", "").strip()
     missing = [key for key in ("base_url", "api_key") if not values.get(key)]
@@ -282,14 +284,26 @@ class ChatBatchClient:
         config: ApiConfig,
         *,
         workers: int = 12,
-        timeout: float = 180,
-        max_retries: int = 4,
+        timeout: float | None = None,
+        max_retries: int | None = None,
         temperature: float = 0.2,
     ) -> None:
         self.config = config
         self.workers = workers
-        self.timeout = timeout
-        self.max_retries = max_retries
+        self.timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(os.environ.get("LLMGEN_CHAT_TIMEOUT_SECONDS", "180"))
+        )
+        self.max_retries = (
+            int(max_retries)
+            if max_retries is not None
+            else int(os.environ.get("LLMGEN_CHAT_MAX_RETRIES", "4"))
+        )
+        if self.timeout <= 0:
+            raise ValueError("chat timeout must be positive")
+        if self.max_retries < 0:
+            raise ValueError("chat max_retries must be non-negative")
         self.temperature = temperature
         self.local = threading.local()
         self.lock = threading.Lock()

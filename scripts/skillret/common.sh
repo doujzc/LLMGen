@@ -128,10 +128,10 @@ skillret_configure_router() {
     --save-total-limit "$ROUTER_SAVE_TOTAL_LIMIT"
     --dataloader-num-workers "$ROUTER_DATALOADER_NUM_WORKERS"
     --seed "$ROUTER_SEED"
-    "${ROUTER_DEEPSPEED_ARGS[@]}"
-    "${ROUTER_PRECISION_ARGS[@]}"
-    "${ROUTER_CHECKPOINT_ARGS[@]}"
-    "${ROUTER_TRUST_ARGS[@]}"
+    ${ROUTER_DEEPSPEED_ARGS[@]+"${ROUTER_DEEPSPEED_ARGS[@]}"}
+    ${ROUTER_PRECISION_ARGS[@]+"${ROUTER_PRECISION_ARGS[@]}"}
+    ${ROUTER_CHECKPOINT_ARGS[@]+"${ROUTER_CHECKPOINT_ARGS[@]}"}
+    ${ROUTER_TRUST_ARGS[@]+"${ROUTER_TRUST_ARGS[@]}"}
   )
 
   ROUTER_COMPAT_EXTRA_ARGS=()

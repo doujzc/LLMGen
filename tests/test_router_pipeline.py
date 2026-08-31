@@ -8,6 +8,7 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = REPO_ROOT / "scripts" / "router_pipeline.sh"
+SKILLRET_SCRIPTS = REPO_ROOT / "scripts" / "skillret"
 OVERRIDE_NAMES = (
     "SKILLRET_ROOT",
     "SKILLRET_CONFIG",
@@ -44,6 +45,21 @@ def _run(*arguments: str, environment: dict[str, str] | None = None):
         ["bash", str(PIPELINE), *arguments],
         cwd=REPO_ROOT,
         env=environment or _environment(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _run_skillret_stage(
+    script: str,
+    *arguments: str,
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SKILLRET_SCRIPTS / script), *arguments],
+        cwd=REPO_ROOT,
+        env=environment,
         text=True,
         capture_output=True,
         check=False,
@@ -237,3 +253,220 @@ def test_export_command_materializes_environment_checkpoint(
     assert arguments[
         arguments.index("--memorization-replay-fraction") + 1
     ] == "0.05"
+
+
+def _write_retrieval_stage_inputs(tmp_path: Path) -> dict[str, Path]:
+    processed = tmp_path / "processed"
+    index = tmp_path / "index"
+    router_data = tmp_path / "router_data"
+    router = tmp_path / "router"
+    for directory in (processed, index, router_data, router / "memorization"):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    for path in (
+        processed / "catalog_train.jsonl",
+        index / "virtual_tokens.txt",
+        index / "train_codes.jsonl",
+        index / "train_registry.json",
+        router_data / "retrieval_train.jsonl",
+        router_data / "retrieval_validation.jsonl",
+        router_data / "retrieval_alignment_train.jsonl",
+        router_data / "memorization_train.jsonl",
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    return {
+        "processed": processed,
+        "index": index,
+        "router_data": router_data,
+        "router": router,
+    }
+
+
+def _read_invocations(path: Path) -> list[list[str]]:
+    invocations: list[list[str]] = []
+    current: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line == "---":
+            if current:
+                invocations.append(current)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        invocations.append(current)
+    return invocations
+
+
+def test_split_retrieval_scripts_preserve_alignment_handoff(tmp_path: Path) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    (paths["router"] / "retrieval_alignment").mkdir()
+    invocation = tmp_path / "router-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' '---' >> \"${FAKE_ROUTER_ARGS:?}\"\n"
+        "printf '%s\\n' \"$@\" >> \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_FINETUNE_MODE": "full",
+            "ROUTER_NUM_GPUS": "1",
+            "ROUTER_DEEPSPEED_CONFIG": "configs/deepspeed_zero3.json",
+            "ROUTER_PRECISION": "bf16",
+            "ROUTER_GRADIENT_CHECKPOINTING": "1",
+            "ROUTER_TRUST_REMOTE_CODE": "1",
+            "ROUTER_ALIGNMENT_EPOCHS": "2",
+            "ROUTER_ALIGNMENT_LR": "3e-5",
+            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "0.15",
+            "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION": "0.05",
+            "ROUTER_RESUME_ALIGNMENT": "alignment-checkpoint",
+            "ROUTER_RESUME_RETRIEVAL": "retrieval-checkpoint",
+            "ROUTER_EXTRA_ARGS": "--compat-test-flag",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "06_train_retrieval.sh",
+        "--retrieval-test-flag",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    alignment, retrieval = _read_invocations(invocation)
+    assert alignment[0] == "scripts/train_router.py"
+    assert alignment[alignment.index("--model-name-or-path") + 1] == str(
+        paths["router"] / "memorization"
+    )
+    assert alignment[alignment.index("--phase-output-subdir") + 1] == (
+        "retrieval_alignment"
+    )
+    assert "--retrieval-test-flag" not in alignment
+
+    assert retrieval[0] == "scripts/train_router.py"
+    assert retrieval[retrieval.index("--model-name-or-path") + 1] == str(
+        paths["router"] / "retrieval_alignment"
+    )
+    assert retrieval[retrieval.index("--retrieval-alignment-replay-fraction") + 1] == (
+        "0.15"
+    )
+    assert retrieval[retrieval.index("--retrieval-memorization-replay-fraction") + 1] == (
+        "0.05"
+    )
+    assert retrieval[-1] == "--retrieval-test-flag"
+
+
+def test_alignment_stage_runs_without_retrieval_dataset_inputs(tmp_path: Path) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    for name in ("retrieval_train.jsonl", "retrieval_validation.jsonl"):
+        (paths["router_data"] / name).unlink()
+    invocation = tmp_path / "alignment-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_FINETUNE_MODE": "full",
+            "ROUTER_NUM_GPUS": "1",
+            "ROUTER_DEEPSPEED_CONFIG": "configs/deepspeed_zero3.json",
+            "ROUTER_PRECISION": "bf16",
+            "ROUTER_GRADIENT_CHECKPOINTING": "1",
+            "ROUTER_TRUST_REMOTE_CODE": "1",
+            "ROUTER_ALIGNMENT_EPOCHS": "2",
+            "ROUTER_ALIGNMENT_LR": "3e-5",
+            "ROUTER_RESUME_ALIGNMENT": "alignment-checkpoint",
+            "ROUTER_EXTRA_ARGS": "--compat-test-flag",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "06a_train_alignment.sh",
+        "--alignment-test-flag",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert arguments[arguments.index("--phase-output-subdir") + 1] == (
+        "retrieval_alignment"
+    )
+    assert arguments[-1] == "--alignment-test-flag"
+
+
+def test_single_device_full_training_accepts_all_optional_arrays_empty(
+    tmp_path: Path,
+) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    invocation = tmp_path / "retrieval-empty-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_FINETUNE_MODE": "full",
+            "ROUTER_NUM_GPUS": "1",
+            "ROUTER_DEEPSPEED_CONFIG": "none",
+            "ROUTER_PRECISION": "fp32",
+            "ROUTER_GRADIENT_CHECKPOINTING": "0",
+            "ROUTER_TRUST_REMOTE_CODE": "0",
+            "ROUTER_ALIGNMENT_EPOCHS": "0",
+            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "0",
+            "ROUTER_RETRIEVAL_MEMORIZATION_REPLAY_FRACTION": "0",
+            "ROUTER_RESUME_RETRIEVAL": "",
+            "ROUTER_EXTRA_ARGS": "",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "06_train_retrieval.sh",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert "--deepspeed" not in arguments
+    assert "--bf16" not in arguments
+    assert "--fp16" not in arguments
+    assert "--resume-retrieval-from-checkpoint" not in arguments
+    assert arguments[arguments.index("--model-name-or-path") + 1] == str(
+        paths["router"] / "memorization"
+    )
