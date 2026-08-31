@@ -99,18 +99,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--force-token-text",
-        default="!",
         help=(
-            "Decoded text of --force-token-id for text-only responses "
-            "(Qwen default: !)."
+            "Optional decoded text of --force-token-id, used only when the "
+            "endpoint returns no token IDs."
         ),
     )
     parser.add_argument(
         "--alternate-token-text",
-        default='"',
         help=(
-            "Decoded text of --alternate-token-id for text-only responses "
-            "(Qwen default: double quote)."
+            "Optional decoded text of --alternate-token-id, used only when "
+            "the endpoint returns no token IDs."
         ),
     )
     parser.add_argument(
@@ -123,10 +121,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--processor-qualname",
         default=_DEFAULT_PROCESSOR_QUALNAME,
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--static-only",
         action="store_true",
         help="Only test allowed_token_ids; do not test a processor descriptor.",
+    )
+    mode.add_argument(
+        "--processor-only",
+        action="store_true",
+        help="Only test the dynamic logits-processor descriptor.",
     )
     return parser.parse_args(argv)
 
@@ -174,7 +178,12 @@ def _integer_sequence(value: Any) -> list[int] | None:
 
 
 def _completion_token_ids(response: Mapping[str, Any]) -> list[int] | None:
-    for key in ("token_ids", "output_token_ids", "completion_token_ids"):
+    for key in (
+        "token_ids",
+        "output_tokens",
+        "output_token_ids",
+        "completion_token_ids",
+    ):
         result = _integer_sequence(response.get(key))
         if result is not None:
             return result
@@ -185,7 +194,12 @@ def _completion_token_ids(response: Mapping[str, Any]) -> list[int] | None:
         first = containers[0]
         if not isinstance(first, Mapping):
             continue
-        for key in ("token_ids", "output_token_ids", "completion_token_ids"):
+        for key in (
+            "token_ids",
+            "output_tokens",
+            "output_token_ids",
+            "completion_token_ids",
+        ):
             result = _integer_sequence(first.get(key))
             if result is not None:
                 return result
@@ -329,11 +343,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ProbeError("token IDs must be non-negative")
     if args.force_token_id == args.alternate_token_id:
         raise ProbeError("force-token-id and alternate-token-id must differ")
-    static_result = _run_static_probe(
-        args,
-        force_token_id=args.force_token_id,
-        force_token_text=args.force_token_text,
-    )
+    static_result: dict[str, Any] | None = None
+    if not args.processor_only:
+        static_result = _run_static_probe(
+            args,
+            force_token_id=args.force_token_id,
+            force_token_text=args.force_token_text,
+        )
     processor_result: dict[str, Any] | None = None
     if not args.static_only:
         processor_result = _run_processor_probe(
@@ -361,7 +377,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if processor_result is not None:
         return 0 if report["llmgen_trie_compatible"] else 1
-    return 0 if static_result.get("enforced") else 1
+    return 0 if static_result and static_result.get("enforced") else 1
 
 
 if __name__ == "__main__":

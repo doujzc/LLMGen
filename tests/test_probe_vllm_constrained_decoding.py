@@ -31,7 +31,7 @@ class ProbeVllmConstrainedDecodingTest(unittest.TestCase):
                 "_post_json",
                 side_effect=[
                     {"outputs": [{"token_ids": [0, 0, 0]}]},
-                    {"outputs": [{"token_ids": [0, 1]}]},
+                    {"text": "例如，", "output_tokens": [0, 1]},
                 ],
             ),
             redirect_stdout(output),
@@ -72,6 +72,8 @@ class ProbeVllmConstrainedDecodingTest(unittest.TestCase):
 
         self.assertEqual(args.force_token_id, 0)
         self.assertEqual(args.alternate_token_id, 1)
+        self.assertIsNone(args.force_token_text)
+        self.assertIsNone(args.alternate_token_text)
 
 
 if __name__ == "__main__":
