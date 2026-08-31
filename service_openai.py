@@ -138,6 +138,21 @@ _VLLM_SERVER_SUPPORTED_KWARGS = frozenset(
         "disable_log_requests",
     }
 )
+_VLLM_INTEGER_SERVER_OPTIONS = frozenset(
+    {
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "max_num_seqs",
+        "seed",
+        "max_model_len",
+        "scheduler_budget_len",
+        "max_num_batched_tokens",
+        "first_token_timeout",
+        "max_log_len",
+        "block_size",
+        "decode_tensor_parallel_size",
+    }
+)
 
 
 class ServiceConfigurationError(RuntimeError):
@@ -1308,7 +1323,7 @@ def _build_vllm_kwargs(*, model_path: Path, tokenizer_path: Path) -> Dict[str, A
         ),
         "max_num_seqs": _env_int("VLLM_MAX_NUM_SEQS", 8),
         "seed": _env_int("VLLM_SEED", 0),
-        "swap_space": _env_float("VLLM_SWAP_SPACE", 0.0),
+        "swap_space": _env_int("VLLM_SWAP_SPACE", 0),
         "disable_log_stats": _env_bool("VLLM_DISABLE_LOG_STATS", False),
         "disable_log_requests": _env_bool(
             "VLLM_DISABLE_LOG_REQUESTS", True
@@ -1378,6 +1393,29 @@ def _build_vllm_server_command(
             "VLLM_KWARGS_JSON contains options without a safe CLI mapping: "
             + ", ".join(sorted(unsupported_kwargs))
         )
+    for option_name in _VLLM_INTEGER_SERVER_OPTIONS:
+        raw_value = kwargs.get(option_name)
+        if raw_value is None:
+            continue
+        kwargs[option_name] = _normalize_cli_integer(
+            raw_value,
+            option_name=option_name,
+        )
+    raw_swap_space = kwargs.get("swap_space", 0)
+    try:
+        swap_space_is_zero = (
+            not isinstance(raw_swap_space, bool)
+            and float(raw_swap_space) == 0.0
+        )
+    except (TypeError, ValueError):
+        swap_space_is_zero = False
+    if not swap_space_is_zero:
+        raise ServiceConfigurationError(
+            "VLLM_SWAP_SPACE/swap_space must be exactly 0"
+        )
+    # The customized server's argparse requires the integer spelling ``0``;
+    # it rejects the otherwise numerically equivalent string ``0.0``.
+    kwargs["swap_space"] = 0
 
     command = [
         _env_first_text(
@@ -1428,6 +1466,33 @@ def _build_vllm_server_command(
         command.append("--disable-log-requests")
     command.extend(_load_vllm_server_extra_args())
     return command
+
+
+def _normalize_cli_integer(value: Any, *, option_name: str) -> int:
+    """Return an integer CLI value without ever rendering a ``.0`` suffix."""
+
+    if isinstance(value, bool):
+        raise ServiceConfigurationError(
+            f"vLLM option {option_name} must be an integer"
+        )
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        raise ServiceConfigurationError(
+            f"vLLM option {option_name} must be an integer"
+        )
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError as exc:
+            raise ServiceConfigurationError(
+                f"vLLM option {option_name} must be an integer"
+            ) from exc
+    raise ServiceConfigurationError(
+        f"vLLM option {option_name} must be an integer"
+    )
 
 
 def _load_vllm_server_extra_args() -> list[str]:

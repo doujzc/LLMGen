@@ -324,6 +324,9 @@ class IndependentVllmLoaderTest(unittest.TestCase):
                     command[command.index("--gpu-memory-utilization") + 1],
                     "0.8",
                 )
+                self.assertEqual(
+                    command[command.index("--swap-space") + 1], "0"
+                )
                 self.assertIn("--disable-log-requests", command)
                 self.assertEqual(command[-2:], ["--custom-flag", "custom-value"])
                 self.assertNotIn("--served-model-name", command)
@@ -433,6 +436,88 @@ class IndependentVllmLoaderTest(unittest.TestCase):
         self.assertEqual(
             command[command.index("--decode-tensor-parallel-size") + 1], "1"
         )
+
+    def test_swap_space_json_float_zero_is_rendered_as_integer_zero(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"VLLM_KWARGS_JSON": '{"swap_space": 0.0}'},
+            clear=True,
+        ):
+            command = service_openai._build_vllm_server_command(
+                model_path=Path("/model"),
+                tokenizer_path=Path("/model"),
+                host="127.0.0.1",
+                port=18000,
+                vllm_overrides={},
+            )
+
+        self.assertEqual(command[command.index("--swap-space") + 1], "0")
+
+    def test_nonzero_swap_space_is_rejected(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"VLLM_SWAP_SPACE": "1"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                service_openai.ServiceConfigurationError,
+                "must be exactly 0",
+            ):
+                service_openai._build_vllm_server_command(
+                    model_path=Path("/model"),
+                    tokenizer_path=Path("/model"),
+                    host="127.0.0.1",
+                    port=18000,
+                    vllm_overrides={},
+                )
+
+    def test_all_integer_server_options_drop_json_float_suffix(self) -> None:
+        option_flags = {
+            "tensor_parallel_size": "--tensor-parallel-size",
+            "pipeline_parallel_size": "--pipeline-parallel-size",
+            "max_num_seqs": "--max-num-seqs",
+            "seed": "--seed",
+            "max_model_len": "--max-model-len",
+            "scheduler_budget_len": "--scheduler-budget-len",
+            "max_num_batched_tokens": "--max-num-batched-tokens",
+            "first_token_timeout": "--first-token-timeout",
+            "max_log_len": "--max-log-len",
+            "block_size": "--block-size",
+            "decode_tensor_parallel_size": "--decode-tensor-parallel-size",
+        }
+        for option_name, flag in option_flags.items():
+            with self.subTest(option_name=option_name):
+                with patch.dict(
+                    os.environ,
+                    {"VLLM_KWARGS_JSON": json.dumps({option_name: 1.0})},
+                    clear=True,
+                ):
+                    command = service_openai._build_vllm_server_command(
+                        model_path=Path("/model"),
+                        tokenizer_path=Path("/model"),
+                        host="127.0.0.1",
+                        port=18000,
+                        vllm_overrides={},
+                    )
+                self.assertEqual(command[command.index(flag) + 1], "1")
+
+    def test_fractional_integer_server_option_is_rejected(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"VLLM_KWARGS_JSON": '{"max_model_len": 8192.5}'},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                service_openai.ServiceConfigurationError,
+                "max_model_len must be an integer",
+            ):
+                service_openai._build_vllm_server_command(
+                    model_path=Path("/model"),
+                    tokenizer_path=Path("/model"),
+                    host="127.0.0.1",
+                    port=18000,
+                    vllm_overrides={},
+                )
 
     def test_transformers_457_adapts_v5_extra_special_token_list(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
