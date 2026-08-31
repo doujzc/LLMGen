@@ -188,6 +188,7 @@ def _fake_dependency_modules(
             return FakeTokenizer()
 
     fake_transformers = ModuleType("transformers")
+    fake_transformers.__version__ = "4.57.1"  # type: ignore[attr-defined]
     fake_transformers.AutoTokenizer = FakeAutoTokenizer  # type: ignore[attr-defined]
     return {"transformers": fake_transformers}
 
@@ -431,6 +432,77 @@ class IndependentVllmLoaderTest(unittest.TestCase):
         )
         self.assertEqual(
             command[command.index("--decode-tensor-parallel-size") + 1], "1"
+        )
+
+    def test_transformers_457_adapts_v5_extra_special_token_list(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            config_path = directory / "tokenizer_config.json"
+            original = {
+                "extra_special_tokens": ["<vision>", "<SK_L1_0>"],
+                "additional_special_tokens": ["<SK_L1_0>", "<SK_L2_0>"],
+            }
+            config_path.write_text(
+                json.dumps(original, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            kwargs = (
+                service_openai._transformers_tokenizer_compatibility_kwargs(
+                    directory,
+                    transformers_version="4.57.1",
+                )
+            )
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(kwargs["extra_special_tokens"], {})
+        self.assertEqual(
+            kwargs["additional_special_tokens"],
+            ["<SK_L1_0>", "<SK_L2_0>", "<vision>"],
+        )
+        self.assertEqual(persisted, original)
+
+    def test_transformers_v5_keeps_v5_extra_special_token_list(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "tokenizer_config.json").write_text(
+                json.dumps({"extra_special_tokens": ["<SK_L1_0>"]}),
+                encoding="utf-8",
+            )
+            kwargs = (
+                service_openai._transformers_tokenizer_compatibility_kwargs(
+                    directory,
+                    transformers_version="5.0.0",
+                )
+            )
+
+        self.assertEqual(kwargs, {})
+
+    def test_local_tokenizer_load_applies_transformers_457_compatibility(self) -> None:
+        state = _FakeDependencyState()
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            (directory / "tokenizer_config.json").write_text(
+                json.dumps(
+                    {
+                        "extra_special_tokens": ["<SK_L1_0>"],
+                        "additional_special_tokens": ["<SK_L2_0>"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(sys.modules, _fake_dependency_modules(state)),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                service_openai._load_tokenizer(directory)
+
+        self.assertEqual(len(state.tokenizer_load_calls), 1)
+        _, kwargs = state.tokenizer_load_calls[0]
+        self.assertEqual(kwargs["extra_special_tokens"], {})
+        self.assertEqual(
+            kwargs["additional_special_tokens"],
+            ["<SK_L2_0>", "<SK_L1_0>"],
         )
 
     def test_loader_requires_model_and_tokenizer_to_share_directory(self) -> None:

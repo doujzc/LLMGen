@@ -1689,7 +1689,7 @@ def _wait_for_vllm_ready(
 
 def _load_tokenizer(tokenizer_path: Path) -> Any:
     try:
-        from transformers import AutoTokenizer
+        import transformers
     except ImportError as exc:
         raise RuntimeError(
             "HTTP Router service requires transformers to load its local tokenizer"
@@ -1701,7 +1701,63 @@ def _load_tokenizer(tokenizer_path: Path) -> Any:
     }
     if _env_text("VLLM_TOKENIZER_MODE", "auto").lower() == "slow":
         kwargs["use_fast"] = False
-    return AutoTokenizer.from_pretrained(str(tokenizer_path), **kwargs)
+    kwargs.update(
+        _transformers_tokenizer_compatibility_kwargs(
+            tokenizer_path,
+            transformers_version=str(
+                getattr(transformers, "__version__", "")
+            ),
+        )
+    )
+    return transformers.AutoTokenizer.from_pretrained(
+        str(tokenizer_path),
+        **kwargs,
+    )
+
+
+def _transformers_tokenizer_compatibility_kwargs(
+    tokenizer_path: Path,
+    *,
+    transformers_version: str,
+) -> dict[str, Any]:
+    """Adapt Transformers-v5 list tokens to the 4.57 tokenizer contract.
+
+    Transformers 4.57 treats ``extra_special_tokens`` as a mapping of named
+    model-specific tokens and unconditionally calls ``.keys()`` on it. Some
+    exported Qwen3.5 tokenizers instead store the v5 list form. Override only
+    the in-memory initialization arguments; never rewrite deployment files.
+    """
+
+    if not transformers_version.startswith("4."):
+        return {}
+    config_path = tokenizer_path / "tokenizer_config.json"
+    if not config_path.is_file():
+        return {}
+    config = _read_json_object(config_path)
+    extra_tokens = config.get("extra_special_tokens")
+    if not isinstance(extra_tokens, list):
+        return {}
+
+    existing_tokens = config.get("additional_special_tokens")
+    merged_tokens: list[Any] = []
+    if isinstance(existing_tokens, list):
+        merged_tokens.extend(existing_tokens)
+    for token in extra_tokens:
+        if token not in merged_tokens:
+            merged_tokens.append(token)
+    logger.warning(
+        "event=tokenizer.transformers_4_compatibility version=%s "
+        "source_field=extra_special_tokens source_count=%s "
+        "target_field=additional_special_tokens merged_count=%s "
+        "model_files_modified=False",
+        transformers_version,
+        len(extra_tokens),
+        len(merged_tokens),
+    )
+    return {
+        "extra_special_tokens": {},
+        "additional_special_tokens": merged_tokens,
+    }
 
 
 def _close_vllm_client(client: Any | None) -> None:
