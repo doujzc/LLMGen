@@ -1,26 +1,33 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Self-contained OpenAI-client service for an exported LLMGen router.
+"""Self-contained HTTP service for an exported LLMGen router.
 
 The hosting contract intentionally matches the reference retrieval service:
 
-* ``load()`` starts vLLM, then initializes the local tokenizer and OpenAI
-  client.
+* ``load()`` starts ``python -m vllm.entrypoints.api_server`` on an
+  automatically selected loopback port, then initializes the local tokenizer.
 * ``calc({"data": {"query": ..., "top_k": ...}})`` returns a JSON string
   containing a list of Skill names.
 
 The model directory must be a complete LLMGen Router bundle containing the
 Hugging Face model/tokenizer files, ``skill_decode_map.json``,
-``virtual_tokens.txt``, and ``router_manifest.json``.
+``virtual_tokens.txt``, and ``router_manifest.json``. Both ``--model`` and
+``--tokenizer`` point to this same directory, resolved through the existing
+``MODEL_SFS``/``MODEL_OBJECT_ID`` or ``MODEL_PATH`` deployment contract.
 
-``load()`` calls ``load_vllm_model()`` to start a child vLLM 0.8.5 OpenAI
-server, waits for it to become healthy, and owns that process until ``close()``.
-The child uses ``VLLM_USE_V1=0`` because request-level logits processors are a
-vLLM V0 feature in this pinned release.  Set ``VLLM_SERVER_PYTHON`` to launch
-the server from a different Python environment; optional extra CLI arguments
-can be supplied as a JSON string list in ``VLLM_SERVER_ARGS_JSON``.  The
-default endpoint is ``http://127.0.0.1:8000/v1`` and can be changed with
-``OPENAI_BASE_URL``.
+``load()`` calls ``load_vllm_model()`` to start the child server, waits for
+``/health``, and owns that process until ``close()``. Set
+``VLLM_SERVER_PYTHON`` to launch the server from a different Python
+environment. Common deployment options use ``VLLM_*`` environment variables;
+additional CLI arguments can be supplied as a JSON string list in
+``VLLM_SERVER_ARGS_JSON``. ``VLLM_SERVER_PORT`` is an optional preferred port;
+when it is unset, zero, or occupied, the service chooses another free port.
+
+Inference uses the server's ``POST /generate`` endpoint. The simple API-server
+protocol cannot transport an in-process Python Trie callback, so generated
+token IDs are strictly validated against the same LLMGen Trie before Skill
+mapping. Deployments whose custom endpoint supports additional constrained
+decoding fields can add them through ``VLLM_GENERATE_KWARGS_JSON``.
 
 For local contract tests, set ``MOCK_MODE=1``.  This skips model and candidate
 artifact loading.  ``MOCK_RESPONSES_JSON`` may be either one result list used
@@ -36,8 +43,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
-import secrets
 import signal
 import socket
 import subprocess
@@ -45,14 +50,55 @@ import sys
 import threading
 from time import perf_counter, sleep
 from typing import Any, Dict, Iterable, Mapping, Sequence
+import uuid
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
-logger = logging.getLogger("web_demo")
+_LOG_MARKER = "[[LLMGEN-OPENAI]]"
+_LOG_FILTER_TAG = "_llmgen_service_openai_marker_filter"
+_STDOUT_HANDLER_TAG = "_llmgen_service_openai_stdout_handler"
 
-_VLLM_TENSOR_PARALLEL_SIZE = 2
+
+class _ServiceLogMarker(logging.Filter):
+    """Keep this service's records recognizable in shared stdout logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = str(record.msg)
+        if not message.startswith(_LOG_MARKER):
+            record.msg = f"{_LOG_MARKER} {message}"
+        return True
+
+
+logger = logging.getLogger("web_demo.service_openai")
+
+
+def _configure_service_logging() -> None:
+    """Write service diagnostics directly to stdout without duplication."""
+
+    for existing_filter in tuple(logger.filters):
+        if getattr(existing_filter, _LOG_FILTER_TAG, False):
+            logger.removeFilter(existing_filter)
+    marker_filter = _ServiceLogMarker()
+    setattr(marker_filter, _LOG_FILTER_TAG, True)
+    logger.addFilter(marker_filter)
+
+    for handler in tuple(logger.handlers):
+        logger.removeHandler(handler)
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    setattr(stdout_handler, _STDOUT_HANDLER_TAG, True)
+    stdout_handler.setLevel(logging.NOTSET)
+    stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(stdout_handler)
+    logger.propagate = False
+    logger.disabled = False
+    configured_level = os.environ.get("SERVICE_OPENAI_LOG_LEVEL", "INFO")
+    logger.setLevel(getattr(logging, configured_level.strip().upper(), logging.INFO))
+
+
+_configure_service_logging()
+
+_VLLM_TENSOR_PARALLEL_SIZE = 1
 _VLLM_DTYPE = "bfloat16"
 _DEFAULT_QUERY = "查天气"
 _DEFAULT_SYSTEM_PROMPT = (
@@ -65,13 +111,10 @@ _VIRTUAL_TOKENS_FILENAME = "virtual_tokens.txt"
 _ROUTER_MANIFEST_FILENAME = "router_manifest.json"
 _DECODE_MAP_SCHEMA_VERSION = 1
 _DEFAULT_MOCK_RESPONSES = ("Mock Weather Skill", "Mock Map Skill")
-_DEFAULT_OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
-_DEFAULT_OPENAI_API_KEY = "EMPTY"
-_DEFAULT_LOGITS_PROCESSOR_QUALNAME = (
-    "service_openai.create_trie_logits_processor"
-)
+_DEFAULT_VLLM_SERVER_HOST = "127.0.0.1"
 _DEFAULT_VLLM_STARTUP_TIMEOUT_SECONDS = 900.0
 _DEFAULT_VLLM_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_DEFAULT_VLLM_REQUEST_TIMEOUT_SECONDS = 300.0
 _VLLM_SERVER_SUPPORTED_KWARGS = frozenset(
     {
         "tokenizer_mode",
@@ -86,6 +129,13 @@ _VLLM_SERVER_SUPPORTED_KWARGS = frozenset(
         "disable_log_stats",
         "max_model_len",
         "download_dir",
+        "scheduler_budget_len",
+        "max_num_batched_tokens",
+        "first_token_timeout",
+        "max_log_len",
+        "block_size",
+        "decode_tensor_parallel_size",
+        "disable_log_requests",
     }
 )
 
@@ -94,20 +144,28 @@ class ServiceConfigurationError(RuntimeError):
     """Raised when deployment artifacts or environment settings disagree."""
 
 
+class ServiceRuntimeUnavailableError(RuntimeError):
+    """Raised when the owned local vLLM server can no longer serve requests."""
+
+
 class VllmServerHandle:
-    """Owned vLLM API-server process with idempotent shutdown."""
+    """Owned vLLM simple API-server process with idempotent shutdown."""
 
     def __init__(
         self,
         process: subprocess.Popen[Any],
         *,
-        base_url: str,
-        api_key: str,
+        origin: str,
+        host: str,
+        port: int,
         process_group: bool,
     ) -> None:
         self.process = process
-        self.base_url = base_url
-        self.api_key = api_key
+        self.origin = origin.rstrip("/")
+        self.host = host
+        self.port = int(port)
+        self.generate_url = self.origin + "/generate"
+        self.health_url = self.origin + "/health"
         self.process_group = process_group
         self._close_lock = threading.Lock()
         self._closed = False
@@ -126,6 +184,48 @@ class VllmServerHandle:
             )
             if stopped:
                 self._closed = True
+
+
+class VllmGenerateClient:
+    """Small standard-library client for vLLM's simple ``/generate`` API."""
+
+    def __init__(self, generate_url: str, *, timeout: float) -> None:
+        if timeout <= 0:
+            raise ServiceConfigurationError(
+                "VLLM_REQUEST_TIMEOUT_SECONDS must be positive"
+            )
+        self.generate_url = str(generate_url)
+        self.timeout = float(timeout)
+
+    def generate(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = Request(
+            self.generate_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                raw_body = response.read()
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"vLLM /generate returned HTTP {exc.code}: {details[:1000]}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RuntimeError(
+                f"cannot call local vLLM /generate endpoint: {exc}"
+            ) from exc
+        try:
+            result = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("vLLM /generate returned invalid JSON") from exc
+        if not isinstance(result, Mapping):
+            raise RuntimeError("vLLM /generate response is not a JSON object")
+        return result
+
+    def close(self) -> None:
+        """Match the service lifecycle; urllib keeps no owned session."""
 
 
 class MultiPathTokenTrie:
@@ -459,8 +559,10 @@ class RetriverTest:
     """Skill retrieval service backed by an owned vLLM API server or a mock."""
 
     def __init__(self) -> None:
+        _configure_service_logging()
+        self.instance_id = uuid.uuid4().hex[:12]
         self.vllm_server: VllmServerHandle | None = None
-        self.openai_client: Any | None = None
+        self.vllm_client: VllmGenerateClient | None = None
         self.tokenizer: Any | None = None
         self.bundle: CandidateBundle | None = None
         self.trie: MultiPathTokenTrie | None = None
@@ -471,22 +573,50 @@ class RetriverTest:
         # Retain the misspelled attribute used by the reference service.
         self.skill_indes_path = ""
         self.served_model_name = ""
-        self.backend = "openai"
+        self.backend = "vllm_http"
         self.mock_responses: dict[str, tuple[str, ...]] = {}
         self.default_top_k = 2
         self.max_code_paths = 2
         self.max_input_length = 1
         self.output_budget = 1
-        self.logits_processor_qualname = _DEFAULT_LOGITS_PROCESSOR_QUALNAME
         self.system_prompt = _DEFAULT_SYSTEM_PROMPT
         self._load_lock = threading.RLock()
         self._inference_lock = threading.Lock()
         self._loaded = False
+        logger.info(
+            "event=service.created instance_id=%s backend=%s",
+            self.instance_id,
+            self.backend,
+        )
 
     def load(self) -> None:
+        _configure_service_logging()
+        load_id = uuid.uuid4().hex[:12]
+        load_wait_started = perf_counter()
+        logger.info(
+            "event=service.load_lock_wait instance_id=%s load_id=%s loaded=%s "
+            "backend=%s",
+            self.instance_id,
+            load_id,
+            self._loaded,
+            self.backend,
+        )
         with self._load_lock:
+            logger.info(
+                "event=service.load_lock_acquired instance_id=%s load_id=%s "
+                "wait_ms=%.3f",
+                self.instance_id,
+                load_id,
+                (perf_counter() - load_wait_started) * 1000.0,
+            )
             if self._loaded:
-                logger.info("LLMGen retrieval service load skipped; already loaded")
+                logger.info(
+                    "event=service.load_skipped instance_id=%s load_id=%s "
+                    "reason=already_loaded backend=%s",
+                    self.instance_id,
+                    load_id,
+                    self.backend,
+                )
                 return
             if self.vllm_server is not None:
                 self.vllm_server.close()
@@ -497,7 +627,12 @@ class RetriverTest:
                 self.vllm_server = None
 
             started = perf_counter()
-            logger.info("LLMGen retrieval service load started")
+            logger.info(
+                "event=service.load_begin instance_id=%s load_id=%s backend=%s",
+                self.instance_id,
+                load_id,
+                self.backend,
+            )
             current_dir = Path(__file__).resolve().parent
             self.default_top_k = _env_int("TOP_K", 2)
             self.max_code_paths = _env_int(
@@ -527,8 +662,10 @@ class RetriverTest:
                 )
                 self._loaded = True
                 logger.info(
-                    "LLMGen retrieval service loaded mock backend elapsed_ms=%.3f "
-                    "queries=%s top_k=%s",
+                    "event=service.load_complete instance_id=%s load_id=%s "
+                    "backend=mock elapsed_ms=%.3f queries=%s top_k=%s",
+                    self.instance_id,
+                    load_id,
                     (perf_counter() - started) * 1000.0,
                     len(self.mock_responses),
                     self.default_top_k,
@@ -536,9 +673,9 @@ class RetriverTest:
                 return
 
             model_dir = _resolve_model_directory(current_dir)
-            tokenizer_dir = Path(
-                _env_first_text(("TOKENIZER_PATH",), str(model_dir))
-            ).expanduser().resolve()
+            # The simple vLLM server and local protocol tokenizer must use the
+            # exact tokenizer bundled with the resolved model directory.
+            tokenizer_dir = model_dir
             candidate_dir = Path(
                 _env_first_text(
                     ("CANDIDATE_STATE_PATH", "SKILL_INDEX_PATH"), str(model_dir)
@@ -569,17 +706,14 @@ class RetriverTest:
                 self.system_prompt = _env_text(
                     "SYSTEM_PROMPT", manifest_settings.system_prompt
                 )
-                self.logits_processor_qualname = _env_text(
-                    "VLLM_LOGITS_PROCESSOR_QUALNAME",
-                    _DEFAULT_LOGITS_PROCESSOR_QUALNAME,
-                )
                 logger.info(
-                    "preparing OpenAI Router model=%s tokenizer=%s candidates=%s "
-                    "base_url=%s served_model=%s",
+                    "event=service.paths_resolved instance_id=%s load_id=%s "
+                    "model=%s tokenizer=%s candidate=%s served_model=%s",
+                    self.instance_id,
+                    load_id,
                     model_dir,
                     tokenizer_dir,
                     candidate_dir,
-                    _env_text("OPENAI_BASE_URL", _DEFAULT_OPENAI_BASE_URL),
                     self.served_model_name,
                 )
                 self.tokenizer = _load_tokenizer(tokenizer_dir)
@@ -618,7 +752,6 @@ class RetriverTest:
                 self.output_budget = (
                     self.trie.max_paths * self.bundle.num_levels
                     + (self.trie.max_paths - 1) * len(separator_ids)
-                    + 1
                 )
                 configured_vllm_kwargs = _build_vllm_kwargs(
                     model_path=model_dir,
@@ -635,81 +768,218 @@ class RetriverTest:
                     model_dir,
                     tokenizer_dir,
                     served_model_name=self.served_model_name,
-                    base_url=_env_text(
-                        "OPENAI_BASE_URL", _DEFAULT_OPENAI_BASE_URL
-                    ),
-                    logits_processor_qualname=(
-                        self.logits_processor_qualname
+                )
+                self.vllm_client = VllmGenerateClient(
+                    self.vllm_server.generate_url,
+                    timeout=_env_float(
+                        "VLLM_REQUEST_TIMEOUT_SECONDS",
+                        _DEFAULT_VLLM_REQUEST_TIMEOUT_SECONDS,
                     ),
                 )
-                self.openai_client = _create_openai_client(
-                    base_url=self.vllm_server.base_url,
-                    api_key=self.vllm_server.api_key,
+                logger.warning(
+                    "event=service.constraint_mode instance_id=%s load_id=%s "
+                    "mode=post_validation message="
+                    "vllm.entrypoints.api_server uses HTTP post-validation; "
+                    "request-level Trie enforcement requires a custom field in "
+                    "VLLM_GENERATE_KWARGS_JSON supported by the target image",
+                    self.instance_id,
+                    load_id,
                 )
-                self.backend = "openai"
+                self.backend = "vllm_http"
                 self._loaded = True
                 logger.info(
-                    "LLMGen OpenAI retrieval service loaded elapsed_ms=%.3f "
-                    "skills=%s paths=%s levels=%s max_input_length=%s",
+                    "event=service.load_complete instance_id=%s load_id=%s "
+                    "backend=vllm_http elapsed_ms=%.3f skills=%s paths=%s "
+                    "levels=%s max_input_length=%s endpoint=%s",
+                    self.instance_id,
+                    load_id,
                     (perf_counter() - started) * 1000.0,
                     len(self.bundle.skills),
                     len(self.path_skill_ids),
                     self.bundle.num_levels,
                     self.max_input_length,
+                    self.vllm_server.generate_url,
                 )
             except BaseException:
                 logger.exception(
-                    "LLMGen retrieval service load failed elapsed_ms=%.3f",
+                    "event=service.load_failed instance_id=%s load_id=%s "
+                    "elapsed_ms=%.3f",
+                    self.instance_id,
+                    load_id,
                     (perf_counter() - started) * 1000.0,
                 )
                 self._cleanup_after_failed_load()
                 raise
 
     def calc(self, req_data: Mapping[str, Any] | None) -> str:
-        container = req_data if isinstance(req_data, Mapping) else {}
-        data = container.get("data", {})
-        request = dict(data) if isinstance(data, Mapping) else {}
-        query = str(request.get("query", _DEFAULT_QUERY)).strip()
-        if not query:
-            logger.info("service calc skipped because query is empty")
-            return json.dumps([], ensure_ascii=False)
-        with self._load_lock:
-            if not self._loaded:
-                self.load()
-
-            requested_top_k = _coerce_optional_int(request.get("top_k"))
-            if requested_top_k is None:
-                requested_top_k = _coerce_optional_int(request.get("topk"))
-            resolved_top_k = (
-                self.default_top_k
-                if requested_top_k is None
-                else max(1, requested_top_k)
+        _configure_service_logging()
+        request_id = str(uuid.uuid4())
+        total_started = perf_counter()
+        try:
+            container = req_data if isinstance(req_data, Mapping) else {}
+            data = container.get("data", {})
+            request = dict(data) if isinstance(data, Mapping) else {}
+            query = str(request.get("query", _DEFAULT_QUERY)).strip()
+        except MemoryError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "event=service.calc_recovered instance_id=%s request_id=%s "
+                "phase=request_parse recoverable=True elapsed_ms=%.3f "
+                "error_type=%s response=[]",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+                type(exc).__name__,
             )
-            if resolved_top_k > self.default_top_k:
-                logger.warning(
-                    "requested top_k=%s exceeds initialized top_k=%s; "
-                    "returning at most initialized results",
-                    resolved_top_k,
-                    self.default_top_k,
-                )
-                resolved_top_k = self.default_top_k
-
-            started = perf_counter()
-            with self._inference_lock:
-                names = self._search_names(query)
+            return json.dumps([], ensure_ascii=False)
         logger.info(
-            "service calc complete elapsed_ms=%.3f query_chars=%s results=%s",
-            (perf_counter() - started) * 1000.0,
+            "event=service.calc_begin instance_id=%s request_id=%s loaded=%s "
+            "backend=%s query_chars=%s top_k_raw=%s topk_raw=%s",
+            self.instance_id,
+            request_id,
+            self._loaded,
+            self.backend,
             len(query),
-            min(len(names), resolved_top_k),
+            request.get("top_k"),
+            request.get("topk"),
         )
-        return json.dumps(names[:resolved_top_k], ensure_ascii=False)
+        if not query:
+            logger.info(
+                "event=service.calc_complete instance_id=%s request_id=%s "
+                "status=empty_query elapsed_ms=%.3f results=0",
+                self.instance_id,
+                request_id,
+                (perf_counter() - total_started) * 1000.0,
+            )
+            return json.dumps([], ensure_ascii=False)
+        phase = "load_lock"
+        load_wait_started = perf_counter()
+        try:
+            with self._load_lock:
+                load_lock_wait_ms = (
+                    perf_counter() - load_wait_started
+                ) * 1000.0
+                if not self._loaded:
+                    phase = "automatic_load"
+                    self.load()
+
+                phase = "resolve_top_k"
+                requested_top_k = _coerce_optional_int(request.get("top_k"))
+                if requested_top_k is None:
+                    requested_top_k = _coerce_optional_int(request.get("topk"))
+                resolved_top_k = (
+                    self.default_top_k
+                    if requested_top_k is None
+                    else max(1, requested_top_k)
+                )
+                if resolved_top_k > self.default_top_k:
+                    logger.warning(
+                        "event=service.calc_top_k_clamped instance_id=%s "
+                        "request_id=%s requested=%s initialized=%s",
+                        self.instance_id,
+                        request_id,
+                        resolved_top_k,
+                        self.default_top_k,
+                    )
+                    resolved_top_k = self.default_top_k
+
+                phase = "inference_lock"
+                inference_wait_started = perf_counter()
+                with self._inference_lock:
+                    inference_lock_wait_ms = (
+                        perf_counter() - inference_wait_started
+                    ) * 1000.0
+                    phase = "inference"
+                    inference_started = perf_counter()
+                    names = self._search_names(query, request_id=request_id)
+                    inference_ms = (
+                        perf_counter() - inference_started
+                    ) * 1000.0
+
+            selected_names = names[:resolved_top_k]
+            serialization_started = perf_counter()
+            response_json = json.dumps(selected_names, ensure_ascii=False)
+            serialization_ms = (
+                perf_counter() - serialization_started
+            ) * 1000.0
+            total_ms = (perf_counter() - total_started) * 1000.0
+            queue_wait_ms = load_lock_wait_ms + inference_lock_wait_ms
+            calc_overhead_ms = max(
+                0.0,
+                total_ms - queue_wait_ms - inference_ms - serialization_ms,
+            )
+            logger.info(
+                "event=service.calc_complete instance_id=%s request_id=%s "
+                "status=ok elapsed_ms=%.3f inference_ms=%.3f "
+                "load_lock_wait_ms=%.3f inference_lock_wait_ms=%.3f "
+                "queue_wait_ms=%.3f json_serialize_ms=%.3f "
+                "calc_overhead_ms=%.3f query_chars=%s decoded_results=%s "
+                "returned_results=%s response_chars=%s",
+                self.instance_id,
+                request_id,
+                total_ms,
+                inference_ms,
+                load_lock_wait_ms,
+                inference_lock_wait_ms,
+                queue_wait_ms,
+                serialization_ms,
+                calc_overhead_ms,
+                len(query),
+                len(names),
+                len(selected_names),
+                len(response_json),
+            )
+            return response_json
+        except Exception as exc:
+            if (
+                self.vllm_server is not None
+                and self.vllm_server.process.poll() is not None
+                and not isinstance(exc, ServiceRuntimeUnavailableError)
+            ):
+                exc = ServiceRuntimeUnavailableError(
+                    "owned local vLLM server exited during inference"
+                )
+            unrecoverable = (
+                phase == "automatic_load"
+                or not self._loaded
+                or isinstance(
+                    exc,
+                    (
+                        MemoryError,
+                        ServiceConfigurationError,
+                        ServiceRuntimeUnavailableError,
+                    ),
+                )
+            )
+            if unrecoverable:
+                logger.exception(
+                    "event=service.calc_failed instance_id=%s request_id=%s "
+                    "phase=%s recoverable=False elapsed_ms=%.3f error_type=%s",
+                    self.instance_id,
+                    request_id,
+                    phase,
+                    (perf_counter() - total_started) * 1000.0,
+                    type(exc).__name__,
+                )
+                raise exc
+            logger.error(
+                "event=service.calc_recovered instance_id=%s request_id=%s "
+                "phase=%s recoverable=True elapsed_ms=%.3f error_type=%s "
+                "response=[]",
+                self.instance_id,
+                request_id,
+                phase,
+                (perf_counter() - total_started) * 1000.0,
+                type(exc).__name__,
+            )
+            return json.dumps([], ensure_ascii=False)
 
     def close(self) -> None:
         with self._load_lock:
             with self._inference_lock:
-                _close_openai_client(self.openai_client)
-                self.openai_client = None
+                _close_vllm_client(self.vllm_client)
+                self.vllm_client = None
                 if self.vllm_server is not None:
                     self.vllm_server.close()
                     if self.vllm_server.closed:
@@ -718,104 +988,139 @@ class RetriverTest:
                 self.bundle = None
                 self.trie = None
                 self.path_skill_ids = {}
-                self.backend = "openai"
+                self.backend = "vllm_http"
                 self.mock_responses = {}
                 self.output_budget = 1
-                self.logits_processor_qualname = (
-                    _DEFAULT_LOGITS_PROCESSOR_QUALNAME
-                )
                 self.system_prompt = _DEFAULT_SYSTEM_PROMPT
                 self._loaded = False
             gc.collect()
 
-    def _search_names(self, query: str) -> list[str]:
+    def _search_names(
+        self,
+        query: str,
+        *,
+        request_id: str | None = None,
+    ) -> list[str]:
+        resolved_request_id = request_id or str(uuid.uuid4())
+        started = perf_counter()
+        logger.info(
+            "event=search.begin instance_id=%s request_id=%s backend=%s "
+            "query_chars=%s",
+            self.instance_id,
+            resolved_request_id,
+            self.backend,
+            len(query),
+        )
         if self.backend == "mock":
             if not self._loaded:
-                raise RuntimeError("LLMGen mock retrieval service is not loaded")
-            return list(
+                raise ServiceRuntimeUnavailableError(
+                    "LLMGen mock retrieval service is not loaded"
+                )
+            results = list(
                 self.mock_responses.get(query, self.mock_responses.get("*", ()))
             )
+            logger.info(
+                "event=search.mock_complete instance_id=%s request_id=%s "
+                "elapsed_ms=%.3f result_count=%s",
+                self.instance_id,
+                resolved_request_id,
+                (perf_counter() - started) * 1000.0,
+                len(results),
+            )
+            return results
         if (
             self.vllm_server is None
-            or self.openai_client is None
+            or self.vllm_client is None
             or self.tokenizer is None
             or self.bundle is None
             or self.trie is None
         ):
-            raise RuntimeError("LLMGen retrieval service is not loaded")
+            raise ServiceRuntimeUnavailableError(
+                "LLMGen retrieval service is not loaded"
+            )
         exit_code = self.vllm_server.process.poll()
         if exit_code is not None:
-            raise RuntimeError(
-                f"local vLLM OpenAI server exited with code {exit_code}"
+            raise ServiceRuntimeUnavailableError(
+                f"local vLLM API server exited with code {exit_code}"
             )
+        render_started = perf_counter()
         prompt = _render_router_prompt(
             self.tokenizer,
             query,
             self.system_prompt,
         )
+        render_ms = (perf_counter() - render_started) * 1000.0
+        tokenize_started = perf_counter()
         prompt_ids = [
             int(value)
             for value in self.tokenizer.encode(prompt, add_special_tokens=False)
         ]
         if not prompt_ids:
             raise RuntimeError("Router tokenizer encoded the prompt as empty")
-        if len(prompt_ids) > self.max_input_length:
+        truncated = len(prompt_ids) > self.max_input_length
+        if truncated:
             # Match the repository inference path: keep the prompt prefix.
             prompt_ids = prompt_ids[: self.max_input_length]
 
-        response = self.openai_client.completions.create(
-            model=self.served_model_name,
-            prompt=prompt_ids,
-            temperature=0.0,
-            top_p=1.0,
-            frequency_penalty=0.0,
-            presence_penalty=0.0,
-            max_tokens=self.output_budget,
-            logprobs=0,
-            extra_body={
-                "add_special_tokens": False,
-                "min_tokens": self.bundle.num_levels,
-                "top_k": -1,
-                "min_p": 0.0,
-                "repetition_penalty": 1.0,
-                "skip_special_tokens": False,
-                "spaces_between_special_tokens": False,
-                "return_tokens_as_token_ids": True,
-                "logits_processors": [
-                    {
-                        "qualname": self.logits_processor_qualname,
-                        "kwargs": {
-                            "paths": [
-                                list(path) for path in sorted(self.path_skill_ids)
-                            ],
-                            "eos_token_id": self.trie.eos_token_id,
-                            "separator_token_ids": list(
-                                self.trie.separator_token_ids
-                            ),
-                            "max_paths": self.trie.max_paths,
-                        },
-                    }
-                ],
-            },
+        if truncated:
+            decode = getattr(self.tokenizer, "decode", None)
+            if not callable(decode):
+                raise RuntimeError(
+                    "Router tokenizer must expose decode() for truncated HTTP prompts"
+                )
+            prompt = str(
+                decode(
+                    prompt_ids,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
+            )
+        tokenize_ms = (perf_counter() - tokenize_started) * 1000.0
+        logger.info(
+            "event=search.prompt_ready instance_id=%s request_id=%s "
+            "render_ms=%.3f tokenize_ms=%.3f prompt_chars=%s "
+            "prompt_tokens=%s max_input_length=%s truncated=%s",
+            self.instance_id,
+            resolved_request_id,
+            render_ms,
+            tokenize_ms,
+            len(prompt),
+            len(prompt_ids),
+            self.max_input_length,
+            truncated,
         )
-        choices = _object_field(response, "choices")
-        if (
-            not isinstance(choices, Sequence)
-            or isinstance(choices, (str, bytes))
-            or len(choices) != 1
-        ):
-            raise RuntimeError("OpenAI endpoint returned no Router generation")
-        completion = choices[0]
-        if _object_field(completion, "finish_reason") == "length":
-            raise RuntimeError("constrained vLLM generation exhausted its token budget")
-        generated = _openai_completion_token_ids(completion)
+
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "stream": False,
+            "temperature": 0.0,
+            "max_tokens": self.output_budget,
+            "min_tokens": self.bundle.num_levels,
+            "skip_special_tokens": False,
+            "spaces_between_special_tokens": False,
+        }
+        payload.update(_load_vllm_generate_kwargs())
+        generation_started = perf_counter()
+        response = self.vllm_client.generate(payload)
+        generation_ms = (perf_counter() - generation_started) * 1000.0
+        decode_started = perf_counter()
+        generated = _vllm_generate_token_ids(
+            response,
+            tokenizer=self.tokenizer,
+            prompt=prompt,
+        )
         try:
             eos_position = generated.index(self.trie.eos_token_id)
-        except ValueError as exc:
-            raise RuntimeError("constrained vLLM generation did not emit EOS") from exc
-        generated = generated[:eos_position]
+        except ValueError:
+            # The 910B service intentionally budgets only path/separator
+            # tokens. A valid boundary at max_tokens is therefore accepted.
+            eos_position = None
+        else:
+            generated = generated[:eos_position]
         paths = self.trie.parse_complete(generated)
+        decode_ms = (perf_counter() - decode_started) * 1000.0
 
+        mapping_started = perf_counter()
         skill_ids: list[str] = []
         seen: set[str] = set()
         for path in paths:
@@ -826,14 +1131,37 @@ class RetriverTest:
                 if skill_id not in seen:
                     skill_ids.append(skill_id)
                     seen.add(skill_id)
-        return [
+        names = [
             str(self.bundle.skills[skill_id].get("name") or skill_id)
             for skill_id in skill_ids
         ]
+        mapping_ms = (perf_counter() - mapping_started) * 1000.0
+        total_ms = (perf_counter() - started) * 1000.0
+        logger.info(
+            "event=search.complete instance_id=%s request_id=%s "
+            "elapsed_ms=%.3f render_ms=%.3f tokenize_ms=%.3f "
+            "generation_ms=%.3f decode_ms=%.3f mapping_ms=%.3f "
+            "service_non_generation_ms=%.3f prompt_tokens=%s "
+            "completion_tokens=%s path_count=%s result_count=%s",
+            self.instance_id,
+            resolved_request_id,
+            total_ms,
+            render_ms,
+            tokenize_ms,
+            generation_ms,
+            decode_ms,
+            mapping_ms,
+            max(0.0, total_ms - generation_ms),
+            len(prompt_ids),
+            len(generated),
+            len(paths),
+            len(names),
+        )
+        return names
 
     def _cleanup_after_failed_load(self) -> None:
-        _close_openai_client(self.openai_client)
-        self.openai_client = None
+        _close_vllm_client(self.vllm_client)
+        self.vllm_client = None
         if self.vllm_server is not None:
             self.vllm_server.close()
             if self.vllm_server.closed:
@@ -842,10 +1170,9 @@ class RetriverTest:
         self.bundle = None
         self.trie = None
         self.path_skill_ids = {}
-        self.backend = "openai"
+        self.backend = "vllm_http"
         self.mock_responses = {}
         self.output_budget = 1
-        self.logits_processor_qualname = _DEFAULT_LOGITS_PROCESSOR_QUALNAME
         self.system_prompt = _DEFAULT_SYSTEM_PROMPT
         self._loaded = False
         gc.collect()
@@ -964,8 +1291,16 @@ def _build_vllm_kwargs(*, model_path: Path, tokenizer_path: Path) -> Dict[str, A
         "tokenizer_mode": _env_text("VLLM_TOKENIZER_MODE", "auto"),
         "trust_remote_code": _env_bool("VLLM_TRUST_REMOTE_CODE", False),
         "dtype": _vllm_dtype(),
-        "tensor_parallel_size": _env_int(
-            "VLLM_TENSOR_PARALLEL_SIZE", _VLLM_TENSOR_PARALLEL_SIZE
+        "tensor_parallel_size": int(
+            _env_first_text(
+                (
+                    "VLLM_TENSOR_PARALLEL_SIZE",
+                    "LLM_TENSOR_PARALLEL_SIZE",
+                    "TENSOR_PARALLEL_SIZE",
+                    "tensor_parallel_size",
+                ),
+                str(_VLLM_TENSOR_PARALLEL_SIZE),
+            )
         ),
         "pipeline_parallel_size": _env_int("VLLM_PIPELINE_PARALLEL_SIZE", 1),
         "gpu_memory_utilization": _env_float(
@@ -975,10 +1310,27 @@ def _build_vllm_kwargs(*, model_path: Path, tokenizer_path: Path) -> Dict[str, A
         "seed": _env_int("VLLM_SEED", 0),
         "swap_space": _env_float("VLLM_SWAP_SPACE", 0.0),
         "disable_log_stats": _env_bool("VLLM_DISABLE_LOG_STATS", False),
+        "disable_log_requests": _env_bool(
+            "VLLM_DISABLE_LOG_REQUESTS", True
+        ),
     }
     max_model_len = _env_int_optional("VLLM_MAX_MODEL_LEN")
     if max_model_len is not None:
         kwargs["max_model_len"] = max_model_len
+    for environment_name, option_name in (
+        ("VLLM_SCHEDULER_BUDGET_LEN", "scheduler_budget_len"),
+        ("VLLM_MAX_NUM_BATCHED_TOKENS", "max_num_batched_tokens"),
+        ("VLLM_FIRST_TOKEN_TIMEOUT", "first_token_timeout"),
+        ("VLLM_MAX_LOG_LEN", "max_log_len"),
+        ("VLLM_BLOCK_SIZE", "block_size"),
+        (
+            "VLLM_DECODE_TENSOR_PARALLEL_SIZE",
+            "decode_tensor_parallel_size",
+        ),
+    ):
+        value = _env_int_optional(environment_name)
+        if value is not None:
+            kwargs[option_name] = value
     download_dir = os.environ.get("VLLM_DOWNLOAD_DIR")
     if download_dir and download_dir.strip():
         kwargs["download_dir"] = download_dir.strip()
@@ -1003,10 +1355,8 @@ def _build_vllm_server_command(
     *,
     model_path: Path,
     tokenizer_path: Path,
-    served_model_name: str,
     host: str,
     port: int,
-    logits_processor_qualname: str,
     vllm_overrides: Mapping[str, Any],
 ) -> list[str]:
     kwargs = _build_vllm_kwargs(
@@ -1035,21 +1385,15 @@ def _build_vllm_server_command(
             sys.executable,
         ),
         "-m",
-        "vllm.entrypoints.openai.api_server",
+        "vllm.entrypoints.api_server",
         "--model",
         str(model_path),
         "--tokenizer",
         str(tokenizer_path),
-        "--served-model-name",
-        served_model_name,
         "--host",
         host,
         "--port",
         str(port),
-        "--generation-config",
-        "vllm",
-        "--logits-processor-pattern",
-        f"^{re.escape(logits_processor_qualname)}$",
     ]
     value_options = (
         ("tokenizer_mode", "--tokenizer-mode"),
@@ -1062,6 +1406,15 @@ def _build_vllm_server_command(
         ("swap_space", "--swap-space"),
         ("max_model_len", "--max-model-len"),
         ("download_dir", "--download-dir"),
+        ("scheduler_budget_len", "--scheduler-budget-len"),
+        ("max_num_batched_tokens", "--max-num-batched-tokens"),
+        ("first_token_timeout", "--first-token-timeout"),
+        ("max_log_len", "--max-log-len"),
+        ("block_size", "--block-size"),
+        (
+            "decode_tensor_parallel_size",
+            "--decode-tensor-parallel-size",
+        ),
     )
     for name, flag in value_options:
         value = kwargs.get(name)
@@ -1071,6 +1424,8 @@ def _build_vllm_server_command(
         command.append("--trust-remote-code")
     if kwargs.get("disable_log_stats"):
         command.append("--disable-log-stats")
+    if kwargs.get("disable_log_requests"):
+        command.append("--disable-log-requests")
     command.extend(_load_vllm_server_extra_args())
     return command
 
@@ -1095,12 +1450,8 @@ def _load_vllm_server_extra_args() -> list[str]:
     protected = {
         "--model",
         "--tokenizer",
-        "--served-model-name",
         "--host",
         "--port",
-        "--generation-config",
-        "--logits-processor-pattern",
-        "--api-key",
         "--config",
         "--tokenizer-mode",
         "--trust-remote-code",
@@ -1114,6 +1465,13 @@ def _load_vllm_server_extra_args() -> list[str]:
         "--disable-log-stats",
         "--max-model-len",
         "--download-dir",
+        "--scheduler-budget-len",
+        "--max-num-batched-tokens",
+        "--first-token-timeout",
+        "--max-log-len",
+        "--block-size",
+        "--decode-tensor-parallel-size",
+        "--disable-log-requests",
     }
     short_protected = {
         "-pp": "--pipeline-parallel-size",
@@ -1148,11 +1506,11 @@ def load_vllm_model(
     tokenizer_path: str | Path | None = None,
     *,
     served_model_name: str | None = None,
-    base_url: str | None = None,
-    logits_processor_qualname: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
     **vllm_overrides: Any,
 ) -> VllmServerHandle:
-    """Start the owned local vLLM OpenAI server and wait until it is ready.
+    """Start the owned local vLLM simple API server and wait until ready.
 
     The function is independently callable for environment-specific startup
     debugging; standalone callers must close the returned handle.
@@ -1164,11 +1522,14 @@ def load_vllm_model(
         model_dir = _resolve_model_directory(service_dir)
     else:
         model_dir = Path(model_path).expanduser().resolve()
-    tokenizer_dir = Path(
-        _env_text("TOKENIZER_PATH", str(model_dir))
-        if tokenizer_path is None
-        else tokenizer_path
-    ).expanduser().resolve()
+    tokenizer_dir = model_dir
+    if tokenizer_path is not None:
+        requested_tokenizer_dir = Path(tokenizer_path).expanduser().resolve()
+        if requested_tokenizer_dir != model_dir:
+            raise ServiceConfigurationError(
+                "vllm.entrypoints.api_server requires --tokenizer to use the "
+                "same resolved model directory as --model"
+            )
     for label, path in (("model", model_dir), ("tokenizer", tokenizer_dir)):
         if not path.is_dir():
             raise ServiceConfigurationError(
@@ -1181,48 +1542,44 @@ def load_vllm_model(
         if served_model_name is not None and str(served_model_name).strip()
         else _env_text("SERVED_MODEL_NAME", model_dir.name or str(model_dir))
     )
-    resolved_base_url, host, port, origin = _parse_local_openai_base_url(
-        base_url
-        if base_url is not None
-        else _env_text("OPENAI_BASE_URL", _DEFAULT_OPENAI_BASE_URL)
+    resolved_host = (
+        str(host).strip()
+        if host is not None and str(host).strip()
+        else _env_text("VLLM_SERVER_HOST", _DEFAULT_VLLM_SERVER_HOST)
     )
-    resolved_qualname = (
-        str(logits_processor_qualname).strip()
-        if logits_processor_qualname is not None
-        and str(logits_processor_qualname).strip()
-        else _env_text(
-            "VLLM_LOGITS_PROCESSOR_QUALNAME",
-            _DEFAULT_LOGITS_PROCESSOR_QUALNAME,
+    if resolved_host not in {"127.0.0.1", "localhost", "::1"}:
+        raise ServiceConfigurationError(
+            "VLLM_SERVER_HOST must be a loopback address"
         )
+    preferred_port = (
+        int(port)
+        if port is not None
+        else _env_int("VLLM_SERVER_PORT", 0)
     )
+    resolved_port = _find_available_vllm_port(
+        resolved_host,
+        preferred_port=preferred_port,
+    )
+    origin_host = (
+        f"[{resolved_host}]" if ":" in resolved_host else resolved_host
+    )
+    origin = f"http://{origin_host}:{resolved_port}"
     command = _build_vllm_server_command(
         model_path=model_dir,
         tokenizer_path=tokenizer_dir,
-        served_model_name=resolved_model_name,
-        host=host,
-        port=port,
-        logits_processor_qualname=resolved_qualname,
+        host=resolved_host,
+        port=resolved_port,
         vllm_overrides=vllm_overrides,
     )
-    _ensure_vllm_port_available(host, port)
 
     child_environment = os.environ.copy()
-    child_environment["VLLM_USE_V1"] = "0"
-    configured_api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    api_key = configured_api_key or secrets.token_urlsafe(32)
-    child_environment["VLLM_API_KEY"] = api_key
-    existing_python_path = child_environment.get("PYTHONPATH", "").strip()
-    child_environment["PYTHONPATH"] = (
-        str(service_dir)
-        if not existing_python_path
-        else str(service_dir) + os.pathsep + existing_python_path
-    )
     logger.info(
-        "starting local vLLM OpenAI server model=%s tokenizer=%s "
-        "base_url=%s command=%s",
+        "starting local vLLM API server model=%s tokenizer=%s model_name=%s "
+        "origin=%s command=%s",
         model_dir,
         tokenizer_dir,
-        resolved_base_url,
+        resolved_model_name,
+        origin,
         command,
     )
     process_group = os.name == "posix"
@@ -1235,17 +1592,15 @@ def load_vllm_model(
     )
     handle = VllmServerHandle(
         process,
-        base_url=resolved_base_url,
-        api_key=api_key,
+        origin=origin,
+        host=resolved_host,
+        port=resolved_port,
         process_group=process_group,
     )
     try:
         _wait_for_vllm_ready(
             process,
-            health_url=origin + "/health",
-            models_url=resolved_base_url + "/models",
-            served_model_name=resolved_model_name,
-            api_key=api_key,
+            health_url=handle.health_url,
         )
     except BaseException as exc:
         handle.close()
@@ -1258,53 +1613,44 @@ def load_vllm_model(
     return handle
 
 
-def _parse_local_openai_base_url(
-    base_url: str,
-) -> tuple[str, str, int, str]:
-    value = str(base_url).strip().rstrip("/")
-    parsed = urlsplit(value)
-    if parsed.scheme.lower() != "http":
-        raise ServiceConfigurationError(
-            "OPENAI_BASE_URL must use http for the owned local vLLM server"
-        )
-    if parsed.username is not None or parsed.password is not None:
-        raise ServiceConfigurationError("OPENAI_BASE_URL cannot contain credentials")
-    host = parsed.hostname
-    if host not in {"127.0.0.1", "localhost", "::1"}:
-        raise ServiceConfigurationError(
-            "OPENAI_BASE_URL must point to a loopback host"
-        )
-    if parsed.path.rstrip("/") != "/v1" or parsed.query or parsed.fragment:
-        raise ServiceConfigurationError(
-            "OPENAI_BASE_URL must end with /v1 and contain no query or fragment"
-        )
-    try:
-        port = parsed.port or 80
-    except ValueError as exc:
-        raise ServiceConfigurationError("OPENAI_BASE_URL has an invalid port") from exc
-    origin = urlunsplit(("http", parsed.netloc, "", "", ""))
-    normalized = urlunsplit(("http", parsed.netloc, "/v1", "", ""))
-    return normalized, host, port, origin
+def _find_available_vllm_port(host: str, *, preferred_port: int = 0) -> int:
+    """Return a free loopback port, falling back when the preferred one is busy."""
 
+    if preferred_port < 0 or preferred_port > 65535:
+        raise ServiceConfigurationError(
+            "VLLM_SERVER_PORT must be between 0 and 65535"
+        )
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
-def _ensure_vllm_port_available(host: str, port: int) -> None:
-    try:
-        connection = socket.create_connection((host, port), timeout=0.25)
-    except OSError:
-        return
-    connection.close()
-    raise ServiceConfigurationError(
-        f"local OpenAI endpoint is already in use at {host}:{port}"
-    )
+    def try_bind(candidate: int) -> int | None:
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as probe:
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                probe.bind((host, candidate))
+                return int(probe.getsockname()[1])
+        except OSError:
+            return None
+
+    if preferred_port:
+        selected = try_bind(preferred_port)
+        if selected is not None:
+            return selected
+        logger.warning(
+            "preferred vLLM port %s is occupied; selecting another port",
+            preferred_port,
+        )
+    selected = try_bind(0)
+    if selected is None:
+        raise ServiceConfigurationError(
+            f"cannot allocate a local vLLM port on {host}"
+        )
+    return selected
 
 
 def _wait_for_vllm_ready(
     process: subprocess.Popen[Any],
     *,
     health_url: str,
-    models_url: str,
-    served_model_name: str,
-    api_key: str,
 ) -> None:
     timeout = _env_float(
         "VLLM_STARTUP_TIMEOUT_SECONDS",
@@ -1321,12 +1667,12 @@ def _wait_for_vllm_ready(
         exit_code = process.poll()
         if exit_code is not None:
             raise RuntimeError(
-                f"vLLM OpenAI server exited during startup with code {exit_code}"
+                f"vLLM API server exited during startup with code {exit_code}"
             )
         remaining = deadline - perf_counter()
         if remaining <= 0:
             raise TimeoutError(
-                f"vLLM OpenAI server did not become ready within {timeout:g}s; "
+                f"vLLM API server did not become ready within {timeout:g}s; "
                 f"last check: {last_error}"
             )
         request_timeout = min(2.0, max(0.1, remaining))
@@ -1334,31 +1680,8 @@ def _wait_for_vllm_ready(
             health_request = Request(health_url, method="GET")
             with urlopen(health_request, timeout=request_timeout) as response:
                 response.read()
-
-            models_request = Request(
-                models_url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                method="GET",
-            )
-            with urlopen(models_request, timeout=request_timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            raw_models = payload.get("data") if isinstance(payload, Mapping) else None
-            model_names = {
-                str(item.get("id"))
-                for item in raw_models or ()
-                if isinstance(item, Mapping) and item.get("id") is not None
-            }
-            if served_model_name in model_names:
-                logger.info(
-                    "local vLLM OpenAI server is ready model=%s pid=%s",
-                    served_model_name,
-                    process.pid,
-                )
-                return
-            last_error = (
-                f"/v1/models returned {sorted(model_names)!r}, expected "
-                f"{served_model_name!r}"
-            )
+            logger.info("local vLLM API server is ready pid=%s", process.pid)
+            return
         except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         sleep(min(poll_interval, max(0.0, deadline - perf_counter())))
@@ -1369,7 +1692,7 @@ def _load_tokenizer(tokenizer_path: Path) -> Any:
         from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
-            "OpenAI Router service requires transformers to load its local tokenizer"
+            "HTTP Router service requires transformers to load its local tokenizer"
         ) from exc
 
     kwargs: dict[str, Any] = {
@@ -1381,41 +1704,7 @@ def _load_tokenizer(tokenizer_path: Path) -> Any:
     return AutoTokenizer.from_pretrained(str(tokenizer_path), **kwargs)
 
 
-def _create_openai_client(
-    *,
-    base_url: str | None = None,
-    api_key: str | None = None,
-) -> Any:
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError(
-            "OpenAI Router service requires the openai Python package"
-        ) from exc
-
-    timeout = _env_float("OPENAI_TIMEOUT_SECONDS", 300.0)
-    max_retries = _env_int("OPENAI_MAX_RETRIES", 0)
-    if timeout <= 0:
-        raise ServiceConfigurationError("OPENAI_TIMEOUT_SECONDS must be positive")
-    if max_retries < 0:
-        raise ServiceConfigurationError("OPENAI_MAX_RETRIES cannot be negative")
-    return OpenAI(
-        base_url=(
-            str(base_url)
-            if base_url is not None
-            else _env_text("OPENAI_BASE_URL", _DEFAULT_OPENAI_BASE_URL)
-        ),
-        api_key=(
-            str(api_key)
-            if api_key is not None
-            else _env_text("OPENAI_API_KEY", _DEFAULT_OPENAI_API_KEY)
-        ),
-        timeout=timeout,
-        max_retries=max_retries,
-    )
-
-
-def _close_openai_client(client: Any | None) -> None:
+def _close_vllm_client(client: Any | None) -> None:
     if client is None:
         return
     close = getattr(client, "close", None)
@@ -1423,7 +1712,7 @@ def _close_openai_client(client: Any | None) -> None:
         try:
             close()
         except Exception:
-            logger.exception("failed to close OpenAI client")
+            logger.exception("failed to close local vLLM HTTP client")
 
 
 def _object_field(value: Any, name: str, default: Any = None) -> Any:
@@ -1432,37 +1721,105 @@ def _object_field(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
-def _openai_completion_token_ids(completion: Any) -> list[int]:
-    logprobs = _object_field(completion, "logprobs")
-    raw_tokens = _object_field(logprobs, "tokens")
-    if (
-        not isinstance(raw_tokens, Sequence)
-        or isinstance(raw_tokens, (str, bytes))
-        or not raw_tokens
-    ):
-        raise RuntimeError(
-            "OpenAI endpoint did not return completion token IDs; use vLLM "
-            "with logprobs and return_tokens_as_token_ids support"
+def _load_vllm_generate_kwargs() -> dict[str, Any]:
+    raw_value = os.environ.get("VLLM_GENERATE_KWARGS_JSON")
+    if raw_value is None or not raw_value.strip():
+        return {}
+    try:
+        payload = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ServiceConfigurationError(
+            "VLLM_GENERATE_KWARGS_JSON must be valid JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ServiceConfigurationError(
+            "VLLM_GENERATE_KWARGS_JSON must decode to an object"
         )
+    protected = {
+        "prompt",
+        "stream",
+        "temperature",
+        "max_tokens",
+        "min_tokens",
+        "skip_special_tokens",
+        "spaces_between_special_tokens",
+    }.intersection(payload)
+    if protected:
+        raise ServiceConfigurationError(
+            "VLLM_GENERATE_KWARGS_JSON cannot override: "
+            + ", ".join(sorted(protected))
+        )
+    return dict(payload)
 
-    token_ids: list[int] = []
-    prefix = "token_id:"
-    for raw_token in raw_tokens:
-        if not isinstance(raw_token, str) or not raw_token.startswith(prefix):
-            raise RuntimeError(
-                "OpenAI endpoint returned a non-token-ID completion logprob"
-            )
+
+def _vllm_generate_token_ids(
+    response: Mapping[str, Any],
+    *,
+    tokenizer: Any,
+    prompt: str,
+) -> list[int]:
+    """Extract completion IDs from custom responses or re-encode text."""
+
+    raw_token_ids: Any = response.get("token_ids")
+    outputs = response.get("outputs")
+    if (
+        raw_token_ids is None
+        and isinstance(outputs, Sequence)
+        and not isinstance(outputs, (str, bytes, bytearray))
+        and outputs
+        and isinstance(outputs[0], Mapping)
+    ):
+        raw_token_ids = outputs[0].get("token_ids")
+    if (
+        isinstance(raw_token_ids, Sequence)
+        and not isinstance(raw_token_ids, (str, bytes, bytearray))
+        and raw_token_ids
+    ):
         try:
-            token_id = int(raw_token[len(prefix) :])
-        except ValueError as exc:
+            token_ids = [int(value) for value in raw_token_ids]
+        except (TypeError, ValueError) as exc:
             raise RuntimeError(
-                f"OpenAI endpoint returned an invalid token ID: {raw_token!r}"
+                "vLLM /generate returned invalid completion token IDs"
             ) from exc
-        if token_id < 0:
+        if any(token_id < 0 for token_id in token_ids):
             raise RuntimeError(
-                f"OpenAI endpoint returned a negative token ID: {token_id}"
+                "vLLM /generate returned a negative completion token ID"
             )
-        token_ids.append(token_id)
+        return token_ids
+
+    generated_text: Any = response.get("generated_text")
+    if generated_text is None:
+        generated_text = response.get("text")
+    if (
+        generated_text is None
+        and isinstance(outputs, Sequence)
+        and not isinstance(outputs, (str, bytes, bytearray))
+        and outputs
+        and isinstance(outputs[0], Mapping)
+    ):
+        generated_text = outputs[0].get("text")
+    if isinstance(generated_text, Sequence) and not isinstance(
+        generated_text, (str, bytes, bytearray)
+    ):
+        generated_text = generated_text[0] if generated_text else None
+    if not isinstance(generated_text, str):
+        raise RuntimeError(
+            "vLLM /generate returned neither completion token IDs nor text"
+        )
+    completion_text = (
+        generated_text[len(prompt) :]
+        if generated_text.startswith(prompt)
+        else generated_text
+    )
+    encode = getattr(tokenizer, "encode", None)
+    if not callable(encode):
+        raise RuntimeError("Router tokenizer does not expose encode()")
+    token_ids = [
+        int(value)
+        for value in encode(completion_text, add_special_tokens=False)
+    ]
+    if not token_ids:
+        raise RuntimeError("vLLM /generate returned an empty completion")
     return token_ids
 
 
@@ -1824,9 +2181,15 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _coerce_optional_int(value: Any) -> int | None:
-    if value is None or not str(value).strip():
+    if value is None:
         return None
-    return int(value)
+    try:
+        if not str(value).strip():
+            return None
+        return int(value)
+    except Exception:
+        logger.warning("invalid optional top_k value; using service default")
+        return None
 
 
 if __name__ == "__main__":
