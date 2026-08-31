@@ -712,7 +712,9 @@ class RetriverTest:
         self.output_budget = 1
         self.system_prompt = _DEFAULT_SYSTEM_PROMPT
         self._load_lock = threading.RLock()
-        self._inference_lock = threading.Lock()
+        self._lifecycle_condition = threading.Condition(self._load_lock)
+        self._active_calcs = 0
+        self._closing = False
         self._loaded = False
         logger.info(
             "event=service.created instance_id=%s backend=%s",
@@ -733,6 +735,10 @@ class RetriverTest:
             self.backend,
         )
         with self._load_lock:
+            if self._closing:
+                raise ServiceRuntimeUnavailableError(
+                    "LLMGen retrieval service is closing"
+                )
             logger.info(
                 "event=service.load_lock_acquired instance_id=%s load_id=%s "
                 "wait_ms=%.3f",
@@ -1003,11 +1009,18 @@ class RetriverTest:
             return json.dumps([], ensure_ascii=False)
         phase = "load_lock"
         load_wait_started = perf_counter()
+        calc_registered = False
+        active_calcs_at_admission = 0
         try:
-            with self._load_lock:
+            with self._lifecycle_condition:
                 load_lock_wait_ms = (
                     perf_counter() - load_wait_started
                 ) * 1000.0
+                if self._closing:
+                    phase = "lifecycle_closing"
+                    raise ServiceRuntimeUnavailableError(
+                        "LLMGen retrieval service is closing"
+                    )
                 if not self._loaded:
                     phase = "automatic_load"
                     self.load()
@@ -1032,22 +1045,28 @@ class RetriverTest:
                     )
                     resolved_top_k = self.default_top_k
 
-                phase = "inference_lock"
-                inference_wait_started = perf_counter()
-                with self._inference_lock:
-                    inference_lock_wait_ms = (
-                        perf_counter() - inference_wait_started
-                    ) * 1000.0
-                    phase = "inference"
-                    inference_started = perf_counter()
-                    names = self._search_names(
-                        query,
-                        request_id=request_id,
-                        requested_max_paths=resolved_top_k,
-                    )
-                    inference_ms = (
-                        perf_counter() - inference_started
-                    ) * 1000.0
+                self._active_calcs += 1
+                active_calcs_at_admission = self._active_calcs
+                calc_registered = True
+
+            logger.info(
+                "event=service.calc_admitted instance_id=%s request_id=%s "
+                "active_calcs=%s load_lock_wait_ms=%.3f",
+                self.instance_id,
+                request_id,
+                active_calcs_at_admission,
+                load_lock_wait_ms,
+            )
+            phase = "inference"
+            inference_started = perf_counter()
+            names = self._search_names(
+                query,
+                request_id=request_id,
+                requested_max_paths=resolved_top_k,
+            )
+            inference_ms = (
+                perf_counter() - inference_started
+            ) * 1000.0
 
             selected_names = names[:resolved_top_k]
             serialization_started = perf_counter()
@@ -1056,7 +1075,10 @@ class RetriverTest:
                 perf_counter() - serialization_started
             ) * 1000.0
             total_ms = (perf_counter() - total_started) * 1000.0
-            queue_wait_ms = load_lock_wait_ms + inference_lock_wait_ms
+            # Kept in the structured log for compatibility with existing
+            # dashboards. Inference is intentionally no longer serialized.
+            inference_lock_wait_ms = 0.0
+            queue_wait_ms = load_lock_wait_ms
             calc_overhead_ms = max(
                 0.0,
                 total_ms - queue_wait_ms - inference_ms - serialization_ms,
@@ -1067,7 +1089,7 @@ class RetriverTest:
                 "load_lock_wait_ms=%.3f inference_lock_wait_ms=%.3f "
                 "queue_wait_ms=%.3f json_serialize_ms=%.3f "
                 "calc_overhead_ms=%.3f query_chars=%s decoded_results=%s "
-                "returned_results=%s response_chars=%s",
+                "returned_results=%s response_chars=%s active_calcs=%s",
                 self.instance_id,
                 request_id,
                 total_ms,
@@ -1081,6 +1103,7 @@ class RetriverTest:
                 len(names),
                 len(selected_names),
                 len(response_json),
+                active_calcs_at_admission,
             )
             return response_json
         except Exception as exc:
@@ -1127,10 +1150,40 @@ class RetriverTest:
                 _debug_error_log_value(exc),
             )
             return json.dumps([], ensure_ascii=False)
+        finally:
+            if calc_registered:
+                with self._lifecycle_condition:
+                    self._active_calcs -= 1
+                    remaining_calcs = self._active_calcs
+                    if self._active_calcs < 0:
+                        self._active_calcs = 0
+                        raise RuntimeError("active calc accounting underflow")
+                    self._lifecycle_condition.notify_all()
+                logger.info(
+                    "event=service.calc_released instance_id=%s request_id=%s "
+                    "active_calcs=%s",
+                    self.instance_id,
+                    request_id,
+                    remaining_calcs,
+                )
 
     def close(self) -> None:
-        with self._load_lock:
-            with self._inference_lock:
+        close_id = uuid.uuid4().hex[:12]
+        with self._lifecycle_condition:
+            while self._closing:
+                self._lifecycle_condition.wait()
+            self._closing = True
+            try:
+                if self._active_calcs:
+                    logger.info(
+                        "event=service.close_wait instance_id=%s close_id=%s "
+                        "active_calcs=%s",
+                        self.instance_id,
+                        close_id,
+                        self._active_calcs,
+                    )
+                while self._active_calcs:
+                    self._lifecycle_condition.wait()
                 _close_vllm_client(self.vllm_client)
                 self.vllm_client = None
                 if self.vllm_server is not None:
@@ -1146,7 +1199,10 @@ class RetriverTest:
                 self.output_budget = 1
                 self.system_prompt = _DEFAULT_SYSTEM_PROMPT
                 self._loaded = False
-            gc.collect()
+            finally:
+                self._closing = False
+                self._lifecycle_condition.notify_all()
+        gc.collect()
 
     def _search_names(
         self,

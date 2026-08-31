@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -901,6 +902,130 @@ class SelfContainedOpenAIServiceTest(unittest.TestCase):
 
 
 class OpenAIServiceEndToEndTest(unittest.TestCase):
+    def test_calc_requests_execute_concurrently(self) -> None:
+        runtime = service_openai.RetriverTest()
+        runtime._loaded = True
+        entered_lock = threading.Lock()
+        both_entered = threading.Event()
+        release = threading.Event()
+        entered_queries: list[str] = []
+        results: list[str] = []
+
+        def blocking_search(
+            query: str,
+            *,
+            request_id: str | None = None,
+            requested_max_paths: int | None = None,
+        ) -> list[str]:
+            del request_id, requested_max_paths
+            with entered_lock:
+                entered_queries.append(query)
+                if len(entered_queries) == 2:
+                    both_entered.set()
+            if not release.wait(timeout=2):
+                raise TimeoutError("test did not release concurrent requests")
+            return [query]
+
+        runtime._search_names = blocking_search  # type: ignore[method-assign]
+
+        def call(query: str) -> None:
+            results.append(runtime.calc({"data": {"query": query}}))
+
+        threads = [
+            threading.Thread(target=call, args=(query,))
+            for query in ("query-a", "query-b")
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            self.assertTrue(
+                both_entered.wait(timeout=1),
+                "calc serialized requests before the model call",
+            )
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertCountEqual(entered_queries, ["query-a", "query-b"])
+        self.assertCountEqual(
+            [json.loads(result) for result in results],
+            [["query-a"], ["query-b"]],
+        )
+        self.assertEqual(runtime._active_calcs, 0)
+
+    def test_close_waits_for_an_inflight_calc(self) -> None:
+        runtime = service_openai.RetriverTest()
+        runtime._loaded = True
+        inference_entered = threading.Event()
+        release_inference = threading.Event()
+        close_finished = threading.Event()
+        results: list[str] = []
+
+        def blocking_search(
+            query: str,
+            *,
+            request_id: str | None = None,
+            requested_max_paths: int | None = None,
+        ) -> list[str]:
+            del request_id, requested_max_paths
+            inference_entered.set()
+            if not release_inference.wait(timeout=2):
+                raise TimeoutError("test did not release the inflight request")
+            return [query]
+
+        runtime._search_names = blocking_search  # type: ignore[method-assign]
+        calc_thread = threading.Thread(
+            target=lambda: results.append(
+                runtime.calc({"data": {"query": "inflight"}})
+            )
+        )
+
+        def close_runtime() -> None:
+            runtime.close()
+            close_finished.set()
+
+        calc_thread.start()
+        self.assertTrue(inference_entered.wait(timeout=1))
+        close_thread = threading.Thread(target=close_runtime)
+        close_thread.start()
+        try:
+            self.assertFalse(close_finished.wait(timeout=0.1))
+            self.assertTrue(runtime._loaded)
+            self.assertEqual(runtime._active_calcs, 1)
+        finally:
+            release_inference.set()
+            calc_thread.join(timeout=2)
+            close_thread.join(timeout=2)
+
+        self.assertFalse(calc_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        self.assertEqual([json.loads(result) for result in results], [["inflight"]])
+        self.assertEqual(runtime._active_calcs, 0)
+        self.assertFalse(runtime._loaded)
+
+    def test_recoverable_calc_failure_releases_inflight_registration(self) -> None:
+        runtime = service_openai.RetriverTest()
+        runtime._loaded = True
+
+        def failing_search(
+            query: str,
+            *,
+            request_id: str | None = None,
+            requested_max_paths: int | None = None,
+        ) -> list[str]:
+            del query, request_id, requested_max_paths
+            raise RuntimeError("recoverable parse failure")
+
+        runtime._search_names = failing_search  # type: ignore[method-assign]
+        with patch.object(service_openai.logger, "error"):
+            result = runtime.calc({"data": {"query": "broken"}})
+
+        self.assertEqual(json.loads(result), [])
+        self.assertEqual(runtime._active_calcs, 0)
+        runtime.close()
+
     def test_load_closes_started_server_when_client_creation_fails(self) -> None:
         state = _FakeDependencyState()
         server_handle = _FakeVllmServerHandle()
