@@ -2,7 +2,8 @@
 """Probe constrained decoding on a running vLLM simple ``/generate`` API.
 
 The probe distinguishes a static token whitelist from the request-level
-logits processor required by LLMGen's dynamic Trie.  It imports no model,
+logits processor required by LLMGen's dynamic Trie.  It uses token IDs 0 and
+1 by default, so any normal base model can be tested without model files,
 Transformers, Torch, or torch_npu in the client process.
 
 For the exact logits-processor probe, the vLLM server must be able to import
@@ -13,15 +14,13 @@ this file.  Start it with the scripts directory on ``PYTHONPATH``::
 
 Then run::
 
-    python scripts/probe_vllm_constrained_decoding.py \
-      --model-dir /path/to/router/model
+    python scripts/probe_vllm_constrained_decoding.py
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
 from typing import Any, Mapping, Sequence
 from urllib.error import HTTPError, URLError
@@ -42,14 +41,11 @@ class ProbeError(RuntimeError):
 class ForcedSequenceLogitsProcessor:
     """Minimal JSON-constructible processor used by the remote probe."""
 
-    def __init__(self, *, sequence: Sequence[int], eos_token_id: int) -> None:
+    def __init__(self, *, sequence: Sequence[int]) -> None:
         normalized = tuple(int(token_id) for token_id in sequence)
         if not normalized or any(token_id < 0 for token_id in normalized):
             raise ValueError("sequence must contain non-negative token IDs")
-        if int(eos_token_id) < 0:
-            raise ValueError("eos_token_id must be non-negative")
         self.sequence = normalized
-        self.eos_token_id = int(eos_token_id)
 
     def clone(self) -> "ForcedSequenceLogitsProcessor":
         return self
@@ -68,7 +64,7 @@ class ForcedSequenceLogitsProcessor:
         forced_token_id = (
             self.sequence[position]
             if position < len(self.sequence)
-            else self.eos_token_id
+            else self.sequence[-1]
         )
         vocabulary_size = int(scores.shape[-1])
         if forced_token_id >= vocabulary_size:
@@ -79,30 +75,44 @@ class ForcedSequenceLogitsProcessor:
 
 
 def create_forced_sequence_logits_processor(
-    *, sequence: Sequence[int], eos_token_id: int
+    *, sequence: Sequence[int]
 ) -> ForcedSequenceLogitsProcessor:
     """Factory resolved by servers supporting processor descriptors."""
 
-    return ForcedSequenceLogitsProcessor(
-        sequence=sequence,
-        eos_token_id=eos_token_id,
-    )
+    return ForcedSequenceLogitsProcessor(sequence=sequence)
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default=_DEFAULT_URL)
     parser.add_argument(
-        "--model-dir",
-        type=Path,
+        "--force-token-id",
+        type=int,
+        default=0,
+        help="First valid vocabulary token ID (default: 0).",
+    )
+    parser.add_argument(
+        "--alternate-token-id",
+        type=int,
+        default=1,
+        help="Different valid token ID for the dynamic sequence (default: 1).",
+    )
+    parser.add_argument(
+        "--force-token-text",
+        default="!",
         help=(
-            "Router model directory; used only to read config.json, "
-            "virtual_tokens.txt, and tokenizer.json"
+            "Decoded text of --force-token-id for text-only responses "
+            "(Qwen default: !)."
         ),
     )
-    parser.add_argument("--force-token-id", type=int)
-    parser.add_argument("--force-token-text")
-    parser.add_argument("--eos-token-id", type=int)
+    parser.add_argument(
+        "--alternate-token-text",
+        default='"',
+        help=(
+            "Decoded text of --alternate-token-id for text-only responses "
+            "(Qwen default: double quote)."
+        ),
+    )
     parser.add_argument(
         "--prompt",
         default="请只输出约束解码探针指定的特殊 token。",
@@ -119,93 +129,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Only test allowed_token_ids; do not test a processor descriptor.",
     )
     return parser.parse_args(argv)
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ProbeError(f"cannot read JSON object: {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ProbeError(f"JSON root is not an object: {path}")
-    return payload
-
-
-def _first_integer(value: Any) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        for item in value:
-            result = _first_integer(item)
-            if result is not None:
-                return result
-    return None
-
-
-def _token_id_from_tokenizer_json(path: Path, token_text: str) -> int:
-    payload = _read_json_object(path)
-    added_tokens = payload.get("added_tokens")
-    if isinstance(added_tokens, list):
-        for item in added_tokens:
-            if (
-                isinstance(item, Mapping)
-                and item.get("content") == token_text
-                and isinstance(item.get("id"), int)
-            ):
-                return int(item["id"])
-    model = payload.get("model")
-    vocab = model.get("vocab") if isinstance(model, Mapping) else None
-    if isinstance(vocab, Mapping) and isinstance(vocab.get(token_text), int):
-        return int(vocab[token_text])
-    raise ProbeError(f"token is absent from tokenizer.json: {token_text!r}")
-
-
-def _resolve_probe_tokens(args: argparse.Namespace) -> tuple[int, str | None, int]:
-    force_token_id = args.force_token_id
-    force_token_text = args.force_token_text
-    eos_token_id = args.eos_token_id
-    if args.model_dir is not None:
-        model_dir = args.model_dir.expanduser().resolve()
-        if force_token_text is None:
-            virtual_tokens_path = model_dir / "virtual_tokens.txt"
-            try:
-                force_token_text = next(
-                    line.strip()
-                    for line in virtual_tokens_path.read_text(
-                        encoding="utf-8"
-                    ).splitlines()
-                    if line.strip()
-                )
-            except (OSError, StopIteration) as exc:
-                raise ProbeError(
-                    f"cannot select a virtual token from {virtual_tokens_path}"
-                ) from exc
-        if force_token_id is None:
-            force_token_id = _token_id_from_tokenizer_json(
-                model_dir / "tokenizer.json", force_token_text
-            )
-        if eos_token_id is None:
-            for filename in ("generation_config.json", "config.json"):
-                path = model_dir / filename
-                if not path.is_file():
-                    continue
-                eos_token_id = _first_integer(
-                    _read_json_object(path).get("eos_token_id")
-                )
-                if eos_token_id is not None:
-                    break
-    if force_token_id is None or eos_token_id is None:
-        raise ProbeError(
-            "provide --model-dir, or provide both --force-token-id and "
-            "--eos-token-id"
-        )
-    if force_token_id < 0 or eos_token_id < 0:
-        raise ProbeError("token IDs must be non-negative")
-    if force_token_id == eos_token_id:
-        raise ProbeError("the forced token must differ from EOS")
-    return force_token_id, force_token_text, eos_token_id
 
 
 def _post_json(
@@ -349,21 +272,22 @@ def _run_processor_probe(
     *,
     force_token_id: int,
     force_token_text: str | None,
-    eos_token_id: int,
+    alternate_token_id: int,
+    alternate_token_text: str | None,
 ) -> dict[str, Any]:
+    forced_sequence = [force_token_id, alternate_token_id]
     payload = {
         "prompt": args.prompt,
         "stream": False,
         "temperature": 0.0,
-        "max_tokens": 2,
-        "min_tokens": 1,
+        "max_tokens": len(forced_sequence),
+        "min_tokens": len(forced_sequence),
         "skip_special_tokens": False,
         "logits_processors": [
             {
                 "qualname": args.processor_qualname,
                 "kwargs": {
-                    "sequence": [force_token_id],
-                    "eos_token_id": eos_token_id,
+                    "sequence": forced_sequence,
                 },
             }
         ],
@@ -375,11 +299,16 @@ def _run_processor_probe(
     evidence = _evidence(response, prompt=args.prompt)
     token_ids = evidence["token_ids"]
     if token_ids is not None:
-        # Some engines retain the sampled EOS in token_ids; others remove it.
-        enforced = token_ids in ([force_token_id], [force_token_id, eos_token_id])
+        enforced = token_ids == forced_sequence
         verification = "completion_token_ids"
-    elif force_token_text is not None and evidence["completion_text"] is not None:
-        enforced = evidence["completion_text"].count(force_token_text) == 1
+    elif (
+        force_token_text is not None
+        and alternate_token_text is not None
+        and evidence["completion_text"] is not None
+    ):
+        enforced = evidence["completion_text"] == (
+            force_token_text + alternate_token_text
+        )
         verification = "completion_text"
     else:
         enforced = False
@@ -396,25 +325,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.timeout <= 0 or args.static_tokens < 1:
         raise ProbeError("timeout and static-tokens must be positive")
-    force_token_id, force_token_text, eos_token_id = _resolve_probe_tokens(args)
+    if args.force_token_id < 0 or args.alternate_token_id < 0:
+        raise ProbeError("token IDs must be non-negative")
+    if args.force_token_id == args.alternate_token_id:
+        raise ProbeError("force-token-id and alternate-token-id must differ")
     static_result = _run_static_probe(
         args,
-        force_token_id=force_token_id,
-        force_token_text=force_token_text,
+        force_token_id=args.force_token_id,
+        force_token_text=args.force_token_text,
     )
     processor_result: dict[str, Any] | None = None
     if not args.static_only:
         processor_result = _run_processor_probe(
             args,
-            force_token_id=force_token_id,
-            force_token_text=force_token_text,
-            eos_token_id=eos_token_id,
+            force_token_id=args.force_token_id,
+            force_token_text=args.force_token_text,
+            alternate_token_id=args.alternate_token_id,
+            alternate_token_text=args.alternate_token_text,
         )
     report = {
         "url": args.url,
-        "force_token_id": force_token_id,
-        "force_token_text": force_token_text,
-        "eos_token_id": eos_token_id,
+        "force_token_id": args.force_token_id,
+        "alternate_token_id": args.alternate_token_id,
         "static_allowed_token_ids": static_result,
         "request_level_logits_processor": processor_result,
         "llmgen_trie_compatible": (

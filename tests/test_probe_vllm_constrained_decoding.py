@@ -5,7 +5,6 @@ import importlib.util
 import io
 import json
 from pathlib import Path
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -23,44 +22,21 @@ probe = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(probe)
 
 
-def _write_probe_bundle(directory: Path) -> None:
-    (directory / "config.json").write_text(
-        json.dumps({"eos_token_id": 9}), encoding="utf-8"
-    )
-    (directory / "virtual_tokens.txt").write_text(
-        "<SK_L1_0>\n", encoding="utf-8"
-    )
-    (directory / "tokenizer.json").write_text(
-        json.dumps(
-            {
-                "added_tokens": [
-                    {"id": 7, "content": "<SK_L1_0>"}
-                ],
-                "model": {"vocab": {}},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
 class ProbeVllmConstrainedDecodingTest(unittest.TestCase):
     def test_reports_exact_processor_constraint_as_llmgen_compatible(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_directory:
-            directory = Path(raw_directory)
-            _write_probe_bundle(directory)
-            output = io.StringIO()
-            with (
-                patch.object(
-                    probe,
-                    "_post_json",
-                    side_effect=[
-                        {"outputs": [{"token_ids": [7, 7, 7]}]},
-                        {"outputs": [{"token_ids": [7, 9]}]},
-                    ],
-                ),
-                redirect_stdout(output),
-            ):
-                exit_code = probe.main(["--model-dir", str(directory)])
+        output = io.StringIO()
+        with (
+            patch.object(
+                probe,
+                "_post_json",
+                side_effect=[
+                    {"outputs": [{"token_ids": [0, 0, 0]}]},
+                    {"outputs": [{"token_ids": [0, 1]}]},
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = probe.main([])
 
         report = json.loads(output.getvalue())
         self.assertEqual(exit_code, 0)
@@ -69,24 +45,21 @@ class ProbeVllmConstrainedDecodingTest(unittest.TestCase):
         self.assertTrue(report["llmgen_trie_compatible"])
 
     def test_static_constraint_does_not_imply_trie_compatibility(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_directory:
-            directory = Path(raw_directory)
-            _write_probe_bundle(directory)
-            output = io.StringIO()
-            with (
-                patch.object(
-                    probe,
-                    "_post_json",
-                    side_effect=[
-                        {"outputs": [{"token_ids": [7, 7, 7]}]},
-                        probe.ProbeError(
-                            "HTTP 500: logits_processors is unsupported"
-                        ),
-                    ],
-                ),
-                redirect_stdout(output),
-            ):
-                exit_code = probe.main(["--model-dir", str(directory)])
+        output = io.StringIO()
+        with (
+            patch.object(
+                probe,
+                "_post_json",
+                side_effect=[
+                    {"outputs": [{"token_ids": [0, 0, 0]}]},
+                    probe.ProbeError(
+                        "HTTP 500: logits_processors is unsupported"
+                    ),
+                ],
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = probe.main([])
 
         report = json.loads(output.getvalue())
         self.assertEqual(exit_code, 1)
@@ -94,16 +67,11 @@ class ProbeVllmConstrainedDecodingTest(unittest.TestCase):
         self.assertFalse(report["request_level_logits_processor"]["supported"])
         self.assertFalse(report["llmgen_trie_compatible"])
 
-    def test_resolves_router_virtual_token_without_loading_model_libraries(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as raw_directory:
-            directory = Path(raw_directory)
-            _write_probe_bundle(directory)
-            args = probe._parse_args(["--model-dir", str(directory)])
-            resolved = probe._resolve_probe_tokens(args)
+    def test_defaults_require_no_model_or_tokenizer_files(self) -> None:
+        args = probe._parse_args([])
 
-        self.assertEqual(resolved, (7, "<SK_L1_0>", 9))
+        self.assertEqual(args.force_token_id, 0)
+        self.assertEqual(args.alternate_token_id, 1)
 
 
 if __name__ == "__main__":
