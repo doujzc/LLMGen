@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -60,6 +61,45 @@ def test_chat_batch_client_accepts_pipeline_timeout_environment(
     client = ChatBatchClient(ApiConfig("https://example.test", "key", "model"))
     assert client.timeout == 12.5
     assert client.max_retries == 2
+
+
+def test_chat_batch_client_reuses_durable_success_without_provider_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLMGEN_LLM_LEDGER_ROOT", str(tmp_path / "ledger"))
+    monkeypatch.setenv("LLMGEN_LLM_LEDGER_NAMESPACE", "test-generation")
+    monkeypatch.setenv("LLMGEN_LLM_LEDGER_BATCH_RECORDS", "2")
+    client = ChatBatchClient(ApiConfig("https://example.test", "key", "model"))
+    calls: list[dict] = []
+
+    class Completions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                id="provider-request-1",
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"items":[{"id":"q1"}]}')
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    total_tokens=15,
+                ),
+            )
+
+    client._client = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        chat=SimpleNamespace(completions=Completions())
+    )
+
+    first = client.complete_json("same prompt", max_tokens=100)
+    second = client.complete_json("same prompt", max_tokens=100)
+
+    assert first == second == {"items": [{"id": "q1"}]}
+    assert len(calls) == 1
+    assert client.usage_dict()["ledger_cache_hits"] == 1
 
 
 def test_json_object_parser_normalizes_top_level_object_array() -> None:

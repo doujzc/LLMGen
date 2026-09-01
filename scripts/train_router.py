@@ -26,6 +26,7 @@ from llmgen.router import (
 )
 from llmgen.router_bundle import dump_router_decoder_artifacts
 from llmgen.skillret import sha256_file
+from llmgen.pipeline.checkpoints import CheckpointError, write_sidecar_from_lineage_file
 
 
 MEMORIZATION_SYSTEM_PROMPT = (
@@ -160,6 +161,59 @@ def _resume_value(value: str | None) -> str | bool | None:
     if value is None:
         return None
     return True if value.lower() in {"latest", "true"} else value
+
+
+def _pipeline_lineage() -> dict[str, Any] | None:
+    """Load the Runner-owned, immutable training lineage when present."""
+
+    raw_path = os.environ.get("LLMGEN_PIPELINE_CHECKPOINT_LINEAGE")
+    if not raw_path:
+        return None
+    path = Path(raw_path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RouterDataError(
+            f"cannot read pipeline training lineage {path}: {error}"
+        ) from error
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RouterDataError(f"invalid pipeline training lineage: {path}")
+    return payload
+
+
+def _checkpoint_lineage_callback(transformers: Any) -> Any | None:
+    """Attach lineage only once Trainer has completed a checkpoint save."""
+
+    lineage_path = os.environ.get("LLMGEN_PIPELINE_CHECKPOINT_LINEAGE")
+    if not lineage_path:
+        return None
+
+    class PipelineLineageCallback(transformers.TrainerCallback):
+        def on_save(self, args: Any, state: Any, control: Any, **_: Any) -> Any:
+            if not getattr(state, "is_world_process_zero", True):
+                return control
+            step = int(state.global_step)
+            checkpoint = Path(args.output_dir) / f"checkpoint-{step}"
+            trainer_state = checkpoint / "trainer_state.json"
+            try:
+                payload = json.loads(trainer_state.read_text(encoding="utf-8"))
+                if int(payload.get("global_step")) != step:
+                    raise CheckpointError(
+                        "Trainer checkpoint and trainer_state global_step disagree"
+                    )
+                write_sidecar_from_lineage_file(
+                    checkpoint,
+                    kind="router",
+                    lineage_file=lineage_path,
+                    global_step=step,
+                )
+            except (OSError, TypeError, ValueError, json.JSONDecodeError, CheckpointError) as error:
+                raise RouterDataError(
+                    f"cannot write pipeline checkpoint lineage for {checkpoint}: {error}"
+                ) from error
+            return control
+
+    return PipelineLineageCallback()
 
 
 def _read_deepspeed_config(value: str | Path) -> tuple[Path, dict[str, Any], int]:
@@ -556,12 +610,17 @@ def _run_phase(
             args=args,
             transformers=transformers,
         )
+    callbacks = []
+    checkpoint_callback = _checkpoint_lineage_callback(transformers)
+    if checkpoint_callback is not None:
+        callbacks.append(checkpoint_callback)
     trainer = transformers.Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=validation_dataset,
         data_collator=_collator(torch, int(tokenizer.pad_token_id)),
+        callbacks=callbacks,
     )
     try:
         launcher_world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -637,6 +696,7 @@ def _run_phase(
             "stage1_checkpoint_sha256": stage1_checkpoint_sha256,
             "base_model": args.model_name_or_path,
             "base_model_revision": getattr(model.config, "_commit_hash", None),
+            "pipeline_lineage": _pipeline_lineage(),
             "seed": args.seed,
             "finetune_mode": (
                 "continued_adapter"

@@ -6,7 +6,8 @@ skillret_require_file "$PROCESSED_DIR/catalog_train.jsonl"
 skillret_require_file "$INDEX_DIR/train_codes.jsonl"
 skillret_require_file "$INDEX_DIR/train_registry.json"
 skillret_require_file "$ROUTER_DATA_DIR/retrieval_alignment_train.jsonl"
-skillret_require_dir "$ROUTER_OUTPUT_DIR/memorization"
+MEMORIZATION_MODEL_DIR="${ROUTER_MEMORIZATION_MODEL_DIR:-$ROUTER_OUTPUT_DIR/memorization}"
+skillret_require_dir "$MEMORIZATION_MODEL_DIR"
 skillret_configure_router
 
 ALIGNMENT_MODEL_ARGS=()
@@ -14,11 +15,11 @@ case "$ROUTER_FINETUNE_MODE" in
   lora)
     ALIGNMENT_MODEL_ARGS=(
       --model-name-or-path "$ROUTER_MODEL"
-      --adapter-name-or-path "$ROUTER_OUTPUT_DIR/memorization"
+      --adapter-name-or-path "$MEMORIZATION_MODEL_DIR"
     )
     ;;
   full)
-    ALIGNMENT_MODEL_ARGS=(--model-name-or-path "$ROUTER_OUTPUT_DIR/memorization")
+    ALIGNMENT_MODEL_ARGS=(--model-name-or-path "$MEMORIZATION_MODEL_DIR")
     ;;
 esac
 

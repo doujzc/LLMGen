@@ -792,6 +792,7 @@ class ToolWeaverStage1Trainer:
         *,
         device: str = "cpu",
         data_provenance: Mapping[str, Any] | None = None,
+        checkpoint_lineage_path: str | Path | None = None,
     ) -> None:
         _require_torch()
         matrix = np.asarray(embeddings)
@@ -810,6 +811,11 @@ class ToolWeaverStage1Trainer:
         self.embeddings = matrix
         self.graph = graph
         self.output_dir = Path(output_dir)
+        self.checkpoint_lineage_path = (
+            Path(checkpoint_lineage_path).resolve()
+            if checkpoint_lineage_path is not None
+            else None
+        )
         self.data_provenance = dict(data_provenance or {})
         self.device = torch.device(device)
         self.model = create_toolweaver_rqvae(model_config).to(self.device)
@@ -1098,6 +1104,18 @@ class ToolWeaverStage1Trainer:
                 self._checkpoint(epoch, latest_metrics, resumable=True),
                 self.output_dir / "last.pt",
             )
+            if self.checkpoint_lineage_path is not None:
+                # The sidecar is deliberately written only after the atomic
+                # checkpoint replacement. A missing sidecar is therefore an
+                # incomplete save, never a checkpoint eligible by default.
+                from ..pipeline.checkpoints import write_sidecar_from_lineage_file
+
+                write_sidecar_from_lineage_file(
+                    self.output_dir / "last.pt",
+                    kind="codebook",
+                    lineage_file=self.checkpoint_lineage_path,
+                    global_step=self.global_step,
+                )
         return {
             "best_checkpoint": str(self.output_dir / "best.pt"),
             "last_checkpoint": str(self.output_dir / "last.pt"),

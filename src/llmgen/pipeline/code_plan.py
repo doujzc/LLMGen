@@ -94,7 +94,14 @@ def plan_codes(candidate_count: int, config: Mapping[str, Any]) -> CodePlan:
     ratio = float(config.get("spare_capacity_ratio") or 1.0)
     if not math.isfinite(ratio) or ratio < 1:
         raise CodePlanError("spare_capacity_ratio must be finite and >= 1")
-    target = max(candidate_count, math.ceil(candidate_count * ratio))
+    # A one-candidate registry has exactly one useful path; spare capacity
+    # cannot be created while each branching factor is bounded by the number
+    # of candidates.
+    target = (
+        1
+        if candidate_count == 1
+        else max(candidate_count, math.ceil(candidate_count * ratio))
+    )
 
     if mode == "manual":
         raw = config.get("branching_factors")

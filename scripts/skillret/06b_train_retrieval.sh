@@ -8,9 +8,12 @@ skillret_require_file "$INDEX_DIR/train_registry.json"
 skillret_require_file "$ROUTER_DATA_DIR/retrieval_train.jsonl"
 skillret_require_file "$ROUTER_DATA_DIR/retrieval_validation.jsonl"
 
-RETRIEVAL_INIT_DIR="$ROUTER_OUTPUT_DIR/memorization"
-if [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]; then
-  RETRIEVAL_INIT_DIR="$ROUTER_OUTPUT_DIR/retrieval_alignment"
+RETRIEVAL_INIT_DIR="${ROUTER_RETRIEVAL_INIT_DIR:-}"
+if [[ -z "$RETRIEVAL_INIT_DIR" ]]; then
+  RETRIEVAL_INIT_DIR="${ROUTER_MEMORIZATION_MODEL_DIR:-$ROUTER_OUTPUT_DIR/memorization}"
+  if [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]; then
+    RETRIEVAL_INIT_DIR="${ROUTER_ALIGNMENT_MODEL_DIR:-$ROUTER_OUTPUT_DIR/retrieval_alignment}"
+  fi
 fi
 skillret_require_dir "$RETRIEVAL_INIT_DIR"
 skillret_configure_router

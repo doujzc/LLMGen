@@ -9,7 +9,7 @@ input:
   candidates: data/candidates.jsonl
   id_policy: explicit_or_name
   preserve_metadata: true
-  single_candidate_policy: error
+  single_candidate_policy: alignment_only
 
 providers:
   generation:
@@ -147,7 +147,7 @@ runtime:
   python: "${PIPELINE_PYTHON:-}"
   device: "${PIPELINE_DEVICE:-cuda}"
   devices: auto
-  num_devices: 1
+  num_devices: auto
   distributed: auto
   deepspeed: auto
   dataloader_workers: 4
@@ -185,7 +185,8 @@ logging:
   marker: "[[LLMGEN-PIPELINE]]"
   progress_interval_seconds: 30
   capture_subprocess: true
-  save_llm_requests: false
-  save_llm_responses: false
+  # Resumable Provider ledgers always retain private request/response shards.
+  save_llm_requests: true
+  save_llm_responses: true
   console_text_preview: false
   file_text_preview_chars: 1000

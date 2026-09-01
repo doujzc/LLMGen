@@ -1,6 +1,8 @@
 # 任意候选 Skill 训练闭环重构设计
 
-状态：Phase 1 已实现；Phase 2～4 按本文契约渐进迁移
+状态：Phase 1～4 已实现。默认 DAG 的 14 个 Stage 已拆分为独立模块；
+`stages/legacy.py` 仅保留旧私有导入的兼容别名。端到端验收与兼容回归以本文章节
+20、21 为准。
 范围：输入候选 Skill 名称与描述，完成监督数据与 qrels 生成、Skill 编码学习、
 Router 训练、评估和自包含模型导出。
 
@@ -20,10 +22,10 @@ Router 训练、评估和自包含模型导出。
 - 导出 `router_manifest.json`、`skill_decode_map.json` 和
   `virtual_tokens.txt` 等部署文件。
 
-现有入口 [`scripts/router_pipeline.sh`](../scripts/router_pipeline.sh) 主要面向
+原有入口 [`scripts/router_pipeline.sh`](../scripts/router_pipeline.sh) 主要面向
 ClawHub 1000 候选集和 Light 301 候选集。候选数据构造、训练配置和导出流程分别位于
-多组 Shell 脚本、环境变量配置及 Python 入口中。它们能够复现实验，但还不能直接作为
-“任意候选输入到可部署模型”的通用产品化流水线，主要问题包括：
+多组 Shell 脚本、环境变量配置及 Python 入口中。它们能够复现实验，但不能单独作为
+“任意候选输入到可部署模型”的通用产品化流水线。重构前的主要问题包括：
 
 1. 数据集名称、目录、编码空间和训练资源仍带有特定实验的固定值；
 2. 数据生成与 Router 训练是两套入口，缺少统一的运行状态和 artifact 血缘；
@@ -33,14 +35,15 @@ ClawHub 1000 候选集和 Light 301 候选集。候选数据构造、训练配�
 6. 日志分散在不同子进程中，难以从大量混合日志中快速定位某个 Run 和 Stage；
 7. 修改一个上游参数后，系统不能自动判定哪些阶段可以复用、哪些阶段必须重跑。
 
-本次重构保留现有算法实现，先建立统一编排、输入输出和恢复协议，再逐步把现有阶段迁移
-到新的 Python 模块中。
+本次重构保留现有算法实现，在统一编排、输入输出和恢复协议之上，通过 14 个独立
+Python Stage 适配现有算法入口。数据构造、训练、评估和导出仍复用已经验证的脚本与
+Python 实现，Runner 负责状态、血缘和原子发布。
 
 ## 2. 目标与非目标
 
 ### 2.1 目标
 
-新的流水线应支持：
+当前流水线支持：
 
 1. 输入任意非空候选集，最小字段为 Skill 名称和描述；
 2. 自动生成单 Skill 和多 Skill 查询、审核结果及有序 qrels；
@@ -53,7 +56,7 @@ ClawHub 1000 候选集和 Light 301 候选集。候选数据构造、训练配�
 9. 保存足够的结构化日志、原始 LLM 响应、训练指标和错误样本；
 10. 通过不可变配置快照和 artifact 哈希完整复现实验。
 
-目标命令为：
+完整执行命令为：
 
 ```bash
 python scripts/train_candidates.py run \
@@ -82,8 +85,9 @@ runs/my-router/export/model/
 这里的“任意候选集”指任意有限、ID 可唯一化且描述足以区分能力的候选集合，不代表
 首期适配器已经支持任意语言、任意 prompt 或任意 Skill 组合分布。当前复用的数据生成
 算法仍使用既有中文质量门槛、prompt 和 2～4 Skill 工作流分布；配置与这些约束冲突时
-必须在 Run 创建时明确失败，不能静默忽略。当前实现要求至少两个候选；单候选降级为
-仅 Memorization/Alignment 是后续能力。
+必须在 Run 创建时明确失败，不能静默忽略。单候选使用显式的 `alignment_only` 协议：
+保留 Memorization 与 Alignment，跳过无意义的多 Skill workflow/Retrieval，并使用
+alignment query/qrels 完成闭集评估。
 
 ## 3. 核心设计原则
 
@@ -106,10 +110,11 @@ Run 创建后，其候选快照和 resolved config 视为不可变。修改配�
 
 ### 3.4 长阶段按小批次原子提交
 
-目标态下，LLM 请求、embedding、数据审核和训练不能等全部完成后才产生一个大文件。
+实现要求 LLM 请求、embedding、数据审核和训练不能等全部完成后才产生一个大文件。
 每完成一个 batch 或 checkpoint，就写入独立分片并更新进度。正式汇总 artifact 仅在
-阶段完成时发布，避免下游误读不完整文件。Phase 1 已提供 Stage 边界恢复、子进程心跳
-和现有训练 checkpoint 透传；LLM/embedding 的不可变请求分片与去重账本属于 Phase 2。
+阶段完成时发布，避免下游误读不完整文件。当前实现同时提供 Stage 边界恢复、子进程
+心跳、训练 checkpoint lineage，以及 LLM/embedding 的不可变请求/响应分片、失败重试、
+orphan 恢复和成功请求去重。
 
 ### 3.5 原始证据与正式结果分离
 
@@ -158,10 +163,15 @@ runs/my-router/
 │   ├── pipeline.source.yaml
 │   ├── pipeline.resolved.yaml
 │   ├── overrides.json
-│   └── environment.json
+│   ├── environment.json
+│   ├── provenance.json
+│   ├── candidate_input.json
+│   └── manual_alignment_input.json
 ├── source/
 │   ├── candidates.input.jsonl
+│   ├── manual_alignment.input.jsonl
 │   ├── candidates.normalized.jsonl
+│   ├── catalog.jsonl
 │   └── candidate_manifest.json
 ├── stages/
 │   ├── 00_ingest/
@@ -178,9 +188,6 @@ runs/my-router/
 │   ├── 11_train_retrieval/
 │   ├── 12_evaluate/
 │   └── 13_export/
-├── cache/
-│   ├── llm/
-│   └── embeddings/
 ├── logs/
 │   ├── pipeline.log
 │   ├── pipeline.jsonl
@@ -197,21 +204,31 @@ stages/03_generate_queries/
 ├── stage_state.json
 ├── input_manifest.json
 ├── progress.json
+├── ledger/
+│   └── generation/
+│       ├── generate-alignment/
+│       └── generate-multiskill/
 ├── attempts/
 │   └── 0001/
-│       ├── requests/
-│       ├── responses/
-│       ├── drafts/
-│       ├── failures.jsonl
+│       ├── checkpoint_lineage.json
+│       ├── commands.jsonl
+│       ├── command_state/
+│       │   └── 0001.json
 │       ├── subprocess.log
-│       └── debug.jsonl
+│       ├── traceback.txt
+│       └── output/
 └── output/
-    ├── query_drafts.jsonl
+    ├── queries.generated.jsonl
+    ├── queries.alignment.generated.jsonl
     └── manifest.json
 ```
 
 同一配置下的重试使用新的 `attempts/NNNN`，不能覆盖旧失败记录。`output/` 只指向或
-复制当前成功 attempt 的正式输出。
+复制当前成功 attempt 的正式输出。适用 Stage 的 LLM/embedding request、response 和
+提交 manifest 位于 Stage 级 `ledger/`，因此失败 attempt 之后仍可按稳定请求 ID 精确
+复用；原始子进程输出与 traceback 留在对应 attempt 中。
+候选输入和可选人工对齐数据在 Run 创建时一并冻结。派生 Run 默认继承父 Run 的
+冻结快照，因此修改或删除原始外部文件不会改变已建立 Run 的输入语义。
 
 ## 6. 统一候选输入
 
@@ -368,10 +385,11 @@ stages/04_review_queries/backfill/
 切分单位使用 `workflow_id` 或规范化查询语义组，不能让同一查询的改写、顺序变体或
 同源工作流跨越 Train、Validation 和 Test。
 
-Phase 1 保持现有算法：`SHA-256(seed, "workflow_split", workflow_id)` 的前 64 bit
-对 20 取模，bucket 0 为 Validation、bucket 1 为 Test、其余为 Train；coverage backfill
-与 recovery workflow 永远进入 Train。小数据集不为凑比例移动样本，manifest 应记录
-实际计数。顺序增强沿用源 `workflow_id` 的 split，禁止产生跨 split 派生样本。
+默认 90/5/5 配置继续使用历史算法：`SHA-256(seed, "workflow_split", workflow_id)` 的
+前 64 bit 对 20 取模，bucket 0 为 Validation、bucket 1 为 Test、其余为 Train，从而保持
+既有 Light/ClawHub 快照可复现。其他合法比例使用相同稳定哈希映射到配置区间；coverage
+backfill 与 recovery workflow 永远进入 Train。小数据集不为凑比例移动样本，manifest
+记录实际计数。顺序增强沿用源 `workflow_id` 的 split，禁止产生跨 split 派生样本。
 
 ## 8. 配置模型
 
@@ -408,6 +426,7 @@ providers:
   embedding:
     type: openai_compatible
     base_url: "${EMBEDDING_API_BASE}"
+    api_key_env: EMBEDDING_API_KEY
     model: Qwen3-Embedding-8B
     batch_size: 8
 
@@ -484,8 +503,8 @@ logging:
   marker: "[[LLMGEN-PIPELINE]]"
   progress_interval_seconds: 30
   capture_subprocess: true
-  save_llm_requests: false
-  save_llm_responses: false
+  save_llm_requests: true
+  save_llm_responses: true
   console_text_preview: false
   file_text_preview_chars: 1000
 ```
@@ -500,20 +519,24 @@ logging:
 读取，不写入配置快照、日志或 manifest。未知键、类型错误和不满足约束的组合应在 Run
 创建时失败，不能静默忽略。
 
+`router.base_model` 必须指向已物化的本地 Hugging Face 模型目录。不接受
+`org/model` 或 `org/model@revision` 远程 ID，以保证 provenance 记录的模型内容与
+训练、评估和导出实际读取的内容完全一致。生产 Run 创建时应确保该目录已挂载。
+
 配置哈希按 Stage 所使用的字段子集计算。例如修改 Retrieval 学习率不应使 embedding
 和 qrels artifact 失效；修改候选输入则必须使全部下游 Stage 失效。
 
-Phase 1 的严格配置策略如下：
+当前严格配置策略如下：
 
-| 配置能力 | 当前行为 | 后续目标 |
+| 配置能力 | 当前行为 | 契约说明 |
 |---|---|---|
-| `skills_per_query` | 仅接受既有算法的 2～4 | 通用组合策略 |
-| `split` | 仅接受既有 90/5/5 | 可配置、稳定的语义组切分 |
-| `single_candidate_policy` | 仅接受 `error` | 支持 Alignment-only 降级 |
-| `router.finetune_mode` | 仅接受 `full`，保证导出自包含 | 合并或显式打包 LoRA base model |
-| `save_llm_requests/responses` | 必须为 `false` | 私有、不可变请求/响应分片 |
-| `runtime.distributed` | 仅接受 `auto` | 显式资源计划与校验 |
-| `evaluation.protocol` | 仅接受 `closedset` | 统一 closed-set/unseen 报告 |
+| `skills_per_query` | 可配置 `2 <= min <= max <= 4` | 与当前多 Skill 生成算法一致 |
+| `split` | 可配置且必须和为 1，训练比例大于 0 | 使用稳定语义组切分 |
+| `single_candidate_policy` | 支持 `error` 与 `alignment_only` | 单候选跳过多 Skill Retrieval |
+| `router.finetune_mode` | 支持 `full` 与 `lora` | LoRA 在导出阶段安全合并为完整模型 |
+| `save_llm_requests/responses` | 必须同时为 `true` | ledger 私有保存，不进入正式训练集或公开报告 |
+| `runtime.distributed` | 仅接受 `auto` | Run 创建时冻结可见设备与实际资源计划 |
+| `evaluation.protocol` | 仅接受 `closedset` | unseen 协议尚不属于本闭环范围 |
 
 任何尚未被适配器消费的行为型配置都应由 schema 拒绝。Provider 凭证只读取
 `api_key_env` 指向的环境变量；resolved config、环境快照、registry 和全局日志不保存
@@ -687,32 +710,35 @@ Stage 仅在以下条件同时满足时可复用：
 1. 状态为 `completed`；
 2. 输入 artifact 哈希未变化；
 3. Stage 相关配置哈希未变化；
-4. 输出文件存在且哈希匹配；
-5. 输出格式和质量门禁通过。
+4. Stage 声明的实现文件及 prompt 哈希未变化；
+5. 输出文件存在且哈希匹配；
+6. 输出格式和质量门禁通过。
 
 正式输出采用临时文件加原子 rename。`COMPLETED` 标记最后写入。运行中断时，
-`running` 状态不会被当作完成，但新 attempt 可以从 batch ledger、embedding shard 或
-训练 checkpoint 恢复。
+`running` 状态不会被当作完成。Runner 会先检查持久化的 host、PID、PGID 和进程
+身份：本机存活进程、异地主机或无法确认状态时拒绝新 attempt；只有确认原进程
+已退出或 PID 已复用才标记为可恢复。中断执行采用 `SIGTERM → 有界等待 →
+SIGKILL → 有界等待`；仍无法确认退出时 fail closed。通过检查后，新 attempt 可从
+batch ledger、embedding shard 或训练 checkpoint 恢复。
 
 强制重跑上游 Stage 后，Runner 根据依赖 DAG 把所有受影响的下游 Stage 标记为
 `invalidated`。未受影响的 artifact 保持可复用。
 
 同一 `run_dir` 同时只允许一个 Runner 执行，使用非阻塞进程文件锁；锁被占用时立即
 返回可定位错误，进程退出后操作系统自动释放锁，不以可遗留的 PID 文件判断存活。
-上次进程留下的 `running` 状态在下一次执行时创建新 attempt，旧 attempt 保留用于
-审计。成功提交顺序固定为：验证输出并计算哈希 → 写 output manifest → 原子登记
+通过上述进程恢复检查后才创建新 attempt，旧 attempt 保留用于审计。成功提交顺序
+固定为：验证输出并计算哈希 → 写 output manifest → 原子登记
 artifact → 将 Stage 标记为 `completed` → 最后写 `COMPLETED` 标记。`--force-stage`
 移除该 Stage 及下游的正式 registry 记录并标记失效，但保留历史 attempt。显式
-checkpoint 只传给对应训练 Stage；目标态还需在 checkpoint 内校验输入 lineage 与配置
-哈希。
+checkpoint 只传给对应训练 Stage，并通过 sidecar 校验 Run、Stage、输入 artifact、
+CodePlan 与 Stage 配置 lineage；无 sidecar 的旧 checkpoint 默认拒绝。
 
 ## 13. 及时写出中间文件
 
-本节描述最终恢复粒度。当前适配层会立即保存 Stage state、attempt、命令记录、原始
-子进程日志、心跳、正式输出 manifest 和训练 checkpoint；但现有数据生成脚本尚未提供
-统一的 request/response shard ledger。因此 Phase 1 可保证“已完成 Stage 不重跑”和
-“训练从显式 checkpoint 继续”，不能承诺生成/embedding Stage 崩溃后逐请求零重复。
-为避免形成虚假安全感，对应日志开关在 ledger 落地前由配置校验直接拒绝。
+当前适配层会立即保存 Stage state、attempt、命令记录、原始子进程日志、心跳、正式
+输出 manifest 和训练 checkpoint。LLM 与 embedding 调用使用统一的不可变 shard ledger；
+恢复时按稳定请求 ID 复用成功响应，仅重新调度失败或从未提交的请求。配置要求请求与
+响应账本同时开启，防止用户误以为关闭原始证据后仍能获得逐请求精确恢复。
 
 ### 13.1 LLM 生成与审核
 
@@ -836,8 +862,12 @@ python scripts/train_candidates.py run \
 ```bash
 python scripts/train_candidates.py stage train-retrieval \
   --run-dir runs/my-router \
-  --resume-checkpoint checkpoint-500
+  --resume-checkpoint /absolute/path/to/checkpoint-500
 ```
+
+不传 `--resume-checkpoint` 时，训练 Stage 会在当前及历史 attempt 中自动选择最新的
+lineage 兼容 checkpoint。显式 checkpoint 同样必须通过 lineage 校验；仅对受信任的旧
+checkpoint 才使用 `--allow-legacy-checkpoint` 绕过缺少 sidecar 的限制。
 
 ### 14.8 派生实验
 
@@ -849,7 +879,8 @@ python scripts/train_candidates.py fork \
   --set router.retrieval.learning_rate=1e-5
 ```
 
-派生 Run 记录 `parent_run_id`、配置差异和复用的 artifact。典型失效边界：
+派生 Run 记录 `parent_run_id`、配置差异和复用的 artifact。除输入与配置投影外，
+Stage 声明的实现文件或 prompt 哈希变化也会使该 Stage 及下游失效。典型失效边界：
 
 | 变更 | 最早重跑 Stage |
 |---|---|
@@ -899,21 +930,23 @@ config_hash
 - `logs/pipeline.log`：人类可读的全局 INFO 日志；
 - `logs/pipeline.jsonl`：结构化全局事件；
 - `logs/stages/<stage>.log`：阶段标准输出；
-- `stages/<stage>/attempts/<id>/debug.jsonl`：DEBUG 细节；
-- `subprocess.log`：训练等子进程原始 stdout/stderr；
-- `metrics.jsonl`：可绘图的指标流；
-- `failures.jsonl`：失败请求或数据记录。
+- `stages/<stage>/attempts/<id>/commands.jsonl`：子进程调用记录；
+- `stages/<stage>/attempts/<id>/subprocess.log`：子进程原始 stdout/stderr；
+- `stages/<stage>/attempts/<id>/traceback.txt`：失败 attempt 的完整 traceback；
+- `stages/<stage>/ledger/<provider>/<operation>/`：私有 request/response/embedding 分片；
+- 各算法输出中的 `metrics.jsonl`、拒绝记录与失败记录：可绘图指标和数据证据。
 
 控制台默认不打印完整 prompt、查询和模型响应，只打印请求 ID、长度、状态和耗时。
-原始文本根据配置写入权限受限的中间 artifact。所有异常在 DEBUG 文件中保留完整
-traceback，在 stdout 中打印异常类型、摘要和定位路径。
+原始文本根据配置写入权限受限的 ledger artifact。所有异常在 attempt 的
+`traceback.txt` 中保留完整 traceback，在 stdout 中打印异常类型、摘要和定位路径。
 
 全局文本/JSONL 日志对嵌套对象和列表递归脱敏，并使用配置引用到的 secret 值以及
-常见 credential 形态做替换。原始 request、response、traceback 与子进程 stdout/stderr
-只允许进入对应 attempt 的私有文件，权限为 `0600`；它们不会复制到全局结构化日志。
-所有子进程事件带 `command_index`，未来 Provider 分片事件分别带 `request_id` 与
-`artifact_id`，从而可以沿 `run_id → stage → attempt → command/request → artifact`
-关联定位。安静子进程的心跳由 Runner 定时产生，不依赖子进程主动输出。
+常见 credential 形态做替换。原始 request/response 位于 Stage ledger，traceback 与
+子进程 stdout/stderr 位于对应 attempt；这些私有文件权限为 `0600`，不会复制到全局
+结构化日志。所有子进程事件带 `command_index`；ledger 行分别带稳定的 `request_id` 或
+`embedding_id`，manifest 保存 shard 哈希，可以沿
+`run_id → stage → attempt/operation → request → artifact` 关联定位。安静子进程的心跳
+由 Runner 定时产生，不依赖子进程主动输出。
 
 ### 15.3 进度心跳
 
@@ -1002,7 +1035,9 @@ export/
     ├── evaluation.json
     ├── failed_examples.jsonl
     ├── quality_gates.json
-    └── artifact_lineage.json
+    ├── artifact_lineage.json
+    ├── model_files.json
+    └── run_lineage.json
 ```
 
 `router_manifest.json` 至少记录：
@@ -1021,18 +1056,27 @@ export/
 最终 `export/model` 必须兼容当前服务约定，服务只需要模型目录即可获得模型、
 tokenizer、prompt manifest 和候选 decode map。
 
-## 18. 目标代码结构
+## 18. 当前代码结构
 
 ```text
 src/llmgen/pipeline/
+├── artifacts.py
+├── checkpoints.py
+├── code_plan.py
 ├── config.py
+├── io.py
+├── ledger.py
+├── logging.py
+├── providers.py
+├── quality.py
+├── resources.py
 ├── schema.py
 ├── runner.py
 ├── state.py
-├── artifacts.py
-├── logging.py
-├── providers.py
 └── stages/
+    ├── __init__.py
+    ├── base.py
+    ├── common.py
     ├── ingest.py
     ├── enrich.py
     ├── plan_queries.py
@@ -1044,16 +1088,18 @@ src/llmgen/pipeline/
     ├── build_sft.py
     ├── train_router.py
     ├── evaluate.py
-    └── export.py
+    ├── export.py
+    └── legacy.py
 
 scripts/train_candidates.py
 configs/router_pipeline.yaml
 ```
 
-Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认配置；为保证首轮
-变更不触碰算法，具体 Stage 暂集中在 `stages/legacy.py`，Provider 适配也由该文件把配置
-转换为现有脚本参数与子进程环境。Phase 2 再按上图拆分 `providers.py` 和各 Stage 文件，
-拆分前后 artifact 名称、状态语义及配置哈希边界保持不变。
+当前默认 DAG 由 `stages/__init__.py::default_stage_specs()` 注册。14 个稳定 Stage 名称
+分别映射到上述独立模块；三段 Router 训练共享 `train_router.py`，其余 Stage 各自拥有
+独立 handler。Provider、checkpoint、ledger、质量门禁和资源解析也已从 Stage handler
+中分离。`stages/legacy.py` 不再承载 DAG 或算法，只为曾经导入 `_ingest`、`_evaluate`
+等私有符号的下游测试和本地扩展提供临时兼容层；新代码不得依赖它。
 
 职责划分：
 
@@ -1064,6 +1110,10 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 - `artifacts.py`：Artifact Registry 和血缘；
 - `logging.py`：统一标记、结构化日志和子进程日志；
 - `providers.py`：LLM/Embedding Provider、缓存、重试和并发；
+- `checkpoints.py`：Router 与 codebook checkpoint 发现、校验和 lineage sidecar；
+- `ledger.py`：LLM/embedding 不可变请求账本和精确恢复；
+- `quality.py`：数据、模型和导出质量门禁；
+- `resources.py`：训练资源解析及 Run provenance 冻结；
 - `stages/`：薄 Stage 适配器，复用现有算法函数；
 - `scripts/train_candidates.py`：不承载算法逻辑的 CLI。
 
@@ -1071,10 +1121,11 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 
 迁移应保持现有 ClawHub 和 Light 实验可复现。
 
-### 当前过渡边界
+### 当前兼容边界
 
 - 新入口 `scripts/train_candidates.py` 负责 Run、DAG、状态、哈希、恢复和报告，并通过
-  `src/llmgen/pipeline/stages/legacy.py` 调用现有算法入口；
+  14 个独立 Stage handler 调用现有算法入口；
+- `src/llmgen/pipeline/stages/legacy.py` 仅保留旧私有导入兼容，不参与默认 DAG 注册；
 - `scripts/router_pipeline.sh` 与 `scripts/skillret/*.sh` 保持兼容入口身份，它们不会反向
   创建或维护新 Runner 的状态；
 - Alignment 与 Retrieval 已拆成可独立调用的 `06a`、`06b` 阶段，原 `06` 脚本保留为
@@ -1085,7 +1136,7 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
   原有目录和环境变量规则运行；
 - 不支持的通用化参数由新配置 schema 拒绝。禁止“接受配置但仍使用旧硬编码值”。
 
-### Phase 1：编排基础设施
+### Phase 1：编排基础设施（已实现）
 
 实现：
 
@@ -1096,12 +1147,11 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 - 结构化日志；
 - `run`、`stage`、`status`、`from/to` 和 resume CLI。
 
-这一阶段通过适配器调用现有脚本，不修改算法。
+该阶段通过适配器调用现有脚本，不修改算法。
 
-### Phase 2：通用数据生成
+### Phase 2：通用数据生成（已实现）
 
-将现有 `scripts/clawhub_data/` 和 `scripts/light_data/` 的共用逻辑迁入 Python
-模块，并完成：
+独立 Stage handler 统一调用现有数据算法，并完成：
 
 - 通用候选输入；
 - embedding/画像复用；
@@ -1111,7 +1161,7 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 - coverage backfill；
 - split 和 dataset manifest。
 
-### Phase 3：动态 CodePlan 与 Router Stage
+### Phase 3：动态 CodePlan 与 Router Stage（已实现）
 
 实现：
 
@@ -1119,9 +1169,12 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 - 单 token、多 token 和任意固定长度 code 的统一校验；
 - Memorization、Alignment、Retrieval 独立 Stage；
 - 单卡、多卡和 DeepSpeed 自动资源配置；
+- 使用 `runtime.python` 实际运行有界环境探针，冻结 Python、依赖、torch 和
+  CUDA/NPU 设备信息；
+- 冻结本地 base model 与显式 DeepSpeed 配置的路径、大小和 SHA-256；
 - checkpoint 恢复和 artifact lineage。
 
-### Phase 4：评估与统一导出
+### Phase 4：评估与统一导出（已实现）
 
 实现：
 
@@ -1131,9 +1184,9 @@ Phase 1 已落地 `config/schema/runner/state/artifacts/logging`、CLI 和默认
 - 服务兼容 smoke test；
 - Run summary 和可复现报告。
 
-迁移完成前，现有 [`scripts/router_pipeline.sh`](../scripts/router_pipeline.sh) 和
-`scripts/skillret/*.sh` 保留；新模块把它们作为算法适配入口调用。新流水线稳定后，训练
-控制台应把新的 CLI 作为执行边界，而不是复制 Runner 逻辑。
+现有 [`scripts/router_pipeline.sh`](../scripts/router_pipeline.sh) 和
+`scripts/skillret/*.sh` 继续作为兼容入口及底层算法入口保留。通用流水线的新调用方应以
+`scripts/train_candidates.py` 为执行边界，不复制 Runner 的状态和恢复逻辑。
 
 ## 20. 测试策略
 
@@ -1181,6 +1234,29 @@ candidates
 - 旧服务能加载新导出目录；
 - 新 qrels 顺序校验不会改变当前合法数据。
 
+### 20.5 当前验收命令
+
+以下测试直接对应当前实现，不需要外网或下载远程模型：
+
+```bash
+python -m pytest -q \
+  tests/test_pipeline_provider_e2e.py \
+  tests/test_pipeline_dataset_regression.py \
+  tests/test_pipeline_data_stages.py \
+  tests/test_pipeline_training_stage_modules.py \
+  tests/test_pipeline_stage_evaluate_export.py \
+  tests/test_generic_pipeline.py
+```
+
+其中 `test_pipeline_provider_e2e.py` 同时覆盖 Mock Provider 全 DAG、LLM/embedding
+ledger 中断恢复、单候选真实微型模型 checkpoint 恢复与自包含导出，以及双候选真实
+Memorization → Alignment → Retrieval 训练；`test_pipeline_dataset_regression.py` 固定
+Light 候选快照、有序 qrels、SFT 数量和服务 bundle 契约。发布前还必须运行完整回归：
+
+```bash
+python -m pytest -q
+```
+
 ## 21. 验收标准
 
 重构完成需同时满足：
@@ -1198,13 +1274,13 @@ candidates
 11. Mock 端到端、小模型 smoke test 和现有数据集回归测试全部通过；
 12. Run summary 可以从候选输入追溯到最终每个模型文件。
 
-## 22. 实施建议
+## 22. 后续演进约束
 
-优先实现 Runner、Stage State、Artifact Registry、typed config 和日志。这些能力决定后续
-算法实验是否可恢复、可比较和可追溯。第一阶段不要同时重写数据生成和训练算法；应先
-用 Stage 适配器包裹现有入口，建立稳定执行协议，再逐步把核心逻辑从 Shell 脚本迁入
-Python 模块。
+Runner、Stage State、Artifact Registry、typed config、日志、ordered qrels、CodePlan、
+资源冻结和独立 Stage handler 已落地。后续算法迭代应继续遵守以下边界：
 
-ordered qrels 是数据格式重构中应最先落地的算法契约。CodePlan 自动化和资源自动配置
-可以随后实现，因为它们会使 codebook 及模型训练产物失效，适合在统一 artifact 血缘
-建立后再迭代。
+- 不绕过 Artifact Registry 直接猜测上游路径；
+- 不在 `legacy.py` 增加新逻辑；
+- 新的长耗时 Provider 或训练步骤必须接入 ledger/checkpoint lineage；
+- 修改 qrels、code 或候选 registry 格式时，同步更新训练、评估、服务解码和回归 fixture；
+- 新配置必须进入严格 schema 和对应 Stage 配置投影，不能“接受但不生效”。

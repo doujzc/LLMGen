@@ -7,7 +7,7 @@ transitions, artifact lineage, reuse validation, and useful failure records.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import platform
@@ -32,8 +32,10 @@ from .io import (
     utc_now,
 )
 from .logging import PipelineLogger
+from .resources import collect_run_provenance
 from .state import PipelineStateError, RunStateStore, StageStatus
 from .stages import StageContext, StageResult, StageSpec, default_stage_specs
+from .stages.base import StageExecutionError, recover_stale_stage_commands
 
 
 class PipelineRunnerError(RuntimeError):
@@ -183,6 +185,17 @@ def _candidate_path(config: PipelineConfig, repo_root: Path) -> Path:
     return (value if value.is_absolute() else repo_root / value).resolve()
 
 
+def _manual_alignment_path(
+    config: PipelineConfig,
+    repo_root: Path,
+) -> Path | None:
+    value = str(config.get("data_generation.manual_alignment_path") or "").strip()
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else repo_root / path).resolve()
+
+
 class PipelineRunner:
     """Execute an immutable Run using injectable stage specifications."""
 
@@ -238,12 +251,55 @@ class PipelineRunner:
         """Project config for built-in stages, conservatively hash all for injected ones."""
 
         try:
-            return self.config.stage_view(spec.name)
+            view = self.config.stage_view(spec.name)
         except PipelineConfigError:
-            return {
+            view = {
                 "custom_stage": spec.name,
                 "pipeline": self.config.to_dict(),
             }
+        implementation: dict[str, str] = {}
+        for raw_path in spec.implementation_paths:
+            path = (self.repo_root / raw_path).resolve()
+            try:
+                relative = path.relative_to(self.repo_root)
+            except ValueError as error:
+                raise PipelineRunnerError(
+                    f"stage {spec.name} implementation path escapes repository: "
+                    f"{raw_path}"
+                ) from error
+            if not path.is_file():
+                raise PipelineRunnerError(
+                    f"stage {spec.name} implementation file is missing: {path}"
+                )
+            implementation[relative.as_posix()] = sha256_file(path)
+        if implementation:
+            view["stage.implementation"] = implementation
+        # ``runtime.*=auto`` is only a request. The resolved topology frozen at
+        # Run creation is part of the effective training configuration, while
+        # the user-authored config hash remains stable and portable.
+        if spec.name in {
+            "train-codebook",
+            "assign-codes",
+            "train-memorization",
+            "train-alignment",
+            "train-retrieval",
+            "evaluate",
+            "export",
+        }:
+            provenance_path = self.run_dir / "config" / "provenance.json"
+            if provenance_path.is_file():
+                provenance = read_json(provenance_path)
+                # Training output depends on the exact code checkout, package
+                # stack, accelerator topology, and base-model bytes—not only
+                # on the user-authored YAML values. Bind the complete frozen
+                # provenance snapshot into the Stage/checkpoint lineage hash.
+                view["run.training_provenance"] = provenance
+        if spec.name == "export":
+            # The exported manifest and report intentionally embed the full
+            # resolved-config hash, so any config change changes this Stage's
+            # material output even when the trained model bytes are reusable.
+            view["run.full_config_sha256"] = self.config.hash
+        return view
 
     def _stage_config_hash(self, spec: StageSpec) -> str:
         return sha256_json(self._stage_config_view(spec))
@@ -282,18 +338,22 @@ class PipelineRunner:
     def _input_hashes(self, spec: StageSpec) -> dict[str, str]:
         values: dict[str, str] = {}
         if spec.name == "ingest":
-            fingerprint_path = self.run_dir / "config" / "candidate_input.json"
-            if not fingerprint_path.is_file():
-                raise StageDependencyError(
-                    f"Run candidate fingerprint is missing: {fingerprint_path}"
-                )
-            fingerprint = read_json(fingerprint_path)
-            expected = str(fingerprint.get("sha256") or "")
-            if not expected:
-                raise StageDependencyError(
-                    f"Run candidate fingerprint is invalid: {fingerprint_path}"
-                )
-            values["external.candidates"] = expected
+            for logical_name, filename in (
+                ("external.candidates", "candidate_input.json"),
+                ("external.manual_alignment", "manual_alignment_input.json"),
+            ):
+                fingerprint_path = self.run_dir / "config" / filename
+                if not fingerprint_path.is_file():
+                    raise StageDependencyError(
+                        f"Run input fingerprint is missing: {fingerprint_path}"
+                    )
+                fingerprint = read_json(fingerprint_path)
+                expected = str(fingerprint.get("sha256") or "")
+                if not expected:
+                    raise StageDependencyError(
+                        f"Run input fingerprint is invalid: {fingerprint_path}"
+                    )
+                values[logical_name] = expected
         for logical_name in spec.required_artifacts:
             try:
                 values[logical_name] = self.registry.verify(logical_name).sha256
@@ -403,9 +463,137 @@ class PipelineRunner:
         self.registry.register_many(records)
         return {name: record.sha256 for name, record in records.items()}
 
-    def _execute(self, spec: StageSpec, *, resume_checkpoint: str | None) -> StageExecution:
+    def _promote_attempt_output(
+        self,
+        context: StageContext,
+        result: StageResult,
+        *,
+        stage_hash: str,
+        input_hashes: Mapping[str, str],
+    ) -> StageResult:
+        """Atomically make one successful attempt visible to downstream stages."""
+
+        staging = context.output_dir.resolve()
+        formal = context.formal_output_dir.resolve()
+        staging.mkdir(parents=True, exist_ok=True)
+        mapped_artifacts = []
+        for output in result.artifacts:
+            path = output.path.expanduser().resolve()
+            try:
+                relative = path.relative_to(staging)
+            except ValueError:
+                try:
+                    path.relative_to(context.attempt_dir.resolve())
+                except ValueError:
+                    mapped_artifacts.append(output)
+                    continue
+                raise PipelineRunnerError(
+                    f"stage {context.spec.name} returned an attempt-local artifact "
+                    f"outside its output directory: {path}"
+                )
+            mapped_artifacts.append(replace(output, path=formal / relative))
+
+        atomic_write_json(
+            staging / "manifest.json",
+            {
+                "schema_version": 1,
+                "stage": context.spec.name,
+                "attempt": context.attempt,
+                "created_at": utc_now(),
+                "config_hash": stage_hash,
+                "input_artifacts": dict(input_hashes),
+                "artifacts": [
+                    {
+                        "logical_name": output.logical_name,
+                        "path": str(
+                            output.path.resolve().relative_to(self.run_dir)
+                        ),
+                        "artifact_schema": output.artifact_schema,
+                        "format": output.format,
+                        "metadata": dict(output.metadata),
+                    }
+                    for output in mapped_artifacts
+                ],
+                "progress": dict(result.progress),
+            },
+        )
+
+        previous = context.attempt_dir / "previous-output"
+        if previous.exists():
+            raise PipelineRunnerError(
+                f"attempt backup already exists and cannot be replaced: {previous}"
+            )
+        formal.parent.mkdir(parents=True, exist_ok=True)
+        if formal.exists():
+            os.replace(formal, previous)
+        try:
+            os.replace(staging, formal)
+        except BaseException:
+            if previous.exists() and not formal.exists():
+                os.replace(previous, formal)
+            raise
+        return StageResult(
+            artifacts=tuple(mapped_artifacts),
+            progress=result.progress,
+        )
+
+    def _checkpoint_lineage(
+        self,
+        spec: StageSpec,
+        *,
+        stage_hash: str,
+        input_hashes: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Build the immutable provenance training processes attach to saves."""
+
+        code_plan_hash: str | None = None
+        try:
+            code_plan_hash = self.registry.verify("code.plan").sha256
+        except ArtifactError:
+            pass
+        return {
+            "schema_version": 1,
+            "run_id": str(self.state.read_run()["run_id"]),
+            "stage": spec.name,
+            "stage_config_hash": stage_hash,
+            "input_artifacts": dict(input_hashes),
+            "code_plan_sha256": code_plan_hash,
+            "run_provenance_sha256": (
+                sha256_file(self.run_dir / "config" / "provenance.json")
+                if (self.run_dir / "config" / "provenance.json").is_file()
+                else None
+            ),
+        }
+
+    def _execute(
+        self,
+        spec: StageSpec,
+        *,
+        resume_checkpoint: str | None,
+        allow_legacy_checkpoint: bool,
+    ) -> StageExecution:
         input_hashes = self._input_hashes(spec)
         stage_hash = self._stage_config_hash(spec)
+        try:
+            recovered_commands = recover_stale_stage_commands(
+                self.state.stage_dir(spec.name),
+                stage_name=spec.name,
+            )
+        except StageExecutionError as error:
+            raise PipelineRunnerError(str(error)) from error
+        if recovered_commands:
+            recovery_logger = self._logger()
+            for record in recovered_commands:
+                recovery_logger.event(
+                    "subprocess.stale_recovered",
+                    stage=spec.name,
+                    command_index=record.get("command_index"),
+                    command_id=record.get("command_id"),
+                    pid=record.get("pid"),
+                    pgid=record.get("pgid"),
+                    recovered_at=record.get("recovered_at"),
+                    reason=(record.get("recovery") or {}).get("reason"),
+                )
         (self.state.stage_dir(spec.name) / "COMPLETED").unlink(missing_ok=True)
         running = self.state.start_stage(
             spec.name,
@@ -414,6 +602,16 @@ class PipelineRunner:
         )
         attempt = int(running["attempt"])
         logger = self._logger().child(stage=spec.name, attempt=attempt)
+        checkpoint_lineage = self._checkpoint_lineage(
+            spec, stage_hash=stage_hash, input_hashes=input_hashes
+        )
+        checkpoint_lineage_path = (
+            self.state.stage_dir(spec.name)
+            / "attempts"
+            / f"{attempt:04d}"
+            / "checkpoint_lineage.json"
+        )
+        atomic_write_json(checkpoint_lineage_path, checkpoint_lineage, mode=0o600)
         context = StageContext(
             repo_root=self.repo_root,
             run_dir=self.run_dir,
@@ -424,6 +622,9 @@ class PipelineRunner:
             attempt=attempt,
             logger=logger,
             resume_checkpoint=resume_checkpoint,
+            checkpoint_lineage=checkpoint_lineage,
+            checkpoint_lineage_path=checkpoint_lineage_path,
+            allow_legacy_checkpoint=allow_legacy_checkpoint,
         )
         context.attempt_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(
@@ -447,28 +648,11 @@ class PipelineRunner:
                 raise PipelineRunnerError(
                     f"stage {spec.name} handler must return StageResult"
                 )
-            context.output_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                context.output_dir / "manifest.json",
-                {
-                    "schema_version": 1,
-                    "stage": spec.name,
-                    "attempt": attempt,
-                    "created_at": utc_now(),
-                    "config_hash": stage_hash,
-                    "input_artifacts": input_hashes,
-                    "artifacts": [
-                        {
-                            "logical_name": output.logical_name,
-                            "path": str(output.path.resolve().relative_to(self.run_dir)),
-                            "artifact_schema": output.artifact_schema,
-                            "format": output.format,
-                            "metadata": dict(output.metadata),
-                        }
-                        for output in result.artifacts
-                    ],
-                    "progress": dict(result.progress),
-                },
+            result = self._promote_attempt_output(
+                context,
+                result,
+                stage_hash=stage_hash,
+                input_hashes=input_hashes,
             )
             outputs = self._register_result(spec, result, input_hashes)
             self.state.complete_stage(spec.name, outputs=outputs, progress=result.progress)
@@ -528,6 +712,7 @@ class PipelineRunner:
         to_stage: str | None = None,
         force_stage: str | Sequence[str] | None = None,
         resume_checkpoint: str | None = None,
+        allow_legacy_checkpoint: bool = False,
     ) -> tuple[StageExecution, ...]:
         """Run a contiguous declared stage range, safely reusing valid stages."""
 
@@ -595,6 +780,7 @@ class PipelineRunner:
                                 resume_checkpoint=(
                                     resume_checkpoint if len(selected) == 1 else None
                                 ),
+                                allow_legacy_checkpoint=allow_legacy_checkpoint,
                             )
                         )
                 except BaseException as error:
@@ -620,13 +806,20 @@ class PipelineRunner:
                 f"another pipeline process holds the Run lock: {self.run_dir}"
             ) from error
 
-    def stage(self, stage: str, *, resume_checkpoint: str | None = None) -> StageExecution:
+    def stage(
+        self,
+        stage: str,
+        *,
+        resume_checkpoint: str | None = None,
+        allow_legacy_checkpoint: bool = False,
+    ) -> StageExecution:
         """Execute only one stage after explicitly checking all upstream state."""
 
         return self.run(
             from_stage=stage,
             to_stage=stage,
             resume_checkpoint=resume_checkpoint,
+            allow_legacy_checkpoint=allow_legacy_checkpoint,
         )[0]
 
     def status(self) -> dict[str, Any]:
@@ -736,6 +929,14 @@ def create_pipeline_run(
     if not candidate_path.is_file():
         raise FileNotFoundError(candidate_path)
     candidate_bytes = candidate_path.read_bytes()
+    manual_alignment_path = _manual_alignment_path(config, runner.repo_root)
+    if manual_alignment_path is not None and not manual_alignment_path.is_file():
+        raise FileNotFoundError(manual_alignment_path)
+    manual_alignment_bytes = (
+        manual_alignment_path.read_bytes()
+        if manual_alignment_path is not None
+        else b""
+    )
     directory.parent.mkdir(parents=True, exist_ok=True)
     try:
         # mkdir is the atomic reservation: two creators can no longer both
@@ -746,11 +947,23 @@ def create_pipeline_run(
     snapshot = runner.run_dir / "config"
     snapshot.mkdir(parents=True, exist_ok=True)
     frozen_candidate = runner.run_dir / "source" / "candidates.input.jsonl"
+    frozen_manual_alignment = (
+        runner.run_dir / "source" / "manual_alignment.input.jsonl"
+    )
     atomic_write_bytes(frozen_candidate, candidate_bytes)
+    atomic_write_bytes(frozen_manual_alignment, manual_alignment_bytes)
     atomic_write_bytes(snapshot / "pipeline.source.yaml", config.source_path.read_bytes())
     atomic_write_text(snapshot / "pipeline.resolved.yaml", config.to_yaml())
     atomic_write_json(snapshot / "overrides.json", {"overrides": list(config.overrides)})
-    atomic_write_json(snapshot / "environment.json", _environment_snapshot(config))
+    environment_snapshot = _environment_snapshot(config)
+    provenance = collect_run_provenance(
+        repo_root=runner.repo_root,
+        runtime=config.require("runtime"),
+        base_model=str(config.require("router.base_model")),
+    )
+    environment_snapshot["resources"] = provenance["resources"]
+    atomic_write_json(snapshot / "environment.json", environment_snapshot)
+    atomic_write_json(snapshot / "provenance.json", provenance)
     atomic_write_json(
         snapshot / "candidate_input.json",
         {
@@ -759,6 +972,23 @@ def create_pipeline_run(
             "frozen_path": str(frozen_candidate.relative_to(runner.run_dir)),
             "bytes": len(candidate_bytes),
             "sha256": sha256_bytes(candidate_bytes),
+        },
+    )
+    atomic_write_json(
+        snapshot / "manual_alignment_input.json",
+        {
+            "schema_version": 1,
+            "enabled": manual_alignment_path is not None,
+            "path": (
+                str(manual_alignment_path)
+                if manual_alignment_path is not None
+                else None
+            ),
+            "frozen_path": str(
+                frozen_manual_alignment.relative_to(runner.run_dir)
+            ),
+            "bytes": len(manual_alignment_bytes),
+            "sha256": sha256_bytes(manual_alignment_bytes),
         },
     )
     runner.registry.initialize()

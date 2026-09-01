@@ -10,6 +10,8 @@ from llmgen.embeddings import (
     OpenAIEmbeddingConfig,
     OpenAIEmbeddingModel,
 )
+from llmgen.pipeline.ledger import JsonlShardLedger
+from scripts.prepare_closedset import _embed_catalog
 
 
 class FakeEmbeddings:
@@ -92,3 +94,53 @@ def test_openai_embedding_config_hides_api_key_and_validates_dimensions():
     assert "do-not-print" not in repr(config)
     with pytest.raises(ValueError, match="dimensions"):
         OpenAIEmbeddingConfig(dimensions=0)
+
+
+def test_prepare_embedding_ledger_reconstructs_output_without_reissuing(
+    tmp_path,
+):
+    class Model:
+        config = SimpleNamespace(model="embedding-test")
+
+        def __init__(self):
+            self.calls = 0
+
+        def encode(self, texts, **kwargs):
+            del kwargs
+            self.calls += 1
+            return np.asarray(
+                [[float(len(text)), 1.0] for text in texts],
+                dtype=np.float32,
+            )
+
+    catalog = [
+        {"skill_id": "a", "text": "alpha"},
+        {"skill_id": "b", "text": "beta"},
+    ]
+    ledger = JsonlShardLedger(tmp_path / "ledger", batch_size=1)
+    first_model = Model()
+    first_shape = _embed_catalog(
+        catalog,
+        tmp_path / "first.npy",
+        first_model,  # type: ignore[arg-type]
+        batch_size=2,
+        max_batch_chars=100,
+        ledger=ledger,
+    )
+    second_model = Model()
+    second_shape = _embed_catalog(
+        catalog,
+        tmp_path / "second.npy",
+        second_model,  # type: ignore[arg-type]
+        batch_size=2,
+        max_batch_chars=100,
+        ledger=ledger,
+    )
+
+    assert first_shape == second_shape == (2, 2)
+    assert first_model.calls == 2
+    assert second_model.calls == 0
+    np.testing.assert_allclose(
+        np.load(tmp_path / "first.npy"),
+        np.load(tmp_path / "second.npy"),
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -469,4 +470,304 @@ def test_single_device_full_training_accepts_all_optional_arrays_empty(
     assert "--resume-retrieval-from-checkpoint" not in arguments
     assert arguments[arguments.index("--model-name-or-path") + 1] == str(
         paths["router"] / "memorization"
+    )
+
+
+def test_alignment_training_accepts_all_optional_arrays_empty(
+    tmp_path: Path,
+) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    invocation = tmp_path / "alignment-empty-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_FINETUNE_MODE": "full",
+            "ROUTER_NUM_GPUS": "1",
+            "ROUTER_DEEPSPEED_CONFIG": "none",
+            "ROUTER_PRECISION": "fp32",
+            "ROUTER_GRADIENT_CHECKPOINTING": "0",
+            "ROUTER_TRUST_REMOTE_CODE": "0",
+            "ROUTER_ALIGNMENT_EPOCHS": "2",
+            "ROUTER_ALIGNMENT_LR": "3e-5",
+            "ROUTER_RESUME_ALIGNMENT": "",
+            "ROUTER_EXTRA_ARGS": "",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "06a_train_alignment.sh",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert "--deepspeed" not in arguments
+    assert "--bf16" not in arguments
+    assert "--fp16" not in arguments
+    assert "--resume-retrieval-from-checkpoint" not in arguments
+    assert arguments[arguments.index("--model-name-or-path") + 1] == str(
+        paths["router"] / "memorization"
+    )
+
+
+def test_alignment_only_router_data_uses_alignment_as_retrieval_passthrough(
+    tmp_path: Path,
+) -> None:
+    catalog = tmp_path / "catalog.jsonl"
+    queries = tmp_path / "queries.jsonl"
+    qrels = tmp_path / "qrels.jsonl"
+    alignment_queries = tmp_path / "queries_alignment.jsonl"
+    alignment_qrels = tmp_path / "qrels_alignment.jsonl"
+    codes = tmp_path / "train_codes.jsonl"
+    virtual_tokens = tmp_path / "virtual_tokens.txt"
+    output_dir = tmp_path / "router_data"
+    catalog.write_text(
+        '{"skill_id": "only", "name": "Only", "description": "唯一能力"}\n',
+        encoding="utf-8",
+    )
+    queries.write_text("", encoding="utf-8")
+    qrels.write_text("", encoding="utf-8")
+    alignment_queries.write_text(
+        '{"id": "a1", "query": "使用唯一能力", "skill_ids": ["only"]}\n',
+        encoding="utf-8",
+    )
+    alignment_qrels.write_text(
+        '{"query_id": "a1", "skill_id": "only", "relevance": 1}\n',
+        encoding="utf-8",
+    )
+    codes.write_text(
+        '{"skill_id": "only", "tokens": ["<S0>"]}\n',
+        encoding="utf-8",
+    )
+    virtual_tokens.write_text("<S0>\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "build_router_data.py"),
+            "--catalog",
+            str(catalog),
+            "--queries",
+            str(queries),
+            "--qrels",
+            str(qrels),
+            "--alignment-queries",
+            str(alignment_queries),
+            "--alignment-qrels",
+            str(alignment_qrels),
+            "--codes",
+            str(codes),
+            "--virtual-tokens",
+            str(virtual_tokens),
+            "--output-dir",
+            str(output_dir),
+            "--skip-multiskill-retrieval",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(
+        (output_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    retrieval_rows = [
+        json.loads(line)
+        for line in (output_dir / "retrieval_train.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert manifest["alignment_only"] is True
+    assert manifest["counts"]["retrieval"]["alignment_only_passthrough"] == 1
+    assert retrieval_rows[0]["query_id"] == "a1"
+    assert (output_dir / "retrieval_validation.jsonl").read_text(
+        encoding="utf-8"
+    ) == ""
+
+
+def test_alignment_only_stage04_forwards_alignment_passthrough_flag(
+    tmp_path: Path,
+) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    for path in (
+        paths["processed"] / "queries_train.jsonl",
+        paths["processed"] / "qrels_train.jsonl",
+        paths["processed"] / "queries_alignment.jsonl",
+        paths["processed"] / "qrels_alignment.jsonl",
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    invocation = tmp_path / "build-router-data-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_ALIGNMENT_ONLY": "1",
+            "ROUTER_ALIGNMENT_EPOCHS": "0",
+            "ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION": "0",
+            "MEMORIZATION_VALIDATION_FRACTION": "0",
+            "ROUTER_VALIDATION_FRACTION": "0",
+            "ROUTER_DATA_SEED": "42",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "04_build_router_data.sh",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert arguments[0] == "scripts/build_router_data.py"
+    assert "--skip-multiskill-retrieval" in arguments
+    assert arguments[arguments.index("--alignment-queries") + 1] == str(
+        paths["processed"] / "queries_alignment.jsonl"
+    )
+
+
+def test_alignment_only_evaluation_uses_explicit_model_and_alignment_queries(
+    tmp_path: Path,
+) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    eval_model = tmp_path / "attempt" / "retrieval"
+    eval_model.mkdir(parents=True)
+    for path in (
+        paths["processed"] / "queries_alignment.jsonl",
+        paths["processed"] / "qrels_alignment.jsonl",
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    invocation = tmp_path / "evaluate-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_EVAL_MODEL_DIR": str(eval_model),
+            "ROUTER_MODEL": "base-model",
+            "ROUTER_ALIGNMENT_ONLY": "1",
+            "EVAL_PROTOCOL": "closedset",
+            "QUERY_SET": "test",
+            "EVAL_CUTOFFS": "1 5",
+            "EVAL_BATCH_SIZE": "1",
+            "EVAL_MAX_CODE_PATHS": "1",
+            "EVAL_TOP_K": "1",
+            "EVAL_DTYPE": "float32",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "07_evaluate.sh",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert arguments[0] == "scripts/infer_router.py"
+    assert arguments[arguments.index("--model-name-or-path") + 1] == str(
+        eval_model
+    )
+    assert arguments[arguments.index("--queries") + 1] == str(
+        paths["processed"] / "queries_alignment.jsonl"
+    )
+    assert arguments[arguments.index("--qrels") + 1] == str(
+        paths["processed"] / "qrels_alignment.jsonl"
+    )
+
+
+def test_evaluation_defaults_to_retrieval_model_for_multiskill_runs(
+    tmp_path: Path,
+) -> None:
+    paths = _write_retrieval_stage_inputs(tmp_path)
+    (paths["router"] / "retrieval").mkdir()
+    for path in (
+        paths["processed"] / "queries_test.jsonl",
+        paths["processed"] / "qrels_test.jsonl",
+    ):
+        path.write_text("{}\n", encoding="utf-8")
+    invocation = tmp_path / "evaluate-default-argv.txt"
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\" > \"${FAKE_ROUTER_ARGS:?}\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = _environment()
+    environment.update(
+        {
+            "FAKE_ROUTER_ARGS": str(invocation),
+            "PYTHON": str(fake_python),
+            "DEVICE": "cpu",
+            "RUN_DIR": str(tmp_path),
+            "PROCESSED_DIR": str(paths["processed"]),
+            "INDEX_DIR": str(paths["index"]),
+            "ROUTER_DATA_DIR": str(paths["router_data"]),
+            "ROUTER_OUTPUT_DIR": str(paths["router"]),
+            "ROUTER_EVAL_MODEL_DIR": "",
+            "ROUTER_MODEL": "base-model",
+            "ROUTER_ALIGNMENT_ONLY": "0",
+            "EVAL_PROTOCOL": "closedset",
+            "QUERY_SET": "test",
+            "EVAL_CUTOFFS": "1",
+            "EVAL_BATCH_SIZE": "1",
+            "EVAL_MAX_CODE_PATHS": "1",
+            "EVAL_TOP_K": "1",
+            "EVAL_DTYPE": "float32",
+        }
+    )
+
+    result = _run_skillret_stage(
+        "07_evaluate.sh",
+        environment=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    arguments = invocation.read_text(encoding="utf-8").splitlines()
+    assert arguments[arguments.index("--model-name-or-path") + 1] == str(
+        paths["router"] / "retrieval"
     )

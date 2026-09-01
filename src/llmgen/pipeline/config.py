@@ -12,6 +12,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .io import canonical_json, sha256_json
+from .resources import ResourceResolutionError, validate_runtime_device_request
 
 
 class PipelineConfigError(ValueError):
@@ -202,6 +203,33 @@ _SCIENTIFIC_NUMBER = re.compile(
     r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+$"
 )
 
+_MANAGED_RUNTIME_ENVIRONMENT_NAMES = {
+    "PYTHON",
+    "SKIP_DOWNLOAD",
+    "PREPARE_SCRIPT",
+    "DATASET_NAME",
+    "RUN_DIR",
+    "DATASET_DIR",
+    "PROCESSED_DIR",
+    "STAGE1_DIR",
+    "INDEX_DIR",
+    "DEVICE",
+    "NUM_LEVELS",
+    "BRANCHING_FACTORS",
+    "SK_EPSILONS",
+    "RQ_LAYERS",
+    "CUDA_VISIBLE_DEVICES",
+    "ASCEND_RT_VISIBLE_DEVICES",
+}
+_MANAGED_RUNTIME_ENVIRONMENT_PREFIXES = (
+    "EMBEDDING_",
+    "LLMGEN_",
+    "TOKENIZER_",
+    "CODE_",
+    "ROUTER_",
+    "EVAL_",
+)
+
 
 _ROUTER_SHARED_PATHS = (
     "router.base_model",
@@ -234,33 +262,41 @@ STAGE_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
     "enrich": (
         "schema_version",
         "run.seed",
+        "runtime.python",
         "providers.generation",
         "data_generation.profile_batch_size",
+        "checkpointing.llm_batch_records",
     ),
     "plan-queries": (
         "schema_version",
         "run.seed",
+        "runtime.python",
         "data_generation.workflows_per_skill",
         "data_generation.skills_per_query",
     ),
     "generate-queries": (
         "schema_version",
         "run.seed",
+        "runtime.python",
         "providers.generation",
+        "data_generation.alignment_queries_per_skill",
         "data_generation.explicit_variants",
         "data_generation.implicit_variants",
         "data_generation.query_batch_size",
         "data_generation.alignment_batch_size",
         "data_generation.validation_retry_rounds",
         "data_generation.min_completion_rate",
+        "checkpointing.llm_batch_records",
     ),
     "review-queries": (
         "schema_version",
         "run.seed",
+        "runtime.python",
         "providers.generation",
         "providers.review",
         "data_generation.alignment_queries_per_skill",
         "data_generation.retrieval_positives_per_skill",
+        "data_generation.skills_per_query",
         "data_generation.explicit_variants",
         "data_generation.implicit_variants",
         "data_generation.max_backfill_rounds",
@@ -273,36 +309,52 @@ STAGE_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
         "data_generation.validation_retry_rounds",
         "data_generation.min_completion_rate",
         "data_generation.manual_alignment_path",
+        "data_generation.split",
+        "checkpointing.llm_batch_records",
     ),
     "finalize-dataset": (
         "schema_version",
         "run.seed",
+        "runtime.python",
+        "runtime.environment",
         "providers.embedding",
         "data_generation.alignment_queries_per_skill",
         "data_generation.retrieval_positives_per_skill",
         "data_generation.order_variants",
         "data_generation.min_augmented_train_queries",
         "data_generation.split",
+        "checkpointing.embedding_batch_records",
     ),
     "train-codebook": (
         "schema_version",
         "run.seed",
         "code",
+        "runtime.python",
         "runtime.device",
+        "runtime.devices",
+        "runtime.num_devices",
+        "runtime.environment",
         "checkpointing",
     ),
     "assign-codes": (
         "schema_version",
         "run.seed",
         "code",
+        "runtime.python",
         "runtime.device",
+        "runtime.devices",
+        "runtime.num_devices",
+        "runtime.environment",
     ),
     "build-sft": (
         "schema_version",
         "run.seed",
+        "runtime.python",
+        "runtime.environment",
         "router.validation_fraction",
         "router.data_seed",
         "router.alignment.enabled",
+        "router.alignment.epochs",
         "router.retrieval.alignment_replay_fraction",
     ),
     "train-memorization": (
@@ -334,8 +386,20 @@ STAGE_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
     "evaluate": (
         "schema_version",
         "run.seed",
-        "evaluation",
+        "evaluation.protocol",
+        "evaluation.query_split",
+        "evaluation.cutoffs",
+        "evaluation.top_k",
+        "evaluation.max_code_paths",
+        "evaluation.batch_size",
+        "evaluation.dtype",
+        "evaluation.require_format_valid_rate",
+        "evaluation.metric_thresholds",
+        "runtime.python",
         "runtime.device",
+        "runtime.devices",
+        "runtime.num_devices",
+        "runtime.environment",
         "router.base_model",
         "router.finetune_mode",
         "router.trust_remote_code",
@@ -344,6 +408,11 @@ STAGE_CONFIG_PATHS: dict[str, tuple[str, ...]] = {
         "schema_version",
         "export",
         "evaluation",
+        "runtime.python",
+        "runtime.device",
+        "runtime.devices",
+        "runtime.num_devices",
+        "runtime.environment",
         "router.base_model",
         "router.finetune_mode",
         "router.retrieval.alignment_replay_fraction",
@@ -626,11 +695,9 @@ def _validate(data: dict[str, Any]) -> None:
     _reject_unknown(router, _ROUTER_KEYS, "router")
     if not str(router.get("base_model") or "").strip():
         raise PipelineConfigError("router.base_model must be non-empty")
-    if router.get("finetune_mode") != "full":
+    if router.get("finetune_mode") not in {"full", "lora"}:
         raise PipelineConfigError(
-            "the generic pipeline currently requires router.finetune_mode=full "
-            "so export/model is self-contained; use the legacy entrypoint for "
-            "adapter-only LoRA experiments"
+            "router.finetune_mode must be full or lora"
         )
     for name in ("memorization", "alignment", "retrieval"):
         phase = _mapping(router.get(name), f"router.{name}")
@@ -699,9 +766,9 @@ def _validate(data: dict[str, Any]) -> None:
         raise PipelineConfigError(
             "input.id_policy must be explicit or explicit_or_name"
         )
-    if input_config.get("single_candidate_policy") != "error":
+    if input_config.get("single_candidate_policy") not in {"error", "alignment_only"}:
         raise PipelineConfigError(
-            "the current adapter only supports input.single_candidate_policy=error"
+            "input.single_candidate_policy must be error or alignment_only"
         )
     _boolean(input_config.get("preserve_metadata"), "input.preserve_metadata")
 
@@ -761,12 +828,8 @@ def _validate(data: dict[str, Any]) -> None:
     _reject_unknown(skills_per_query, {"min", "max"}, "data_generation.skills_per_query")
     minimum = _positive_int(skills_per_query.get("min"), "skills_per_query.min")
     maximum = _positive_int(skills_per_query.get("max"), "skills_per_query.max")
-    if minimum > maximum or maximum > 4:
-        raise PipelineConfigError("skills_per_query must satisfy 1 <= min <= max <= 4")
-    if (minimum, maximum) != (2, 4):
-        raise PipelineConfigError(
-            "the current workflow adapter supports skills_per_query min=2, max=4"
-        )
+    if minimum < 2 or minimum > maximum or maximum > 4:
+        raise PipelineConfigError("skills_per_query must satisfy 2 <= min <= max <= 4")
     data_generation["skills_per_query"] = skills_per_query
     split = _mapping(data_generation.get("split"), "data_generation.split")
     _reject_unknown(split, {"train", "validation", "test"}, "data_generation.split")
@@ -774,13 +837,8 @@ def _validate(data: dict[str, Any]) -> None:
         raise PipelineConfigError("data_generation.split values must sum to 1")
     for name in ("train", "validation", "test"):
         _probability(split.get(name), f"data_generation.split.{name}")
-    if any(
-        abs(float(split[name]) - expected) > 1e-9
-        for name, expected in (("train", 0.90), ("validation", 0.05), ("test", 0.05))
-    ):
-        raise PipelineConfigError(
-            "the current dataset adapter supports only a 0.90/0.05/0.05 split"
-        )
+    if float(split["train"]) <= 0:
+        raise PipelineConfigError("data_generation.split.train must be positive")
     data_generation["split"] = split
 
     code = data["code"]
@@ -889,6 +947,10 @@ def _validate(data: dict[str, Any]) -> None:
     num_devices = runtime.get("num_devices")
     if num_devices != "auto":
         _positive_int(num_devices, "runtime.num_devices")
+    try:
+        validate_runtime_device_request(runtime)
+    except ResourceResolutionError as error:
+        raise PipelineConfigError(str(error)) from error
     if runtime.get("distributed") != "auto":
         raise PipelineConfigError(
             "the current adapter supports only runtime.distributed=auto"
@@ -914,6 +976,17 @@ def _validate(data: dict[str, Any]) -> None:
     if any(not isinstance(value, (str, int, float, bool)) for value in custom_environment.values()):
         raise PipelineConfigError(
             "runtime.environment values must be scalar"
+        )
+    managed = sorted(
+        name
+        for name in custom_environment
+        if name in _MANAGED_RUNTIME_ENVIRONMENT_NAMES
+        or name.startswith(_MANAGED_RUNTIME_ENVIRONMENT_PREFIXES)
+    )
+    if managed:
+        raise PipelineConfigError(
+            "runtime.environment cannot override pipeline-managed variable: "
+            f"{managed[0]}"
         )
     runtime["environment"] = custom_environment
 
@@ -1007,9 +1080,11 @@ def _validate(data: dict[str, Any]) -> None:
         raise PipelineConfigError(
             "the current adapter requires logging.capture_subprocess=true"
         )
-    if logging["save_llm_requests"] or logging["save_llm_responses"]:
+    if not logging["save_llm_requests"] or not logging["save_llm_responses"]:
         raise PipelineConfigError(
-            "raw LLM request/response capture is not yet supported by the legacy adapter"
+            "the resumable generic pipeline requires private LLM request and "
+            "response ledgers; logging.save_llm_requests and "
+            "logging.save_llm_responses must both be true"
         )
     _positive_int(
         logging.get("file_text_preview_chars"),

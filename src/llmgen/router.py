@@ -245,9 +245,17 @@ def validate_registry_assignments(
 def qrels_by_query(
     rows: Iterable[Mapping[str, Any]],
 ) -> dict[str, tuple[str, ...]]:
-    """Group positive qrels in source order, ignoring non-relevant rows."""
+    """Group positive qrels in their declared target order.
 
-    grouped: dict[str, list[str]] = defaultdict(list)
+    New artifacts declare a zero-based ``position`` for every positive qrel of
+    a query.  Their physical JSONL order is deliberately irrelevant.  Legacy
+    artifacts without positions remain supported and retain source order, but
+    a query cannot mix the two representations.
+    """
+
+    grouped: dict[str, list[tuple[int | None, str]]] = defaultdict(list)
+    positioned: dict[str, bool] = {}
+    declared_positions: dict[str, list[int]] = defaultdict(list)
     seen: dict[str, set[str]] = defaultdict(set)
     for row_number, row in enumerate(rows, start=1):
         query_id = _nonempty_text(row, "query_id", "qid")
@@ -261,13 +269,50 @@ def qrels_by_query(
             raise RouterDataError(
                 f"qrel row {row_number} has invalid relevance {relevance!r}"
             ) from exc
-        if is_positive and skill_id not in seen[query_id]:
-            grouped[query_id].append(skill_id)
+        if not is_positive:
+            continue
+
+        has_position = "position" in row
+        previous_mode = positioned.setdefault(query_id, has_position)
+        if previous_mode != has_position:
+            raise RouterDataError(
+                f"qrels for query {query_id!r} mix positioned and "
+                "unpositioned positive rows"
+            )
+
+        position: int | None = None
+        if has_position:
+            raw_position = row["position"]
+            if (
+                not isinstance(raw_position, int)
+                or isinstance(raw_position, bool)
+                or raw_position < 0
+            ):
+                raise RouterDataError(
+                    f"qrel row {row_number} for query {query_id!r} has position "
+                    f"{raw_position!r}; position must be a non-negative integer"
+                )
+            position = raw_position
+            declared_positions[query_id].append(position)
+
+        if skill_id not in seen[query_id]:
+            grouped[query_id].append((position, skill_id))
             seen[query_id].add(skill_id)
-    return {
-        query_id: tuple(skill_ids)
-        for query_id, skill_ids in grouped.items()
-    }
+
+    result: dict[str, tuple[str, ...]] = {}
+    for query_id, entries in grouped.items():
+        if positioned[query_id]:
+            positions = sorted(declared_positions[query_id])
+            expected = list(range(len(declared_positions[query_id])))
+            if positions != expected:
+                raise RouterDataError(
+                    f"qrels for query {query_id!r} have positions {positions}; "
+                    "positions must be unique and contiguous "
+                    f"0..{len(declared_positions[query_id]) - 1}"
+                )
+            entries.sort(key=lambda item: -1 if item[0] is None else item[0])
+        result[query_id] = tuple(skill_id for _, skill_id in entries)
+    return result
 
 
 def build_retrieval_examples(
@@ -360,13 +405,19 @@ def build_closed_set_evaluation_rows(
             raise RouterDataError(
                 f"closed-set validation query {query_id!r} has no positive_skill_ids"
             )
-        positives = {str(value).strip() for value in raw_positives if str(value).strip()}
+        positives = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in raw_positives
+                if str(value).strip()
+            )
+        )
         if not positives:
             raise RouterDataError(
                 f"closed-set validation query {query_id!r} has no valid positive skills"
             )
         if allowed_skill_ids is not None:
-            unknown = positives.difference(allowed_skill_ids)
+            unknown = set(positives).difference(allowed_skill_ids)
             if unknown:
                 raise RouterDataError(
                     f"closed-set validation query {query_id!r} references a skill "
@@ -393,12 +444,12 @@ def build_closed_set_evaluation_rows(
     qrels: list[dict[str, Any]] = []
     for query_id in sorted(grouped):
         details = grouped[query_id]
-        positives = sorted(details["positive_skill_ids"])
+        positives = details["positive_skill_ids"]
         queries.append(
             {
                 "id": query_id,
                 "query": details["query"],
-                "skill_ids": positives,
+                "skill_ids": list(positives),
             }
         )
         qrels.extend(
@@ -406,8 +457,9 @@ def build_closed_set_evaluation_rows(
                 "query_id": query_id,
                 "skill_id": skill_id,
                 "relevance": 1,
+                "position": position,
             }
-            for skill_id in positives
+            for position, skill_id in enumerate(positives)
         )
     return queries, qrels
 

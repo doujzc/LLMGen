@@ -328,6 +328,21 @@ def test_materialize_completed_checkpoint_for_web(
     assert manifest["seed"] == 42
     assert manifest["checkpoint_export"]["global_step"] == 50
     assert manifest["checkpoint_export"]["inference_mode"] == "full"
+
+    # The artifact emitted by the training/export path is the exact directory
+    # consumed by every supported serving adapter.  Keep this as a direct
+    # compatibility contract instead of recreating a service-only fixture.
+    import service
+    import service_910b
+    import service_openai
+
+    for serving_module in (service, service_openai, service_910b):
+        serving_module._validate_full_model_bundle(output)
+        bundle = serving_module._load_candidate_bundle(output)
+        settings = serving_module._load_router_settings(output)
+        assert len(bundle.skills) == len(CATALOG)
+        assert settings.system_prompt
+        assert settings.max_length == 1024
     assert manifest["generation_contract"]["max_target_paths"] == 1
     assert manifest["examples"] == {
         "train": 4,

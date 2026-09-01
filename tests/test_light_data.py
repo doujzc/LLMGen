@@ -297,3 +297,41 @@ def test_legacy_quality_audit_has_an_explicit_compatibility_policy(
     assert refreshed_manifest["artifacts"]["quality_report.json"][
         "sha256"
     ] == _sha256(quality)
+
+
+def test_quality_audit_allows_empty_multiskill_splits_for_alignment_only(
+    tmp_path: Path,
+) -> None:
+    _write_jsonl(
+        tmp_path / "skills.jsonl",
+        [{"skill_id": "only", "name": "Only", "description": "唯一能力"}],
+    )
+    _write_jsonl(
+        tmp_path / "queries_alignment.jsonl",
+        [{"id": "a1", "query": "使用唯一能力", "skill_ids": ["only"]}],
+    )
+    for split in ("train", "validation", "test"):
+        _write_jsonl(tmp_path / f"queries_{split}.jsonl", [])
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format_version": 1,
+                "artifacts": {},
+                "min_augmented_train_queries_required": 0,
+                "min_train_positives_per_skill_required": 1,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = audit_training_dataset(tmp_path, expected_candidates=1)
+
+    assert report["status"] == "pass"
+    assert report["execution_mode"] == "alignment_only"
+    assert report["query_counts"] == {
+        "train": 0,
+        "validation": 0,
+        "test": 0,
+    }

@@ -9,7 +9,20 @@ skillret_require_file "$INDEX_DIR/train_codes.jsonl"
 skillret_require_file "$INDEX_DIR/virtual_tokens.txt"
 
 ALIGNMENT_ARGS=()
-if {
+ALIGNMENT_ONLY_ARGS=()
+case "${ROUTER_ALIGNMENT_ONLY:-0}" in
+  1|true|yes)
+    ALIGNMENT_ONLY_ARGS=(--skip-multiskill-retrieval)
+    ;;
+  0|false|no|"")
+    ;;
+  *)
+    echo "ROUTER_ALIGNMENT_ONLY must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+if (( ${#ALIGNMENT_ONLY_ARGS[@]} > 0 )) || {
   [[ "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0" && "${ROUTER_ALIGNMENT_EPOCHS:-0}" != "0.0" ]]
 } || {
   [[ "${ROUTER_RETRIEVAL_ALIGNMENT_REPLAY_FRACTION:-0}" != "0" &&
@@ -28,6 +41,7 @@ fi
   --queries "$PROCESSED_DIR/queries_train.jsonl" \
   --qrels "$PROCESSED_DIR/qrels_train.jsonl" \
   ${ALIGNMENT_ARGS[@]+"${ALIGNMENT_ARGS[@]}"} \
+  ${ALIGNMENT_ONLY_ARGS[@]+"${ALIGNMENT_ONLY_ARGS[@]}"} \
   --codes "$INDEX_DIR/train_codes.jsonl" \
   --virtual-tokens "$INDEX_DIR/virtual_tokens.txt" \
   --output-dir "$ROUTER_DATA_DIR" \

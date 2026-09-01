@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -345,6 +346,7 @@ def main() -> None:
             **source,
             "manifest_file_sha256": file_sha256(manifest_path),
         },
+        checkpoint_lineage_path=os.environ.get("LLMGEN_PIPELINE_CHECKPOINT_LINEAGE"),
     )
     result = trainer.fit(args.resume)
     best_model, _ = load_toolweaver_rqvae(result["best_checkpoint"], device=device)
@@ -363,6 +365,12 @@ def main() -> None:
         "code_metrics": code_assignment_metrics(codes, model_config.num_emb_list),
         "num_buckets": len(registry["buckets"]),
     }
+    lineage_path = os.environ.get("LLMGEN_PIPELINE_CHECKPOINT_LINEAGE")
+    if lineage_path:
+        lineage = json.loads(Path(lineage_path).read_text(encoding="utf-8"))
+        if not isinstance(lineage, dict) or lineage.get("schema_version") != 1:
+            raise ValueError("invalid pipeline checkpoint lineage")
+        summary["pipeline_lineage"] = lineage
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )

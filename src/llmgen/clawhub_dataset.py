@@ -20,6 +20,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from llmgen.clawhub import atomic_json, atomic_jsonl, sha256_file, utc_now
+from llmgen.pipeline.ledger import (
+    JsonlShardLedger,
+    RequestRecord,
+    ResponseRecord,
+)
 
 
 DOMAINS = (
@@ -215,7 +220,34 @@ def stable_hash(*values: object) -> int:
     return int.from_bytes(hashlib.sha256(text.encode()).digest()[:8], "big")
 
 
-def workflow_split(workflow: Mapping[str, Any], *, seed: int) -> str:
+def _normalized_split_ratios(
+    split_ratios: Mapping[str, float] | None,
+) -> dict[str, float]:
+    """Validate and normalize a train/validation/test split configuration."""
+
+    ratios = (
+        {"train": 0.90, "validation": 0.05, "test": 0.05}
+        if split_ratios is None
+        else {
+            name: float(split_ratios.get(name, 0.0))
+            for name in ("train", "validation", "test")
+        }
+    )
+    if any(not math.isfinite(value) or value < 0 for value in ratios.values()):
+        raise DatasetBuildError("split ratios must be finite and non-negative")
+    if not math.isclose(sum(ratios.values()), 1.0, abs_tol=1e-9):
+        raise DatasetBuildError("split ratios must sum to 1")
+    if ratios["train"] <= 0:
+        raise DatasetBuildError("the train split ratio must be positive")
+    return ratios
+
+
+def workflow_split(
+    workflow: Mapping[str, Any],
+    *,
+    seed: int,
+    split_ratios: Mapping[str, float] | None = None,
+) -> str:
     """Assign complete workflows to a deterministic, target-count-neutral split.
 
     Generated coverage/recovery workflows are training-only. Base workflows
@@ -224,23 +256,40 @@ def workflow_split(workflow: Mapping[str, Any], *, seed: int) -> str:
     fixtures without ``anchor_round`` retain their explicit split hint.
     """
 
+    ratios = _normalized_split_ratios(split_ratios)
     if workflow.get("coverage_backfill") or workflow.get("recovery"):
         return "train"
     if "anchor_round" not in workflow:
         hint = str(workflow.get("split_hint") or "train")
         if hint == "train":
             return "train"
-        return (
-            "validation"
-            if stable_hash(seed, workflow.get("workflow_id")) % 2 == 0
-            else "test"
-        )
-    bucket = stable_hash(seed, "workflow_split", workflow.get("workflow_id")) % 20
-    if bucket == 0:
+        held_out = ratios["validation"] + ratios["test"]
+        if held_out <= 0:
+            return "train"
+        validation_share = ratios["validation"] / held_out
+        value = stable_hash(seed, workflow.get("workflow_id")) / float(2**64)
+        return "validation" if value < validation_share else "test"
+
+    # Preserve exact historical assignment for the default split so existing
+    # Light/ClawHub snapshots remain byte-for-byte reproducible.
+    if ratios == {"train": 0.90, "validation": 0.05, "test": 0.05}:
+        bucket = stable_hash(seed, "workflow_split", workflow.get("workflow_id")) % 20
+        if bucket == 0:
+            return "validation"
+        if bucket == 1:
+            return "test"
+        return "train"
+
+    value = stable_hash(
+        seed,
+        "workflow_split",
+        workflow.get("workflow_id"),
+    ) / float(2**64)
+    if value < ratios["train"]:
+        return "train"
+    if value < ratios["train"] + ratios["validation"]:
         return "validation"
-    if bucket == 1:
-        return "test"
-    return "train"
+    return "test"
 
 
 def normalized_text(value: str) -> str:
@@ -308,6 +357,22 @@ class ChatBatchClient:
         self.local = threading.local()
         self.lock = threading.Lock()
         self.usage = Counter()
+        self._request_locks: dict[str, threading.Lock] = {}
+        ledger_root = os.environ.get("LLMGEN_LLM_LEDGER_ROOT", "").strip()
+        self.ledger_namespace = os.environ.get(
+            "LLMGEN_LLM_LEDGER_NAMESPACE",
+            "llm-provider",
+        ).strip()
+        self.ledger = (
+            JsonlShardLedger(
+                ledger_root,
+                batch_size=int(
+                    os.environ.get("LLMGEN_LLM_LEDGER_BATCH_RECORDS", "20")
+                ),
+            )
+            if ledger_root
+            else None
+        )
 
     def _client(self):
         client = getattr(self.local, "client", None)
@@ -326,8 +391,52 @@ class ChatBatchClient:
         return client
 
     def complete_json(self, prompt: str, *, max_tokens: int) -> dict[str, Any]:
+        if self.ledger is None:
+            return self._complete_json_uncached(prompt, max_tokens=max_tokens)
+
+        request = RequestRecord.from_prompt(
+            self.ledger_namespace,
+            prompt,
+            request_key={
+                "base_url": self.config.base_url,
+                "model": self.config.model,
+                "temperature": self.temperature,
+                "max_tokens": max_tokens,
+            },
+            metadata={"operation": self.ledger_namespace},
+        )
+        with self.lock:
+            request_lock = self._request_locks.setdefault(
+                request.request_id,
+                threading.Lock(),
+            )
+        with request_lock:
+            scheduled = self.ledger.schedule_requests([request])
+            if not scheduled.records:
+                cached = self.ledger.successful_response(request.request_id)
+                if cached is None or not isinstance(cached.response, dict):
+                    raise DatasetBuildError(
+                        f"ledger has no successful payload for {request.request_id}"
+                    )
+                with self.lock:
+                    self.usage["ledger_cache_hits"] += 1
+                return dict(cached.response)
+            return self._complete_json_uncached(
+                prompt,
+                max_tokens=max_tokens,
+                ledger_request=request,
+            )
+
+    def _complete_json_uncached(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        ledger_request: RequestRecord | None = None,
+    ) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            request_started = time.monotonic()
             try:
                 provider_options: dict[str, Any]
                 if "deepseek.com" in self.config.base_url.casefold():
@@ -359,14 +468,56 @@ class ChatBatchClient:
                         self.usage["prompt_tokens"] += int(usage.prompt_tokens or 0)
                         self.usage["completion_tokens"] += int(usage.completion_tokens or 0)
                         self.usage["total_tokens"] += int(usage.total_tokens or 0)
-                return parse_json_object(content)
+                payload = parse_json_object(content)
             except Exception as error:
                 last_error = error
+                if self.ledger is not None and ledger_request is not None:
+                    self.ledger.record_responses(
+                        [
+                            ResponseRecord(
+                                request_id=ledger_request.request_id,
+                                prompt_hash=ledger_request.prompt_hash,
+                                status="failed",
+                                error={"type": type(error).__name__},
+                                metadata={
+                                    "elapsed_ms": round(
+                                        (time.monotonic() - request_started) * 1000,
+                                        3,
+                                    )
+                                },
+                            )
+                        ]
+                    )
                 with self.lock:
                     self.usage["failed_attempts"] += 1
                 if attempt >= self.max_retries:
                     break
                 time.sleep(min(20.0, 1.25 * (2**attempt)) + random.random() * 0.5)
+            else:
+                # Ledger publication is deliberately outside the Provider
+                # retry handler. If durable recording itself fails, retrying
+                # the paid request would risk a duplicate charge.
+                if self.ledger is not None and ledger_request is not None:
+                    self.ledger.record_responses(
+                        [
+                            ResponseRecord(
+                                request_id=ledger_request.request_id,
+                                prompt_hash=ledger_request.prompt_hash,
+                                status="succeeded",
+                                response=payload,
+                                metadata={
+                                    "provider_request_id": str(
+                                        getattr(response, "id", "") or ""
+                                    ),
+                                    "elapsed_ms": round(
+                                        (time.monotonic() - request_started) * 1000,
+                                        3,
+                                    ),
+                                },
+                            )
+                        ]
+                    )
+                return payload
         raise DatasetBuildError(f"model request failed after retries: {type(last_error).__name__}: {last_error}")
 
     def map(
@@ -922,6 +1073,8 @@ def build_workflow_specs(
     output_path: Path,
     *,
     workflows_per_skill: int = 5,
+    min_skills_per_query: int = 2,
+    max_skills_per_query: int = 4,
     seed: int = 20260720,
 ) -> dict[str, Any]:
     profiles = load_jsonl(profiles_path)
@@ -930,12 +1083,28 @@ def build_workflow_specs(
     candidates = profiles
     if workflows_per_skill < 2:
         raise DatasetBuildError("workflows_per_skill must be at least 2")
+    if min_skills_per_query < 2 or max_skills_per_query < min_skills_per_query:
+        raise DatasetBuildError(
+            "workflow target range must satisfy 2 <= min <= max"
+        )
+    effective_max = min(max_skills_per_query, len(profiles))
+    if effective_max < min_skills_per_query:
+        raise DatasetBuildError(
+            f"{len(profiles)} candidates cannot satisfy the configured minimum "
+            f"of {min_skills_per_query} skills per query"
+        )
     by_id = {str(profile["skill_id"]): profile for profile in profiles}
     if len(by_id) != len(profiles):
         raise DatasetBuildError("duplicate skill_id in profiles")
-    target_counts = [2, 3, 4, 3]
-    while len(target_counts) < workflows_per_skill:
-        target_counts.append(2 + len(target_counts) % 3)
+    if (min_skills_per_query, max_skills_per_query) == (2, 4):
+        target_counts = [2, 3, 4, 3]
+        while len(target_counts) < workflows_per_skill:
+            target_counts.append(2 + len(target_counts) % 3)
+    else:
+        ascending = list(range(min_skills_per_query, max_skills_per_query + 1))
+        cycle = ascending + ascending[-2:0:-1]
+        target_counts = [cycle[index % len(cycle)] for index in range(workflows_per_skill)]
+    target_counts = [min(value, effective_max) for value in target_counts]
     usage_count: Counter[str] = Counter()
     seen_sets: set[frozenset[str]] = set()
     workflows: list[dict[str, Any]] = []
@@ -1062,6 +1231,11 @@ def build_workflow_specs(
         "candidate_filtering": False,
         "workflow_count": len(workflows),
         "workflows_per_skill": workflows_per_skill,
+        "skills_per_query": {
+            "min": min_skills_per_query,
+            "max": max_skills_per_query,
+            "effective_max": effective_max,
+        },
         "target_count_distribution": dict(sorted(Counter(row["target_count"] for row in workflows).items())),
         "cross_domain_count": sum(bool(row["cross_domain"]) for row in workflows),
         "unsafe_action_count": sum(bool(row["unsafe_action"]) for row in workflows),
@@ -2208,6 +2382,9 @@ def append_coverage_workflows(
     min_train_positives_per_skill: int = 10,
     variants_per_workflow: int = 3,
     oversample_factor: float = 3.0,
+    min_skills_per_query: int = 2,
+    max_skills_per_query: int = 4,
+    split_ratios: Mapping[str, float] | None = None,
     round_index: int = 1,
     seed: int = 20260720,
 ) -> dict[str, Any]:
@@ -2217,6 +2394,11 @@ def append_coverage_workflows(
         raise DatasetBuildError("coverage targets and variants must be positive")
     if oversample_factor < 1.0 or round_index < 1:
         raise DatasetBuildError("oversample_factor and round_index are invalid")
+    if min_skills_per_query < 2 or max_skills_per_query < min_skills_per_query:
+        raise DatasetBuildError(
+            "coverage target range must satisfy 2 <= min <= max"
+        )
+    ratios = _normalized_split_ratios(split_ratios)
     profiles = load_jsonl(profiles_path)
     workflows = load_jsonl(workflows_path)
     queries = load_jsonl(queries_path)
@@ -2266,7 +2448,15 @@ def append_coverage_workflows(
             raise DatasetBuildError(
                 f"coverage input is missing review/workflow for query {query_id}"
             )
-        if bool(review.get("pass")) and workflow_split(workflow, seed=seed) == "train":
+        if (
+            bool(review.get("pass"))
+            and workflow_split(
+                workflow,
+                seed=seed,
+                split_ratios=ratios,
+            )
+            == "train"
+        ):
             accepted_train_counts.update(set(map(str, query["skill_ids"])))
 
     deficits = {
@@ -2307,7 +2497,22 @@ def append_coverage_workflows(
             ),
         )
         anchor = profiles_by_id[anchor_id]
-        requested_count = 2 + stable_hash(seed, round_index, sequence, anchor_id) % 2
+        effective_max = min(max_skills_per_query, len(profiles))
+        if effective_max < min_skills_per_query:
+            raise DatasetBuildError(
+                f"{len(profiles)} candidates cannot satisfy the configured minimum "
+                f"of {min_skills_per_query} skills per query"
+            )
+        if (min_skills_per_query, max_skills_per_query) == (2, 4):
+            requested_count = min(
+                effective_max,
+                2 + stable_hash(seed, round_index, sequence, anchor_id) % 2,
+            )
+        else:
+            width = effective_max - min_skills_per_query + 1
+            requested_count = min_skills_per_query + (
+                stable_hash(seed, round_index, sequence, anchor_id) % width
+            )
         selected = [anchor]
         while len(selected) < requested_count:
             selected_ids = {str(row["skill_id"]) for row in selected}
@@ -2421,6 +2626,11 @@ def append_coverage_workflows(
         "min_train_positives_per_skill": min_train_positives_per_skill,
         "variants_per_workflow": variants_per_workflow,
         "oversample_factor": oversample_factor,
+        "skills_per_query": {
+            "min": min_skills_per_query,
+            "max": max_skills_per_query,
+        },
+        "split": ratios,
         "undercovered_skill_count": len(planned),
         "planned_positive_deficit": sum(deficits.values()),
         "added_workflow_count": len(added),
@@ -2565,6 +2775,7 @@ def export_training_dataset(
     min_train_positives_per_skill: int = 10,
     min_augmented_train_queries: int = 0,
     target_order_variants: int = 4,
+    split_ratios: Mapping[str, float] | None = None,
     alignment_queries_path: Path | None = None,
     alignment_reviews_path: Path | None = None,
     allow_missing_reviews: bool = False,
@@ -2607,6 +2818,7 @@ def export_training_dataset(
         raise DatasetBuildError("min_augmented_train_queries cannot be negative")
     if target_order_variants < 1:
         raise DatasetBuildError("target_order_variants must be positive")
+    ratios = _normalized_split_ratios(split_ratios)
     accepted = [
         row
         for row in queries
@@ -2646,7 +2858,11 @@ def export_training_dataset(
     split_rows: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
     for row in accepted:
         workflow = workflows_by_id[str(row["workflow_id"])]
-        split = workflow_split(workflow, seed=seed)
+        split = workflow_split(
+            workflow,
+            seed=seed,
+            split_ratios=ratios,
+        )
         review = reviews_by_id[str(row["query_id"])]
         skill_ids = list(map(str, row["skill_ids"]))
         intent_mode = str(row.get("intent_mode") or "explicit")
@@ -2929,6 +3145,7 @@ def export_training_dataset(
         "near_duplicate_rejection_count": len(duplicate_rejections),
         "final_query_count": sum(len(rows) for rows in split_rows.values()),
         "semantic_split_query_counts": semantic_split_query_counts,
+        "split_ratios": ratios,
         "split_query_counts": {split: len(rows) for split, rows in split_rows.items()},
         "split_qrel_counts": {
             split: sum(len(row["skill_ids"]) for row in rows) for split, rows in split_rows.items()

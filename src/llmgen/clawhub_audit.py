@@ -129,6 +129,7 @@ def audit_training_dataset(
         for split in SPLITS
     }
     all_rows = [row for split in SPLITS for row in split_rows[split]]
+    alignment_only = len(candidate_ids) == 1 and not all_rows
     target_counts_by_split = {
         split: Counter(len(row.get("skill_ids") or []) for row in rows)
         for split, rows in split_rows.items()
@@ -235,7 +236,7 @@ def audit_training_dataset(
         raise DatasetBuildError(
             f"semantic train coverage is below {required}: {preview}"
         )
-    if not implicit_rows:
+    if not implicit_rows and not alignment_only:
         raise DatasetBuildError("dataset has no accepted implicit-intent samples")
 
     patch_details = manifest.get("targeted_alignment_patch")
@@ -264,6 +265,7 @@ def audit_training_dataset(
         ),
         "candidate_count": len(skills),
         "query_counts": {split: len(split_rows[split]) for split in SPLITS},
+        "execution_mode": "alignment_only" if alignment_only else "multiskill",
         "semantic_train_query_count": len(groups),
         "target_count_by_split": {
             split: dict(sorted(counts.items()))

@@ -57,6 +57,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--skip-memorization", action="store_true")
     parser.add_argument("--skip-retrieval", action="store_true")
+    parser.add_argument(
+        "--skip-multiskill-retrieval",
+        action="store_true",
+        help=(
+            "Build alignment retrieval data but omit multi-skill examples. "
+            "Used for a one-candidate alignment-only pipeline."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -179,32 +187,50 @@ def main() -> None:
                 seed=args.seed + 2,
                 preserve_target_key="positive_skill_ids",
             )
-        grouped_qrels = qrels_by_query(qrel_rows)
-        query_ids = {
-            row.get("query_id", row.get("id"))
-            for row in queries
-            if row.get("query_id", row.get("id"))
-        }
-        orphan_qrels = sorted(set(grouped_qrels).difference(query_ids))
-        if orphan_qrels:
-            raise RouterDataError(
-                "qrels reference queries missing from the query artifact: "
-                + ", ".join(orphan_qrels[:10])
+        if args.skip_multiskill_retrieval:
+            if not args.alignment_queries:
+                raise RouterDataError(
+                    "--skip-multiskill-retrieval requires alignment data"
+                )
+            # Keep the downstream/export filenames stable. The retrieval phase
+            # itself is a passthrough, so these rows are diagnostic/evaluation
+            # inputs rather than an additional optimization phase.
+            counts["retrieval"] = _write_split(
+                output_dir,
+                "retrieval",
+                alignment,
+                validation_fraction=0.0,
+                seed=args.seed + 1,
+                preserve_target_key="positive_skill_ids",
             )
-        retrieval = build_retrieval_examples(
-            queries,
-            skill_to_code,
-            grouped_qrels,
-        )
-        counts["retrieval"] = _write_split(
-            output_dir,
-            "retrieval",
-            retrieval,
-            validation_fraction=retrieval_validation_fraction,
-            # Use a separate deterministic shuffle from memorization.
-            seed=args.seed + 1,
-            preserve_target_key="positive_skill_ids",
-        )
+            counts["retrieval"]["alignment_only_passthrough"] = 1
+        else:
+            grouped_qrels = qrels_by_query(qrel_rows)
+            query_ids = {
+                row.get("query_id", row.get("id"))
+                for row in queries
+                if row.get("query_id", row.get("id"))
+            }
+            orphan_qrels = sorted(set(grouped_qrels).difference(query_ids))
+            if orphan_qrels:
+                raise RouterDataError(
+                    "qrels reference queries missing from the query artifact: "
+                    + ", ".join(orphan_qrels[:10])
+                )
+            retrieval = build_retrieval_examples(
+                queries,
+                skill_to_code,
+                grouped_qrels,
+            )
+            counts["retrieval"] = _write_split(
+                output_dir,
+                "retrieval",
+                retrieval,
+                validation_fraction=retrieval_validation_fraction,
+                # Use a separate deterministic shuffle from memorization.
+                seed=args.seed + 1,
+                preserve_target_key="positive_skill_ids",
+            )
 
     def source_artifact(path: str | None):
         if path is None:
@@ -232,6 +258,7 @@ def main() -> None:
         "retrieval_validation_policy": (
             "query_grouped_preserve_every_target_in_train"
         ),
+        "alignment_only": bool(args.skip_multiskill_retrieval),
         "seed": args.seed,
         "sources": {
             "catalog": source_artifact(args.catalog),

@@ -10,7 +10,8 @@ case "$EVAL_PROTOCOL" in
     ;;
 esac
 
-skillret_require_dir "$ROUTER_OUTPUT_DIR/retrieval"
+ROUTER_EVAL_MODEL_DIR="${ROUTER_EVAL_MODEL_DIR:-$ROUTER_OUTPUT_DIR/retrieval}"
+skillret_require_dir "$ROUTER_EVAL_MODEL_DIR"
 skillret_require_file "$INDEX_DIR/virtual_tokens.txt"
 
 read -r -a CUTOFF_ARGS <<< "$EVAL_CUTOFFS"
@@ -24,7 +25,7 @@ run_inference() {
   shift 5
   mkdir -p "$output_dir"
   "$PYTHON" scripts/infer_router.py \
-    --model-name-or-path "$ROUTER_OUTPUT_DIR/retrieval" \
+    --model-name-or-path "$ROUTER_EVAL_MODEL_DIR" \
     --base-model-name-or-path "$ROUTER_MODEL" \
     --virtual-tokens "$INDEX_DIR/virtual_tokens.txt" \
     --codes "$codes" \
@@ -48,34 +49,50 @@ run_closedset() {
   local qrels
   skillret_require_file "$INDEX_DIR/train_codes.jsonl"
   skillret_require_file "$INDEX_DIR/train_registry.json"
-  case "$QUERY_SET" in
-    validation)
-      local data_dir="$ROUTER_DATA_DIR/closedset_validation"
-      "$PYTHON" scripts/export_closedset_validation.py \
-        --retrieval-validation "$ROUTER_DATA_DIR/retrieval_validation.jsonl" \
-        --codes "$INDEX_DIR/train_codes.jsonl" \
-        --output-dir "$data_dir"
-      queries="$data_dir/queries.jsonl"
-      qrels="$data_dir/qrels.jsonl"
+  case "${ROUTER_ALIGNMENT_ONLY:-0}" in
+    1|true|yes)
+      skillret_require_file "$PROCESSED_DIR/queries_alignment.jsonl"
+      skillret_require_file "$PROCESSED_DIR/qrels_alignment.jsonl"
+      queries="$PROCESSED_DIR/queries_alignment.jsonl"
+      qrels="$PROCESSED_DIR/qrels_alignment.jsonl"
       ;;
-    dataset-validation)
-      skillret_require_file "$PROCESSED_DIR/queries_validation.jsonl"
-      skillret_require_file "$PROCESSED_DIR/qrels_validation.jsonl"
-      queries="$PROCESSED_DIR/queries_validation.jsonl"
-      qrels="$PROCESSED_DIR/qrels_validation.jsonl"
-      ;;
-    test)
-      skillret_require_file "$PROCESSED_DIR/queries_test.jsonl"
-      skillret_require_file "$PROCESSED_DIR/qrels_test.jsonl"
-      queries="$PROCESSED_DIR/queries_test.jsonl"
-      qrels="$PROCESSED_DIR/qrels_test.jsonl"
-      ;;
-    train)
-      queries="$PROCESSED_DIR/queries_train.jsonl"
-      qrels="$PROCESSED_DIR/qrels_train.jsonl"
+    0|false|no|"")
+      case "$QUERY_SET" in
+        validation)
+          # Evaluation-derived rows belong to this evaluation attempt.  Never
+          # mutate the completed build-sft artifact while evaluating it.
+          local data_dir="${EVAL_WORK_DIR:-$ROUTER_DATA_DIR}/closedset_validation"
+          "$PYTHON" scripts/export_closedset_validation.py \
+            --retrieval-validation "$ROUTER_DATA_DIR/retrieval_validation.jsonl" \
+            --codes "$INDEX_DIR/train_codes.jsonl" \
+            --output-dir "$data_dir"
+          queries="$data_dir/queries.jsonl"
+          qrels="$data_dir/qrels.jsonl"
+          ;;
+        dataset-validation)
+          skillret_require_file "$PROCESSED_DIR/queries_validation.jsonl"
+          skillret_require_file "$PROCESSED_DIR/qrels_validation.jsonl"
+          queries="$PROCESSED_DIR/queries_validation.jsonl"
+          qrels="$PROCESSED_DIR/qrels_validation.jsonl"
+          ;;
+        test)
+          skillret_require_file "$PROCESSED_DIR/queries_test.jsonl"
+          skillret_require_file "$PROCESSED_DIR/qrels_test.jsonl"
+          queries="$PROCESSED_DIR/queries_test.jsonl"
+          qrels="$PROCESSED_DIR/qrels_test.jsonl"
+          ;;
+        train)
+          queries="$PROCESSED_DIR/queries_train.jsonl"
+          qrels="$PROCESSED_DIR/qrels_train.jsonl"
+          ;;
+        *)
+          echo "QUERY_SET must be 'validation', 'dataset-validation', 'test', or 'train'" >&2
+          exit 2
+          ;;
+      esac
       ;;
     *)
-      echo "QUERY_SET must be 'validation', 'dataset-validation', 'test', or 'train'" >&2
+      echo "ROUTER_ALIGNMENT_ONLY must be 0 or 1" >&2
       exit 2
       ;;
   esac

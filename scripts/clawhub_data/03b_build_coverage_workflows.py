@@ -21,6 +21,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-train-positives-per-skill", type=int, default=10)
     parser.add_argument("--variants-per-workflow", type=int, default=3)
     parser.add_argument("--oversample-factor", type=float, default=3.0)
+    parser.add_argument("--min-skills-per-query", type=int, default=2)
+    parser.add_argument("--max-skills-per-query", type=int, default=4)
+    parser.add_argument("--train-fraction", type=float, default=0.90)
+    parser.add_argument("--validation-fraction", type=float, default=0.05)
+    parser.add_argument("--test-fraction", type=float, default=0.05)
     parser.add_argument("--round", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260720)
     return parser.parse_args()
@@ -38,6 +43,13 @@ def main() -> None:
         min_train_positives_per_skill=args.min_train_positives_per_skill,
         variants_per_workflow=args.variants_per_workflow,
         oversample_factor=args.oversample_factor,
+        min_skills_per_query=args.min_skills_per_query,
+        max_skills_per_query=args.max_skills_per_query,
+        split_ratios={
+            "train": args.train_fraction,
+            "validation": args.validation_fraction,
+            "test": args.test_fraction,
+        },
         round_index=args.round,
         seed=args.seed,
     )

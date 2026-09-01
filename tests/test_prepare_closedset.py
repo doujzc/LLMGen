@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
+from scripts.build_router_data import main as build_router_data_main
+from scripts.prepare_closedset import main as prepare_closedset_main
 from scripts.prepare_closedset import validate_dataset
 
 
@@ -101,3 +104,127 @@ def test_validation_combines_alignment_with_unaugmented_train_coverage(
     (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="fewer than 3"):
         validate_dataset(tmp_path)
+
+
+def test_prepared_qrel_positions_control_sft_target_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise ordered qrels across prepare_closedset -> router SFT output."""
+
+    dataset = tmp_path / "source"
+    processed = tmp_path / "processed"
+    embeddings = tmp_path / "embeddings"
+    router_data = tmp_path / "router-data"
+    dataset.mkdir()
+    query = "use first and then second"
+    files = {
+        "skills.jsonl": [
+            {"skill_id": "s1", "name": "First", "description": "first skill"},
+            {"skill_id": "s2", "name": "Second", "description": "second skill"},
+        ],
+        "queries_train.jsonl": [
+            {
+                "id": "q1",
+                "query": query,
+                "skill_ids": ["s1", "s2"],
+                "workflow_id": "w1",
+                "evidence": {"s1": "first", "s2": "second"},
+                "intent_mode": "explicit",
+                "implicit_skill_ids": [],
+                "implicit_rationales": {},
+                "target_intents": {"s1": "explicit", "s2": "explicit"},
+            }
+        ],
+        # Physical order is intentionally the reverse of target order.
+        "qrels_train.jsonl": [
+            {"query_id": "q1", "skill_id": "s2", "relevance": 1, "position": 1},
+            {"query_id": "q1", "skill_id": "s1", "relevance": 1, "position": 0},
+        ],
+        "queries_validation.jsonl": [],
+        "qrels_validation.jsonl": [],
+        "queries_test.jsonl": [],
+        "qrels_test.jsonl": [],
+    }
+    for name, rows in files.items():
+        _write_jsonl(dataset / name, rows)
+    manifest = {
+        "candidate_count": 2,
+        "split_query_counts": {"train": 1, "validation": 0, "test": 0},
+        "split_qrel_counts": {"train": 2, "validation": 0, "test": 0},
+        "min_train_positives_per_skill_required": 1,
+        "skills_below_min_train_positives_count": 0,
+        "artifacts": {
+            name: {
+                "bytes": (dataset / name).stat().st_size,
+                "sha256": _sha256(dataset / name),
+            }
+            for name in files
+        },
+    }
+    (dataset / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prepare_closedset.py",
+            "--dataset-dir",
+            str(dataset),
+            "--processed-dir",
+            str(processed),
+            "--embedding-dir",
+            str(embeddings),
+            "--skip-embeddings",
+        ],
+    )
+    prepare_closedset_main()
+    prepared_qrels = [
+        json.loads(line)
+        for line in (processed / "qrels_train.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert [row["skill_id"] for row in prepared_qrels] == ["s2", "s1"]
+    assert [row["position"] for row in prepared_qrels] == [1, 0]
+
+    codes = tmp_path / "codes.jsonl"
+    _write_jsonl(
+        codes,
+        [
+            {"skill_id": "s1", "indices": [0], "tokens": ["<L1_0>"]},
+            {"skill_id": "s2", "indices": [1], "tokens": ["<L1_1>"]},
+        ],
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "build_router_data.py",
+            "--catalog",
+            str(processed / "catalog_train.jsonl"),
+            "--queries",
+            str(processed / "queries_train.jsonl"),
+            "--qrels",
+            str(processed / "qrels_train.jsonl"),
+            "--codes",
+            str(codes),
+            "--output-dir",
+            str(router_data),
+            "--retrieval-validation-fraction",
+            "0",
+            "--skip-memorization",
+        ],
+    )
+    build_router_data_main()
+
+    sft_rows = [
+        json.loads(line)
+        for line in (router_data / "retrieval_train.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert len(sft_rows) == 1
+    assert sft_rows[0]["positive_skill_ids"] == ["s1", "s2"]
+    assert sft_rows[0]["target_paths"] == [["<L1_0>"], ["<L1_1>"]]
+    assert sft_rows[0]["target_text"] == "<L1_0>\n<L1_1>"

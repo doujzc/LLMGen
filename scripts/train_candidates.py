@@ -86,12 +86,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_range_arguments(run)
     _add_overrides(run)
     run.add_argument("--resume-checkpoint", help="only valid when one stage is selected")
+    run.add_argument(
+        "--allow-legacy-checkpoint",
+        action="store_true",
+        help="allow an explicit or discovered checkpoint without pipeline lineage",
+    )
     run.add_argument("--allow-failed-gates", action="store_true", help="set export.allow_failed_gates=true for a new Run")
 
     stage = commands.add_parser("stage", help="execute exactly one stage")
     stage.add_argument("stage")
     stage.add_argument("--run-dir", type=Path, required=True)
     stage.add_argument("--resume-checkpoint")
+    stage.add_argument("--allow-legacy-checkpoint", action="store_true")
 
     status = commands.add_parser("status", help="show Run and stage state")
     status.add_argument("--run-dir", type=Path, required=True)
@@ -117,6 +123,7 @@ def _run_command(args: argparse.Namespace) -> int:
         to_stage=args.to_stage,
         force_stage=args.force_stage or None,
         resume_checkpoint=args.resume_checkpoint,
+        allow_legacy_checkpoint=args.allow_legacy_checkpoint,
     )
     print(json.dumps([execution.__dict__ for execution in executions], ensure_ascii=False))
     return 0
@@ -129,9 +136,35 @@ def _fork_command(args: argparse.Namespace) -> int:
         raise PipelineRunnerError(
             "parent Run has no frozen candidate snapshot; complete ingest before forking"
         )
+    overrides = list(args.overrides)
+    overrides_manual_alignment = any(
+        value.split("=", 1)[0].strip()
+        == "data_generation.manual_alignment_path"
+        for value in overrides
+    )
+    manual_fingerprint_path = (
+        parent.run_dir / "config" / "manual_alignment_input.json"
+    )
+    if not overrides_manual_alignment and manual_fingerprint_path.is_file():
+        manual_fingerprint = json.loads(
+            manual_fingerprint_path.read_text(encoding="utf-8")
+        )
+        if bool(manual_fingerprint.get("enabled")):
+            frozen_manual = parent.run_dir / str(
+                manual_fingerprint.get("frozen_path")
+                or "source/manual_alignment.input.jsonl"
+            )
+            if not frozen_manual.is_file():
+                raise PipelineRunnerError(
+                    "parent Run has no frozen manual-alignment snapshot"
+                )
+            overrides.append(
+                "data_generation.manual_alignment_path="
+                + json.dumps(str(frozen_manual))
+            )
     config = load_pipeline_config(
         parent.run_dir / "config" / "pipeline.resolved.yaml",
-        overrides=args.overrides,
+        overrides=overrides,
         candidates=candidate,
         output=args.output,
     )
@@ -152,7 +185,9 @@ def main(argv: list[str] | None = None) -> int:
             return _run_command(args)
         if args.command == "stage":
             result = PipelineRunner.open(args.run_dir, repo_root=REPO_ROOT).stage(
-                args.stage, resume_checkpoint=args.resume_checkpoint
+                args.stage,
+                resume_checkpoint=args.resume_checkpoint,
+                allow_legacy_checkpoint=args.allow_legacy_checkpoint,
             )
             print(json.dumps(result.__dict__))
             return 0

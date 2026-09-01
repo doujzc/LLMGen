@@ -130,6 +130,39 @@ def test_stage1_uses_sinkhorn_for_training_but_nearest_after_training(tmp_path):
     assert all_at_once[:, 0].tolist() == [0, 0, 0, 0]
 
 
+def test_stage1_trains_a_real_one_candidate_one_token_codebook(tmp_path):
+    embeddings = np.array([[0.1, 0.2, 0.3]], dtype=np.float32)
+    trainer = ToolWeaverStage1Trainer(
+        model_config(
+            in_dim=3,
+            num_levels=1,
+            num_emb_list=(1,),
+            e_dim=2,
+            layers=(),
+            sk_epsilons=(0.0,),
+            graph_lambda=0.0,
+        ),
+        Stage1TrainingConfig(
+            epochs=1,
+            batch_size=1,
+            learning_rate=1e-3,
+            scheduler="constant",
+            eval_every=1,
+        ),
+        embeddings,
+        None,
+        tmp_path,
+        device="cpu",
+    )
+
+    result = trainer.fit()
+
+    assert Path(result["best_checkpoint"]).is_file()
+    assert result["best_metrics"]["collision_rate"] == 0.0
+    assert result["best_metrics"]["levels"][0]["utilization"] == 1.0
+    np.testing.assert_array_equal(trainer.encode_all(batch_size=1), [[0]])
+
+
 def test_balanced_hierarchical_assignment_eliminates_avoidable_collisions():
     encoded = np.zeros((4, 2), dtype=np.float32)
     codebooks = (

@@ -21,6 +21,7 @@ from llmgen.clawhub_dataset import (
     build_workflow_specs,
     export_training_dataset,
     routing_profile_context,
+    workflow_split,
 )
 
 
@@ -158,6 +159,60 @@ def test_workflows_keep_every_candidate_regardless_of_mobile_fit(tmp_path: Path)
     assert {row["anchor_skill_id"] for row in rows} == {
         f"@owner/skill-{index}" for index in range(1, 7)
     }
+
+
+def test_workflow_target_range_supports_small_and_custom_registries(
+    tmp_path: Path,
+) -> None:
+    two_profiles = tmp_path / "two-profiles.jsonl"
+    two_profiles.write_text(
+        "".join(json.dumps(_profile(index)) + "\n" for index in range(1, 3))
+    )
+    two_output = tmp_path / "two-workflows.jsonl"
+    two_manifest = build_workflow_specs(
+        two_profiles,
+        two_output,
+        workflows_per_skill=2,
+        seed=7,
+    )
+    assert two_manifest["target_count_distribution"] == {2: 4}
+    assert two_manifest["skills_per_query"]["effective_max"] == 2
+
+    five_profiles = tmp_path / "five-profiles.jsonl"
+    five_profiles.write_text(
+        "".join(json.dumps(_profile(index)) + "\n" for index in range(1, 6))
+    )
+    five_output = tmp_path / "five-workflows.jsonl"
+    custom_manifest = build_workflow_specs(
+        five_profiles,
+        five_output,
+        workflows_per_skill=2,
+        min_skills_per_query=3,
+        max_skills_per_query=3,
+        seed=7,
+    )
+    assert custom_manifest["target_count_distribution"] == {3: 10}
+
+
+def test_workflow_split_accepts_configurable_ratios_and_preserves_backfill() -> None:
+    workflows = [
+        {"workflow_id": f"wf-{index}", "anchor_round": index}
+        for index in range(200)
+    ]
+    assignments = {
+        workflow_split(
+            row,
+            seed=11,
+            split_ratios={"train": 0.5, "validation": 0.25, "test": 0.25},
+        )
+        for row in workflows
+    }
+    assert assignments == {"train", "validation", "test"}
+    assert workflow_split(
+        {"workflow_id": "coverage", "coverage_backfill": True},
+        seed=11,
+        split_ratios={"train": 0.5, "validation": 0.25, "test": 0.25},
+    ) == "train"
 
 
 def test_recovery_workflows_are_idempotent_without_filtering_candidates(tmp_path: Path) -> None:

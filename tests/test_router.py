@@ -101,8 +101,8 @@ def test_closed_set_export_collapses_multi_target_sft_rows() -> None:
         {
             "query_id": "q1",
             "input_text": "do both",
-            "positive_skill_ids": ["s1", "s2", "s3"],
-            "target_skill_ids": ["s1", "s2", "s3"],
+            "positive_skill_ids": ["s3", "s1", "s2"],
+            "target_skill_ids": ["s3", "s1", "s2"],
         },
     ]
     queries, qrels = build_closed_set_evaluation_rows(
@@ -112,10 +112,29 @@ def test_closed_set_export_collapses_multi_target_sft_rows() -> None:
         {
             "id": "q1",
             "query": "do both",
-            "skill_ids": ["s1", "s2", "s3"],
+            "skill_ids": ["s3", "s1", "s2"],
         }
     ]
-    assert [row["skill_id"] for row in qrels] == ["s1", "s2", "s3"]
+    assert [row["skill_id"] for row in qrels] == ["s3", "s1", "s2"]
+    assert [row["position"] for row in qrels] == [0, 1, 2]
+
+
+def test_closed_set_export_requires_duplicate_rows_to_keep_positive_order() -> None:
+    with pytest.raises(RouterDataError, match="inconsistent positives"):
+        build_closed_set_evaluation_rows(
+            [
+                {
+                    "query_id": "q1",
+                    "input_text": "do both",
+                    "positive_skill_ids": ["s1", "s2"],
+                },
+                {
+                    "query_id": "q1",
+                    "input_text": "do both",
+                    "positive_skill_ids": ["s2", "s1"],
+                },
+            ]
+        )
 
 
 def test_closed_set_export_rejects_unknown_candidate_skill() -> None:
@@ -175,6 +194,82 @@ def test_qrel_source_order_becomes_autoregressive_target_order() -> None:
         ["<L1_1>", "<L2_1>"],
         ["<L1_0>", "<L2_0>"],
     ]
+
+
+def test_qrel_positions_override_physical_row_order() -> None:
+    grouped = qrels_by_query(
+        [
+            {
+                "query_id": "q1",
+                "skill_id": "s3",
+                "relevance": 1,
+                "position": 1,
+            },
+            {
+                "query_id": "q1",
+                "skill_id": "s1",
+                "relevance": 1,
+                "position": 0,
+            },
+        ]
+    )
+
+    assert grouped == {"q1": ("s1", "s3")}
+
+
+@pytest.mark.parametrize("position", [-1, 0.0, "0", True, None])
+def test_qrel_positions_must_be_non_negative_json_integers(position: object) -> None:
+    with pytest.raises(RouterDataError, match="non-negative integer"):
+        qrels_by_query(
+            [
+                {
+                    "query_id": "q1",
+                    "skill_id": "s1",
+                    "relevance": 1,
+                    "position": position,
+                }
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "positions",
+    [
+        (0, 0),
+        (0, 2),
+        (1, 2),
+    ],
+)
+def test_qrel_positions_must_be_unique_and_contiguous(
+    positions: tuple[int, int],
+) -> None:
+    with pytest.raises(RouterDataError, match="unique and contiguous"):
+        qrels_by_query(
+            [
+                {
+                    "query_id": "q1",
+                    "skill_id": skill_id,
+                    "relevance": 1,
+                    "position": position,
+                }
+                for skill_id, position in zip(("s1", "s2"), positions)
+            ]
+        )
+
+
+def test_qrel_query_cannot_mix_positioned_and_legacy_positive_rows() -> None:
+    with pytest.raises(RouterDataError, match="mix positioned and unpositioned"):
+        qrels_by_query(
+            [
+                {
+                    "query_id": "q1",
+                    "skill_id": "s1",
+                    "relevance": 1,
+                    "position": 0,
+                },
+                {"query_id": "q1", "skill_id": "s2", "relevance": 1},
+            ]
+        )
 
 
 def test_memorization_uses_official_document_order() -> None:

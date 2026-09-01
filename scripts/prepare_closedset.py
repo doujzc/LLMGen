@@ -19,6 +19,7 @@ from llmgen.embeddings import (
     OpenAIEmbeddingConfig,
     OpenAIEmbeddingModel,
 )
+from llmgen.pipeline.ledger import EmbeddingRecord, JsonlShardLedger
 from llmgen.skillret import (
     build_collaborative_edges,
     ordered_ids_sha256,
@@ -305,6 +306,19 @@ def _normalize_queries(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]
     return normalized
 
 
+def _normalize_qrel(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy one qrel without discarding its optional target-order position."""
+
+    normalized = {
+        "query_id": str(row["query_id"]),
+        "skill_id": str(row["skill_id"]),
+        "relevance": float(row.get("relevance", 1)),
+    }
+    if "position" in row:
+        normalized["position"] = row["position"]
+    return normalized
+
+
 def _batches(
     rows: list[dict[str, Any]],
     *,
@@ -332,17 +346,82 @@ def _embed_catalog(
     *,
     batch_size: int,
     max_batch_chars: int,
+    ledger: JsonlShardLedger | None = None,
 ) -> tuple[int, int]:
     chunks: list[np.ndarray] = []
     written = 0
     for batch in _batches(catalog, batch_size=batch_size, max_batch_chars=max_batch_chars):
-        chunk = model.encode(
-            [str(row["text"]) for row in batch],
-            batch_size=len(batch),
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
+        if ledger is None:
+            chunk = model.encode(
+                [str(row["text"]) for row in batch],
+                batch_size=len(batch),
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        else:
+            pending = [
+                EmbeddingRecord.from_text(
+                    "candidate-catalog",
+                    str(row["text"]),
+                    status="failed",
+                    item_key=str(row["skill_id"]),
+                    model=model.config.model,
+                    metadata={"skill_id": str(row["skill_id"])},
+                )
+                for row in batch
+            ]
+            while True:
+                scheduled = ledger.schedule_embeddings(pending)
+                if not scheduled.records:
+                    break
+                try:
+                    values = model.encode(
+                        [record.input_text for record in scheduled.records],
+                        batch_size=len(scheduled.records),
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                        show_progress_bar=False,
+                    )
+                except Exception as error:
+                    ledger.record_embeddings(
+                        [
+                            EmbeddingRecord.from_text(
+                                record.namespace,
+                                record.input_text,
+                                status="failed",
+                                item_key=record.item_key,
+                                model=record.model,
+                                error={"type": type(error).__name__},
+                                metadata=record.metadata,
+                            )
+                            for record in scheduled.records
+                        ]
+                    )
+                    raise
+                ledger.record_embeddings(
+                    [
+                        EmbeddingRecord.from_text(
+                            record.namespace,
+                            record.input_text,
+                            status="succeeded",
+                            item_key=record.item_key,
+                            model=record.model,
+                            vector=values[index].tolist(),
+                            metadata=record.metadata,
+                        )
+                        for index, record in enumerate(scheduled.records)
+                    ]
+                )
+            cached_vectors = []
+            for record in pending:
+                cached = ledger.successful_embedding(record.embedding_id)
+                if cached is None or cached.vector is None:
+                    raise RuntimeError(
+                        f"embedding ledger has no vector for {record.embedding_id}"
+                    )
+                cached_vectors.append(cached.vector)
+            chunk = np.asarray(cached_vectors, dtype=np.float32)
         chunks.append(np.asarray(chunk, dtype=np.float32))
         written += len(batch)
         print(f"embedded {written}/{len(catalog)} skills", flush=True)
@@ -350,7 +429,12 @@ def _embed_catalog(
         raise ValueError("cannot embed an empty skill catalog")
     values = np.concatenate(chunks, axis=0)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    np.save(output_path, values, allow_pickle=False)
+    temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    with temporary.open("wb") as handle:
+        np.save(handle, values, allow_pickle=False)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output_path)
     return int(values.shape[0]), int(values.shape[1])
 
 
@@ -365,6 +449,11 @@ def main() -> None:
     args.processed_dir.mkdir(parents=True, exist_ok=True)
     args.embedding_dir.mkdir(parents=True, exist_ok=True)
 
+    def manifest_path(path: Path) -> str:
+        """Record a path relative to the movable processed artifact root."""
+
+        return Path(os.path.relpath(path, args.processed_dir)).as_posix()
+
     catalog = [_catalog_row(row, args.max_skill_chars) for row in validated["skills"]]
     catalog_path = args.processed_dir / "catalog_train.jsonl"
     write_jsonl(catalog_path, catalog)
@@ -376,11 +465,7 @@ def main() -> None:
         queries = _normalize_queries(_load_rows(args.dataset_dir / f"queries_{split}.jsonl"))
         normalized_queries_by_split[split] = queries
         qrels = [
-            {
-                "query_id": str(row["query_id"]),
-                "skill_id": str(row["skill_id"]),
-                "relevance": float(row.get("relevance", 1)),
-            }
+            _normalize_qrel(row)
             for row in _load_rows(args.dataset_dir / f"qrels_{split}.jsonl")
         ]
         write_jsonl(queries_path, queries)
@@ -388,9 +473,9 @@ def main() -> None:
         split_details[split] = {
             "counts": {"skills": len(catalog), "queries": len(queries), "qrels": len(qrels)},
             "files": {
-                "catalog": str(catalog_path),
-                "queries": str(queries_path),
-                "qrels": str(qrels_path),
+                "catalog": manifest_path(catalog_path),
+                "queries": manifest_path(queries_path),
+                "qrels": manifest_path(qrels_path),
             },
             "hashes": {
                 "ordered_skill_ids_sha256": ordered_ids_sha256(validated["skill_ids"]),
@@ -407,12 +492,7 @@ def main() -> None:
     if alignment_source_queries.is_file():
         alignment_queries = _normalize_queries(_load_rows(alignment_source_queries))
         alignment_qrels = [
-            {
-                "query_id": str(row["query_id"]),
-                "skill_id": str(row["skill_id"]),
-                "relevance": float(row.get("relevance", 1)),
-            }
-            for row in _load_rows(alignment_source_qrels)
+            _normalize_qrel(row) for row in _load_rows(alignment_source_qrels)
         ]
         if any(len(row["skill_ids"]) != 1 for row in alignment_queries):
             raise ValueError("alignment query must target exactly one skill")
@@ -427,9 +507,9 @@ def main() -> None:
                 "qrels": len(alignment_qrels),
             },
             "files": {
-                "catalog": str(catalog_path),
-                "queries": str(alignment_query_path),
-                "qrels": str(alignment_qrel_path),
+                "catalog": manifest_path(catalog_path),
+                "queries": manifest_path(alignment_query_path),
+                "qrels": manifest_path(alignment_qrel_path),
             },
             "hashes": {
                 "ordered_skill_ids_sha256": ordered_ids_sha256(validated["skill_ids"]),
@@ -473,6 +553,20 @@ def main() -> None:
 
     embedding_manifest = None
     if not args.skip_embeddings:
+        ledger_root = os.environ.get("LLMGEN_EMBEDDING_LEDGER_ROOT", "").strip()
+        embedding_ledger = (
+            JsonlShardLedger(
+                ledger_root,
+                batch_size=int(
+                    os.environ.get(
+                        "LLMGEN_EMBEDDING_LEDGER_BATCH_RECORDS",
+                        str(args.batch_size),
+                    )
+                ),
+            )
+            if ledger_root
+            else None
+        )
         model = OpenAIEmbeddingModel(
             OpenAIEmbeddingConfig(
                 model=args.embedding_model,
@@ -491,6 +585,7 @@ def main() -> None:
                 model,
                 batch_size=args.batch_size,
                 max_batch_chars=args.embedding_max_batch_chars,
+                ledger=embedding_ledger,
             )
         finally:
             model.close()
@@ -508,6 +603,14 @@ def main() -> None:
             "ordered_skill_ids_sha256": {
                 "train": ordered_ids_sha256(validated["skill_ids"])
             },
+            "ledger": (
+                {
+                    "path": str(embedding_ledger.root),
+                    "stats": embedding_ledger.verify()["stats"]["embeddings"],
+                }
+                if embedding_ledger is not None
+                else None
+            ),
         }
         (args.embedding_dir / "manifest.json").write_text(
             json.dumps(embedding_manifest, indent=2, ensure_ascii=False) + "\n",
@@ -520,14 +623,14 @@ def main() -> None:
         "dataset": args.dataset_name,
         "candidate_policy": "shared closed set across train/validation/test queries",
         "source": {
-            "path": str(args.dataset_dir),
-            "manifest": str(args.dataset_dir / "manifest.json"),
+            "path": manifest_path(args.dataset_dir),
+            "manifest": manifest_path(args.dataset_dir / "manifest.json"),
             "manifest_sha256": sha256_file(args.dataset_dir / "manifest.json"),
             "validated_counts": validated["counts"],
         },
         "splits": split_details,
         "graph": {
-            "path": str(graph_path),
+            "path": manifest_path(graph_path),
             "num_nodes": len(catalog),
             "num_edges": int(weight.size),
             "normalization": "co_use_count/sqrt(skill_frequency_product)",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import subprocess
@@ -23,7 +24,12 @@ from llmgen.pipeline.schema import (
     normalize_candidate_rows,
     validate_ordered_qrels,
 )
-from llmgen.pipeline.stages import ArtifactOutput, StageResult, StageSpec
+from llmgen.pipeline.stages import (
+    ArtifactOutput,
+    StageResult,
+    StageSpec,
+    default_stage_specs,
+)
 from llmgen.pipeline.stages.legacy import (
     _copy_model_tree,
     _export_quality,
@@ -73,9 +79,14 @@ def _config(
                 {"id": "calendar", "name": "Calendar", "description": "Events"},
             ],
         )
+    base_model = tmp_path / "base-model"
+    base_model.mkdir(parents=True, exist_ok=True)
+    config_path = base_model / "config.json"
+    if not config_path.exists():
+        config_path.write_text("{}", encoding="utf-8")
     return load_pipeline_config(
         DEFAULT_CONFIG,
-        overrides=overrides,
+        overrides=(f"router.base_model={base_model}", *overrides),
         candidates=candidates,
         output=tmp_path / "run",
         environment={},
@@ -86,6 +97,53 @@ def _write_config(tmp_path: Path, data: dict) -> Path:
     path = tmp_path / "pipeline.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     return path
+
+
+def _module_source_path(module: str) -> str | None:
+    if module != "llmgen" and not module.startswith("llmgen."):
+        return None
+    module_root = REPO_ROOT / "src" / Path(*module.split("."))
+    candidates = (module_root.with_suffix(".py"), module_root / "__init__.py")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.relative_to(REPO_ROOT).as_posix()
+    return None
+
+
+def _project_imports(source_path: str) -> set[str]:
+    source = REPO_ROOT / source_path
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+    source_root = REPO_ROOT / "src"
+    try:
+        module_parts = source.relative_to(source_root).with_suffix("").parts
+    except ValueError:
+        package_parts: tuple[str, ...] = ()
+    else:
+        package_parts = module_parts[:-1]
+
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        modules: list[str] = []
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                if not package_parts or node.level > len(package_parts) + 1:
+                    continue
+                prefix = package_parts[: len(package_parts) - node.level + 1]
+                if node.module:
+                    modules.append(".".join((*prefix, *node.module.split("."))))
+                else:
+                    modules.extend(
+                        ".".join((*prefix, alias.name)) for alias in node.names
+                    )
+            elif node.module:
+                modules.append(node.module)
+        for module in modules:
+            local_path = _module_source_path(module)
+            if local_path is not None:
+                imported.add(local_path)
+    return imported
 
 
 def test_config_is_strict_and_projects_only_relevant_training_phase(
@@ -113,12 +171,235 @@ def test_config_is_strict_and_projects_only_relevant_training_phase(
         load_pipeline_config(_write_config(tmp_path, invalid), environment={})
 
 
+def test_subprocess_runtime_changes_invalidate_every_consuming_stage(
+    tmp_path: Path,
+) -> None:
+    base = _config(tmp_path)
+    changed_python = _config(
+        tmp_path,
+        overrides=("runtime.python=/opt/pipeline/bin/python",),
+    )
+    subprocess_stages = STAGE_NAMES[1:]
+    assert base.stage_hash("ingest") == changed_python.stage_hash("ingest")
+    assert all(
+        base.stage_hash(stage) != changed_python.stage_hash(stage)
+        for stage in subprocess_stages
+    )
+
+    changed_environment = _config(
+        tmp_path,
+        overrides=('runtime.environment={"NCCL_DEBUG":"INFO"}',),
+    )
+    legacy_environment_stages = (
+        "finalize-dataset",
+        "train-codebook",
+        "assign-codes",
+        "build-sft",
+        "train-memorization",
+        "train-alignment",
+        "train-retrieval",
+        "evaluate",
+        "export",
+    )
+    assert all(
+        base.stage_hash(stage) != changed_environment.stage_hash(stage)
+        for stage in legacy_environment_stages
+    )
+
+
+def test_stage_projection_includes_hidden_generation_and_sft_switches(
+    tmp_path: Path,
+) -> None:
+    base = _config(tmp_path)
+    changed_alignment_queries = _config(
+        tmp_path,
+        overrides=("data_generation.alignment_queries_per_skill=11",),
+    )
+    assert base.stage_hash("generate-queries") != changed_alignment_queries.stage_hash(
+        "generate-queries"
+    )
+
+    changed_alignment_epochs = _config(
+        tmp_path,
+        overrides=("router.alignment.epochs=4",),
+    )
+    assert base.stage_hash("build-sft") != changed_alignment_epochs.stage_hash(
+        "build-sft"
+    )
+
+    changed_export_only_gate = _config(
+        tmp_path,
+        overrides=("evaluation.require_candidate_coverage=0.9",),
+    )
+    assert base.stage_hash("evaluate") == changed_export_only_gate.stage_hash(
+        "evaluate"
+    )
+    assert base.stage_hash("export") != changed_export_only_gate.stage_hash("export")
+
+
+def test_default_stage_inputs_cover_every_legacy_file_tree() -> None:
+    required = {
+        spec.name: set(spec.required_artifacts) for spec in default_stage_specs()
+    }
+
+    assert {"processed.directory", "embeddings.directory"} <= required[
+        "train-codebook"
+    ]
+    assert {"processed.directory", "embeddings.directory"} <= required[
+        "assign-codes"
+    ]
+    code_plan_consumers = (
+        "assign-codes",
+        "build-sft",
+        "train-memorization",
+        "train-alignment",
+        "train-retrieval",
+        "evaluate",
+        "export",
+    )
+    for stage in code_plan_consumers:
+        assert "code.plan" in required[stage]
+
+    for stage in code_plan_consumers[2:5]:
+        assert {
+            "processed.directory",
+            "codes.train",
+            "codes.registry",
+            "codes.virtual_tokens",
+            "sft.directory",
+        } <= required[stage]
+    assert {
+        "candidates.manifest",
+        "processed.directory",
+        "codes.train",
+        "codes.registry",
+        "codes.virtual_tokens",
+        "sft.directory",
+    } <= required["evaluate"]
+    assert {
+        "candidates.manifest",
+        "processed.directory",
+        "codes.train",
+        "codes.registry",
+        "codes.virtual_tokens",
+        "sft.directory",
+        "evaluation.directory",
+    } <= required["export"]
+
+
+def test_default_stage_implementation_paths_cover_project_imports() -> None:
+    missing_by_stage: dict[str, dict[str, list[str]]] = {}
+    for spec in default_stage_specs():
+        declared = set(spec.implementation_paths)
+        assert len(declared) == len(spec.implementation_paths), spec.name
+
+        for source_path in spec.implementation_paths:
+            if not source_path.endswith(".py"):
+                continue
+            missing = sorted(_project_imports(source_path) - declared)
+            if missing:
+                missing_by_stage.setdefault(spec.name, {})[source_path] = missing
+
+        skillret_scripts = {
+            path
+            for path in declared
+            if path.startswith("scripts/skillret/")
+            and path.endswith(".sh")
+            and path != "scripts/skillret/common.sh"
+        }
+        if skillret_scripts:
+            assert "scripts/skillret/common.sh" in declared, spec.name
+            assert "configs/generic.env" in declared, spec.name
+
+    assert missing_by_stage == {}
+
+
+def test_stage_hash_binds_declared_implementation_files(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    implementation = repo / "stage_impl.py"
+    implementation.write_text("PROMPT = 'first'\n", encoding="utf-8")
+
+    def handler(context):
+        output = context.output_dir / "result.json"
+        atomic_write_json(output, {"ok": True})
+        return StageResult(
+            artifacts=(ArtifactOutput("result", output, "test/v1"),)
+        )
+
+    spec = StageSpec(
+        "ingest",
+        "00_ingest",
+        (),
+        (),
+        handler,
+        "implementation fingerprint",
+        implementation_paths=("stage_impl.py",),
+    )
+    runner = create_pipeline_run(
+        _config(tmp_path / "config"),
+        stage_specs=(spec,),
+        repo_root=repo,
+    )
+    first_hash = runner._stage_config_hash(spec)
+    runner.run()
+
+    implementation.write_text("PROMPT = 'second'\n", encoding="utf-8")
+    assert runner._stage_config_hash(spec) != first_hash
+    assert runner._can_reuse(spec) is False
+
+
+def test_run_freezes_manual_alignment_as_a_hashed_input(tmp_path: Path) -> None:
+    curated = tmp_path / "manual.jsonl"
+    original = b'{"query":"original"}\n'
+    curated.write_bytes(original)
+    config = _config(
+        tmp_path,
+        overrides=(f"data_generation.manual_alignment_path={curated}",),
+    )
+    runner = create_pipeline_run(config, repo_root=REPO_ROOT)
+    curated.write_bytes(b'{"query":"mutated after Run creation"}\n')
+
+    runner.run(from_stage="ingest", to_stage="ingest")
+
+    frozen = runner.run_dir / "source" / "manual_alignment.input.jsonl"
+    assert frozen.read_bytes() == original
+    assert runner.registry.resolve("inputs.manual_alignment") == frozen
+    state = runner.state.read_stage("ingest")
+    assert state["input_artifacts"]["external.manual_alignment"] == sha256_file(
+        frozen
+    )
+
+    curated.unlink()
+    from scripts.train_candidates import _fork_command
+
+    child_dir = tmp_path / "forked-run"
+    assert (
+        _fork_command(
+            SimpleNamespace(
+                from_run=runner.run_dir,
+                output=child_dir,
+                overrides=(),
+            )
+        )
+        == 0
+    )
+    assert (
+        child_dir / "source" / "manual_alignment.input.jsonl"
+    ).read_bytes() == original
+
+
 def test_config_rejects_secret_persistence_and_unsupported_legacy_knobs(
     tmp_path: Path,
 ) -> None:
     base = _config(tmp_path).to_dict()
     base["runtime"]["environment"] = {"MY_API_TOKEN": "must-not-persist"}
     with pytest.raises(PipelineConfigError, match="may not contain secrets"):
+        load_pipeline_config(_write_config(tmp_path, base), environment={})
+
+    base = _config(tmp_path).to_dict()
+    base["runtime"]["environment"] = {"PROCESSED_DIR": "/tmp/escape"}
+    with pytest.raises(PipelineConfigError, match="pipeline-managed variable"):
         load_pipeline_config(_write_config(tmp_path, base), environment={})
 
     base = _config(tmp_path).to_dict()
@@ -142,16 +423,35 @@ def test_config_rejects_secret_persistence_and_unsupported_legacy_knobs(
         "validation": 0.1,
         "test": 0.1,
     }
-    with pytest.raises(PipelineConfigError, match="0.90/0.05/0.05"):
-        load_pipeline_config(_write_config(tmp_path, base), environment={})
+    custom_split = load_pipeline_config(
+        _write_config(tmp_path, base),
+        environment={},
+    )
+    assert custom_split.require("data_generation.split") == {
+        "train": 0.8,
+        "validation": 0.1,
+        "test": 0.1,
+    }
 
     base = _config(tmp_path).to_dict()
     base["router"]["finetune_mode"] = "lora"
-    with pytest.raises(PipelineConfigError, match="self-contained"):
+    lora = load_pipeline_config(_write_config(tmp_path, base), environment={})
+    assert lora.require("router.finetune_mode") == "lora"
+
+    for field in ("save_llm_requests", "save_llm_responses"):
+        base = _config(tmp_path).to_dict()
+        base["logging"][field] = False
+        with pytest.raises(PipelineConfigError, match="resumable generic pipeline"):
+            load_pipeline_config(_write_config(tmp_path, base), environment={})
+
+    base = _config(tmp_path).to_dict()
+    base["runtime"]["devices"] = "0,1"
+    base["runtime"]["num_devices"] = 1
+    with pytest.raises(PipelineConfigError, match="must equal"):
         load_pipeline_config(_write_config(tmp_path, base), environment={})
 
 
-@pytest.mark.parametrize("candidate_count", [2, 3, 10, 301, 1000])
+@pytest.mark.parametrize("candidate_count", [1, 2, 3, 10, 301, 1000])
 def test_auto_code_plan_satisfies_capacity_and_training_constraints(
     candidate_count: int,
 ) -> None:
@@ -515,6 +815,41 @@ def test_mock_pipeline_failure_resume_force_and_fork(tmp_path: Path) -> None:
     assert child.state.read_run()["parent_run_id"] == runner.state.read_run()["run_id"]
 
 
+def test_failed_attempt_never_replaces_formal_stage_output(tmp_path: Path) -> None:
+    fail = False
+
+    def handler(context):
+        output = context.output_dir / "result.json"
+        atomic_write_json(output, {"attempt": context.attempt})
+        if fail:
+            raise RuntimeError("fail after writing attempt output")
+        return StageResult((ArtifactOutput("result", output, "test/v1"),))
+
+    spec = StageSpec("ingest", "00_ingest", (), (), handler, "atomic output")
+    runner = create_pipeline_run(
+        _config(tmp_path),
+        stage_specs=(spec,),
+        repo_root=REPO_ROOT,
+    )
+    runner.stage("ingest")
+    formal = runner.state.stage_dir("ingest") / "output" / "result.json"
+    assert json.loads(formal.read_text(encoding="utf-8")) == {"attempt": 1}
+
+    fail = True
+    with pytest.raises(PipelineRunnerError, match="fail after writing"):
+        runner.run(force_stage=["ingest"])
+
+    assert json.loads(formal.read_text(encoding="utf-8")) == {"attempt": 1}
+    failed_attempt = (
+        runner.state.stage_dir("ingest")
+        / "attempts"
+        / "0002"
+        / "output"
+        / "result.json"
+    )
+    assert json.loads(failed_attempt.read_text(encoding="utf-8")) == {"attempt": 2}
+
+
 def test_runner_redacts_stage_errors_but_keeps_private_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -590,6 +925,9 @@ def test_cli_can_create_resume_and_report_an_ingest_only_run(tmp_path: Path) -> 
         ],
     )
     run_dir = tmp_path / "cli-run"
+    base_model = tmp_path / "cli-base-model"
+    base_model.mkdir()
+    (base_model / "config.json").write_text("{}", encoding="utf-8")
     command = [
         sys.executable,
         str(REPO_ROOT / "scripts" / "train_candidates.py"),
@@ -600,6 +938,8 @@ def test_cli_can_create_resume_and_report_an_ingest_only_run(tmp_path: Path) -> 
         str(DEFAULT_CONFIG),
         "--output",
         str(run_dir),
+        "--set",
+        f"router.base_model={base_model}",
         "--from",
         "ingest",
         "--to",

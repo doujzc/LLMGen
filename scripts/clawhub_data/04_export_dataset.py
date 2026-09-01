@@ -34,6 +34,9 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Maximum deterministic target permutations per accepted train query.",
     )
+    parser.add_argument("--train-fraction", type=float, default=0.90)
+    parser.add_argument("--validation-fraction", type=float, default=0.05)
+    parser.add_argument("--test-fraction", type=float, default=0.05)
     parser.add_argument(
         "--allow-missing-reviews",
         action="store_true",
@@ -62,6 +65,11 @@ def main() -> None:
         min_train_positives_per_skill=args.min_train_positives_per_skill,
         min_augmented_train_queries=args.min_augmented_train_queries,
         target_order_variants=args.target_order_variants,
+        split_ratios={
+            "train": args.train_fraction,
+            "validation": args.validation_fraction,
+            "test": args.test_fraction,
+        },
         alignment_queries_path=args.alignment_queries,
         alignment_reviews_path=args.alignment_reviews,
         allow_missing_reviews=args.allow_missing_reviews,
